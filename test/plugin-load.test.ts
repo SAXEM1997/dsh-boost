@@ -1,7 +1,10 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { readFile } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import * as plugin from '../src/index.ts'
+import { fakeHost } from './fakes/host.ts'
 import type { PluginContext } from '../src/types.ts'
 
 test('插件导出 cordis 需要的元数据', () => {
@@ -39,4 +42,21 @@ test('apply 用假 ctx 调用不抛错，并记录解析后的步数预算（T1 
     messages.some((msg) => msg.includes('stepsPerTurn=4')),
     `missing resolved step budget in logs: ${JSON.stringify(messages)}`,
   )
+})
+
+test('apply 从 ctx 装配四个挂载点（R4）', () => {
+  const host = fakeHost({
+    get: (name: string) =>
+      name === 'dshHomePath'
+        ? (...segments: string[]) => join(tmpdir(), 'dsh-boost-apply', ...segments)
+        : undefined,
+  })
+
+  assert.doesNotThrow(() => plugin.apply(host as unknown as PluginContext, {}))
+  assert.deepEqual(host.hooked().sort(), [
+    'llm/stream',
+    'systemPrompt',
+    'tools/execute',
+    'tools/post-execute',
+  ])
 })
