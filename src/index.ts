@@ -3,8 +3,9 @@
  *
  * The plugin is a plain function plugin: cordis reads `name` and `inject` from
  * the module and calls `apply(ctx, config)`. Only the production assembly lives
- * here — configuration resolution, the two stores the hooks share, and the
- * four mount points, all wired once per plugin instance.
+ * here — configuration resolution, the two stores the hooks and the control
+ * tool share, the four mount points, and the `boost` tool, all wired once per
+ * plugin instance.
  *
  * Wiring failures are contained: a host that lacks the services a mount point
  * lives on must load the plugin with a warning, not die loading it. The data
@@ -17,7 +18,9 @@ import { join } from 'node:path'
 import { resolveConfig } from './config.js'
 import { registerHooks } from './hooks/post-execute.js'
 import { ReceiptStore } from './receipts/store.js'
+import { supportsStepWhen } from './scope/resolve.js'
 import { ScopeStore } from './scope/store.js'
+import { boostTool } from './tools/boost.js'
 import type { PluginContext } from './types.js'
 
 export const name = 'dsh-boost'
@@ -54,6 +57,30 @@ function alreadyMounted(error: unknown): boolean {
   return ALREADY_REGISTERED.test(messageOf(error))
 }
 
+/**
+ * Register the `boost` tool family.
+ *
+ * After T19 the family is just this one tool; T23b's substitution path depends
+ * on the same `tools.resolve` probe. The tool itself is scope-exempt
+ * (`when: () => true`) because it is the only way a user can enable a workspace
+ * that is not enabled yet — gating it on the scope document would make
+ * `selected + []` impossible to leave. The protocol section is not exempt; T17
+ * already handles it.
+ *
+ * Without step-level `when` a conditional registration would silently become
+ * unconditional, so the whole family is skipped and the stable code is logged.
+ */
+function registerBoostTool(
+  ctx: PluginContext,
+  deps: { scope: ScopeStore; receipts: ReceiptStore },
+): void {
+  if (!supportsStepWhen(ctx.tools)) {
+    ctx.logger?.warn?.('ERR_HOST_NO_STEP_WHEN')
+    return
+  }
+  ctx.tools.register(boostTool(deps), { when: () => true })
+}
+
 export function apply(ctx: PluginContext, config: unknown): void {
   const cfg = resolveConfig(config)
   ctx.logger?.info?.(
@@ -67,11 +94,13 @@ export function apply(ctx: PluginContext, config: unknown): void {
 
   try {
     const root = boostRoot()
-    registerHooks(ctx, {
-      config: cfg,
-      scope: new ScopeStore(root),
-      receipts: new ReceiptStore(root),
-    })
+    const scope = new ScopeStore(root)
+    const receipts = new ReceiptStore(root)
+    registerHooks(ctx, { config: cfg, scope, receipts })
+    // After the hooks: `registerHooks` mounts the prompt section first and
+    // throws on a duplicate, so a second `apply` aborts above before it can
+    // register the tool twice.
+    registerBoostTool(ctx, { scope, receipts })
   } catch (error) {
     // A second apply fails on the duplicate prompt section first (registerHooks
     // mounts it first), which means the plugin is already wired — not that

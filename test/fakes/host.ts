@@ -72,15 +72,20 @@ export function fakeHost(overrides: Record<string, unknown> = {}): any {
   let lastSection: Section | undefined
   let last: AsyncIterable<StreamChunk> | undefined
 
+  const register = (def: unknown, opts?: { when?: Registered['when'] }): void => {
+    registrations.push({ def, when: opts?.when })
+  }
+  const resolve = (): readonly unknown[] => registrations.map(registration => registration.def)
+
   const host: any = {
     // --- tool registry: record the definition and its `when` predicate ---
-    register(def: unknown, opts?: { when?: Registered['when'] }): void {
-      registrations.push({ def, when: opts?.when })
-    },
-    resolve(): readonly unknown[] {
-      return registrations.map(registration => registration.def)
-    },
+    // `tools` mirrors these three at the service path `PluginContext` declares
+    // (`ctx.tools.register`); the top-level copies stay for the older tests that
+    // treat the fake itself as the service.
+    register,
+    resolve,
     definitions: registrations,
+    tools: { register, resolve, definitions: registrations },
 
     // --- host services ---
     llm: {

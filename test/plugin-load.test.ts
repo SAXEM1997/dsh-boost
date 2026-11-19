@@ -75,4 +75,39 @@ test('apply 重复调用不重复挂载（重复 section 视为已装配）', ()
   assert.equal(host.hookCount('llm/stream'), 1)
   assert.equal(host.hookCount('tools/execute'), 1)
   assert.equal(host.section('dsh-boost')?.name, 'dsh-boost')
+  assert.equal(host.tools.definitions.length, 1)
+})
+
+test('apply 在 tools.resolve 存在时注册 boost 工具，when 豁免 scope', async () => {
+  const host = fakeHost()
+  plugin.apply(host as unknown as PluginContext, {})
+  assert.equal(host.tools.definitions.length, 1)
+  const def = host.tools.definitions[0].def
+  assert.equal(def.name, 'boost')
+  assert.equal(typeof def.output.render, 'function')
+  assert.equal(typeof def.execute, 'function')
+
+  // The boost tool is the enable entry point: even an agent whose workspace is
+  // not in the scope document must still see it.
+  assert.equal(
+    await host.visible('boost', { session: { header: { id: 's1', cwd: '/not-in-scope' } } }),
+    true,
+  )
+})
+
+test('supportsStepWhen 为假时整族不注册并告警 ERR_HOST_NO_STEP_WHEN', () => {
+  const warnings: string[] = []
+  let registrations = 0
+  const host = fakeHost()
+  host.logger = { info: () => {}, warn: (msg: string) => warnings.push(msg) }
+  host.tools = {
+    register: () => {
+      registrations += 1
+    },
+    resolve: undefined,
+  }
+
+  assert.doesNotThrow(() => plugin.apply(host as unknown as PluginContext, {}))
+  assert.equal(registrations, 0)
+  assert.ok(warnings.includes('ERR_HOST_NO_STEP_WHEN'), JSON.stringify(warnings))
 })
