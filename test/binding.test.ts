@@ -82,6 +82,18 @@ test('CRLF 行尾的标识符照常匹配', () => {
   assert.equal(extractField('a: "1"\r\na: "1"\r\n', 'a'), undefined)
 })
 
+test('裸 CR 也是行分隔：两处赋值判歧义，单处仍可绑定', () => {
+  assert.equal(extractField('name: "safe"\rname: "evil"', 'name'), undefined)
+  assert.equal(extractField('a\rname: "x"', 'name'), 'x')
+  assert.deepEqual(
+    bindArgs(
+      { p: { $public: { after: 'A', field: 'name' } } },
+      new Map([['A', r('name: "safe"\rname: "evil"')]]),
+    ),
+    { ok: false, reason: 'ambiguous' },
+  )
+})
+
 test('$scalar 不 trim 中间内容：引号、换行、空格都失败', () => {
   assert.equal(extractField('"abc"', '$scalar'), undefined)
   assert.equal(extractField('a\nb', '$scalar'), undefined)

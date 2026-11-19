@@ -79,9 +79,16 @@ const SCALAR = /^[A-Za-z0-9_+@.:/-]+$/
 /** `$single`: the whole trimmed text is a one-element single-quoted array. */
 const SINGLE = /^\['([^']*)'\]$/
 
-/** The identifier form: `field: "value"` or `field="value"` on its own line. */
+/**
+ * The identifier form: `field: "value"` or `field="value"` on its own line.
+ *
+ * A line boundary is LF, CR or CRLF. Anchoring on `\n` alone would let a bare
+ * `\r` separate a second assignment that the uniqueness count never sees; the
+ * leading `\s*` consumes the paired character of a CRLF, so each occurrence is
+ * still found exactly once.
+ */
 function identifierPattern(field: string): RegExp {
-  return new RegExp('(?:^|\\n)\\s*' + escapeRegExp(field) + '\\s*[:=]\\s*"([^"\\n]+)"', 'g')
+  return new RegExp('(?:^|[\\r\\n])\\s*' + escapeRegExp(field) + '\\s*[:=]\\s*"([^"\\n]+)"', 'g')
 }
 
 /** Whole-text bare scalar; no spaces, quotes or newlines survive the match. */
