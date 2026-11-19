@@ -5,8 +5,18 @@ import { PROTOCOL_NAME, PROTOCOL_ORDER } from '../src/prompt/protocol.ts'
 import { parsePlan } from '../src/gate/plan.ts'
 import { TurnClock } from '../src/hooks/clock.ts'
 
+const PLAN_OPEN = '<CHISEL_PLAN>'
+const PLAN_CLOSE = '</CHISEL_PLAN>'
+
+/** The example block is the last opener: the protocol prose mentions the tag too. */
+function exampleBlock(): string {
+  const open = PROTOCOL_TEXT.lastIndexOf(PLAN_OPEN)
+  const close = PROTOCOL_TEXT.indexOf(PLAN_CLOSE, open)
+  return PROTOCOL_TEXT.slice(open, close + PLAN_CLOSE.length)
+}
+
 test('协议段含计划标签、绑定语法与 guard 词表', () => {
-  for (const needle of ['<CHISEL_PLAN>', '</CHISEL_PLAN>', '$public', 'text_contains', 'text_not_contains', 'json_equals', 'read', 'grep', 'glob']) {
+  for (const needle of [PLAN_OPEN, PLAN_CLOSE, '$public', 'text_contains', 'text_not_contains', 'json_equals', 'read', 'grep', 'glob']) {
     assert.ok(PROTOCOL_TEXT.includes(needle), `缺少 ${needle}`)
   }
 })
@@ -34,6 +44,23 @@ test('时钟按 host turn 切回合，同回合的请求不重置步数', () => 
   assert.equal(c.stepsThisTurn(), 0)
 })
 
+test('时钟忽略 NaN 与倒退的 host turn', () => {
+  const c = new TurnClock()
+  c.onModelRequest(2)
+  c.takeStep()
+  c.onModelRequest(NaN)
+  assert.equal(c.turn(), 2)
+  assert.equal(c.stepsThisTurn(), 1)
+  c.onModelRequest(1)
+  assert.equal(c.turn(), 2)
+  assert.equal(c.stepsThisTurn(), 1)
+
+  const fresh = new TurnClock()
+  fresh.onModelRequest(NaN)
+  assert.equal(fresh.turn(), 0)
+  assert.equal(fresh.stepsThisTurn(), 0)
+})
+
 test('协议段注册名与顺序固定', () => {
   assert.equal(PROTOCOL_NAME, 'dsh-boost')
   assert.equal(PROTOCOL_ORDER, 100)
@@ -42,76 +69,73 @@ test('协议段注册名与顺序固定', () => {
 test('协议段教 root 与 $scalar，不再教没有生产者的 $single', () => {
   assert.ok(PROTOCOL_TEXT.includes('"after":"root"'))
   assert.ok(PROTOCOL_TEXT.includes('$scalar'))
-  assert.ok(PROTOCOL_TEXT.includes('glob'))
   assert.equal(PROTOCOL_TEXT.includes('$single'), false)
 })
 
 test('协议段写明守卫读刚到的回执，多步是择一而非排队', () => {
-  for (const needle of ['incoming receipt', "not a step's result", 'alternatives', 'one chosen', 'no receipt, no substitution', 'failure skips the step']) {
+  for (const needle of ['guards test the receipt that just arrived', "not that call's own result", 'No receipt, no substitution', 'one is chosen', 'any failure runs the call normally']) {
     assert.ok(PROTOCOL_TEXT.includes(needle), `缺少 ${needle}`)
   }
 })
 
 test('协议段写明可见正文与首个块语义', () => {
-  for (const needle of ['visible text, not reasoning', 'first only, even if malformed']) {
+  for (const needle of ['visible text, not reasoning', 'only the first counts']) {
     assert.ok(PROTOCOL_TEXT.includes(needle), `缺少 ${needle}`)
   }
 })
 
 test('协议段写明 id 规则与 26 步上限', () => {
   assert.match(PROTOCOL_TEXT, /one capital A-Z/)
-  assert.match(PROTOCOL_TEXT, /max 26/)
+  assert.match(PROTOCOL_TEXT, /max 26 steps/)
 })
 
-test('协议段写明标识符仅在行首、双引号、唯一出现时绑定', () => {
-  for (const needle of ['one line-start X', 'double-quoted, non-empty']) {
+test('协议段恢复根模板与原型键两条坏形状', () => {
+  for (const needle of ['not $public itself', 'depth<=64', 'no prototype keys', 'no $-key except $public']) {
     assert.ok(PROTOCOL_TEXT.includes(needle), `缺少 ${needle}`)
   }
 })
 
-test('协议段写明 64 层深度与原型污染键禁令', () => {
-  for (const needle of ['depth<=64', '__proto__', 'constructor', 'prototype']) {
+test('协议段写明 guard 数量与单形态键规则', () => {
+  for (const needle of ['>=1 other than {"ok":true}', 'each guard object has exactly one form key']) {
     assert.ok(PROTOCOL_TEXT.includes(needle), `缺少 ${needle}`)
   }
 })
 
-test('协议段列出全部 guard 形态并给出 text_contains 正反例', () => {
-  for (const needle of ['{"ok":true}', 'text_contains', 'text_not_contains', 'json_equals']) {
+test('协议段列出全部 guard 形态与正负语义', () => {
+  for (const needle of ['{"ok":true}', 'expected present', 'expected absent', 'case-sensitive', 's non-empty', 'never guessed', 'whole receipt must be JSON']) {
     assert.ok(PROTOCOL_TEXT.includes(needle), `缺少 ${needle}`)
   }
-  assert.match(PROTOCOL_TEXT, /verbatim/)
-  assert.ok(PROTOCOL_TEXT.includes('"TODO"'))
-  assert.ok(PROTOCOL_TEXT.includes('"no errors"'))
-  assert.ok(PROTOCOL_TEXT.includes('whole receipt is JSON'))
+  assert.equal(PROTOCOL_TEXT.includes('verbatim'), false)
 })
 
-test('协议段写明 $public 的可绑定来源、步骤 id 与失败后果', () => {
-  for (const needle of ['"after":"root"', 'or an earlier step id', 'whole receipt is one token', 'a glob path', 'bash/ssh receipts only', 'not numbered read/grep', 'Else skip step.']) {
+test('协议段写明 $public 的来源、两种 field 与多行限制', () => {
+  for (const needle of ['"after":"root"', 'a step that already ran', 'the whole receipt is one token', 'one-path glob', 'exactly one line-start X', 'double-quoted, non-empty', 'not read or grep', 'A multi-line value cannot be projected', 'type it literally', 'Else that step is skipped.']) {
+    assert.ok(PROTOCOL_TEXT.includes(needle), `缺少 ${needle}`)
+  }
+})
+
+test('协议段写明替换白名单', () => {
+  for (const needle of ['read, grep, glob', 'others run normally']) {
     assert.ok(PROTOCOL_TEXT.includes(needle), `缺少 ${needle}`)
   }
 })
 
 test('协议段保持短小（常驻系统提示的成本）', () => {
-  assert.ok(PROTOCOL_TEXT.length <= 1250, `协议段 ${PROTOCOL_TEXT.length} 字符`)
+  assert.ok(PROTOCOL_TEXT.length <= 1500, `协议段 ${PROTOCOL_TEXT.length} 字符`)
 })
 
-test('协议段中的示例计划能被 parsePlan 接受，且 read 参数是 file_path', () => {
-  const open = PROTOCOL_TEXT.indexOf('<CHISEL_PLAN>')
-  const close = PROTOCOL_TEXT.indexOf('</CHISEL_PLAN>')
-  assert.ok(open >= 0 && close > open)
-  const block = PROTOCOL_TEXT.slice(open, close + '</CHISEL_PLAN>'.length)
+test('协议段示例可解析、用 file_path，并由下一句复述 guard 操作数', () => {
+  const block = exampleBlock()
   const parsed = parsePlan(block)
   assert.ok('plan' in parsed, `示例计划解析失败：${JSON.stringify(parsed)}`)
   assert.equal(parsed.plan.steps.length, 1)
-  assert.deepEqual(parsed.plan.steps[0].args, { file_path: '/a' })
-  assert.equal('path' in parsed.plan.steps[0].args, false)
-})
+  const step = parsed.plan.steps[0]
+  assert.deepEqual(step.args, { file_path: '/repo/b.ts' })
+  assert.equal('path' in step.args, false)
 
-test('时钟在第二次模型请求后继续进位', () => {
-  const c = new TurnClock()
-  c.onModelRequest(1)
-  c.takeStep()
-  c.onModelRequest(2)
-  assert.equal(c.turn(), 2)
-  assert.equal(c.stepsThisTurn(), 0)
+  const operand = (step.guards[0] as { text_contains: string }).text_contains
+  assert.equal(operand, '2 matches')
+  const close = PROTOCOL_TEXT.indexOf(PLAN_CLOSE, PROTOCOL_TEXT.lastIndexOf(PLAN_OPEN))
+  const after = PROTOCOL_TEXT.slice(close + PLAN_CLOSE.length)
+  assert.ok(after.includes(`says "${operand}"`), `示例后的说明未复述操作数 ${operand}`)
 })

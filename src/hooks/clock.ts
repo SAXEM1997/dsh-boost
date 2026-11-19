@@ -18,7 +18,9 @@
  *
  * One instance covers one session: two concurrent sessions sharing an instance
  * would mix their turn numbers and step counts. Per-session keying belongs to
- * the caller (T23c wires it); this class does not guess a key.
+ * the caller (T23c wires it); this class does not guess a key. The turn index
+ * is also clamped monotonic, so a reused instance can never move `turn()`
+ * backwards.
  *
  * @module dsh-boost/hooks/clock
  */
@@ -37,9 +39,14 @@ export class TurnClock {
    * A new turn resets the step count; another request in the same turn leaves
    * it alone. The host number is authoritative — it is copied, never derived
    * from a request count here.
+   *
+   * Non-finite numbers are ignored: `NaN !== NaN`, so accepting one would set
+   * the turn to `NaN` and reset the step count on every later request, which
+   * is exactly the per-request reset this clock exists to prevent. Backwards
+   * turns are ignored too, so a reused instance cannot make `turn()` decrease.
    */
   onModelRequest(hostTurn: number): void {
-    if (hostTurn === this.turnCount) return
+    if (!Number.isFinite(hostTurn) || hostTurn <= this.turnCount) return
     this.turnCount = hostTurn
     this.steps = 0
   }
