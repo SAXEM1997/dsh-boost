@@ -14,9 +14,15 @@
  * the guard (appendix §7).
  *
  * `callIdFor` is the only producer of a call id: sixteen hex characters of
- * `sha256(sessionId + '/' + turn + '/' + candidateId)`. It is pure and stable
- * across processes, so a receipt written in one process names the same call in
- * the next — and two candidates in one turn can never share an id.
+ * `sha256(JSON.stringify([sessionId, String(turn), String(step), candidateId]))`.
+ * The JSON array is deliberate: a `'/'` join lets one component impersonate a
+ * separator (`('s', '1/2', 0, 'c')` and `('s', '1', 0, '2/c')` would hash the
+ * same), and a flat tuple cannot carry `step` without that same ambiguity.
+ * Step is part of the identity because the host persists every assistant
+ * `tool_use` block with its id: the same candidate committed at two steps of
+ * one turn must not reuse one id, or the provider rejects the duplicated id.
+ * The id is pure and stable across processes, so a receipt written in one
+ * process names the same call in the next.
  *
  * Everything here is a plain `Map` and a hash: no persistence, timers, host
  * calls, or I/O.
@@ -30,9 +36,13 @@ import { createHash } from 'node:crypto'
  *
  * `args` is the already-validated argument tree the tool must receive;
  * `createdAt` is evidence for a receipt and is never read by this module or by
- * {@link synthesizeTurn}. `turn` accepts both forms because the host carries a
- * numeric turn index while receipts and `callIdFor` keys are often strings;
- * concatenation in `callIdFor` normalises both to the same text.
+ * {@link synthesizeTurn}. `turn` and `step` accept number or string because the
+ * host carries numeric indexes while receipts often use strings; the JSON array
+ * in `callIdFor` normalises both forms of the same value to one identity.
+ *
+ * Treat an entry as immutable once it is queued. The queue hands out the stored
+ * object by reference, and mutating `args` after the decision would make the
+ * admission receipt describe arguments different from the ones dispatched.
  */
 export interface PendingEntry {
   /** Id shared by the synthesized tool call and the arriving dispatch. */
@@ -45,6 +55,8 @@ export interface PendingEntry {
   args: Record<string, unknown>
   /** Host turn the decision belongs to (number or already-stringified form). */
   turn: number | string
+  /** Host step within `turn` (number or already-stringified form); part of the call id. */
+  step: number | string
   /** Wall-clock millis at decision time, for receipts only. */
   createdAt: number
 }
@@ -57,6 +69,18 @@ export interface PendingEntry {
  * keeping it would make the tamper check compare against a stale id. `take`
  * removes and returns; `peek` only reads. Clearing an absent session is a
  * no-op, so callers do not need to know whether a decision was parked.
+ *
+ * **Reference semantics.** `set` stores the caller's object and `peek`/`take`
+ * return that same object, never a copy. Own it once queued: T23b builds the
+ * entry from the admitted candidate and must not mutate `args` afterwards, or
+ * the admission receipt will describe a call different from the one that runs.
+ *
+ * **Lifetime.** Entries leave only through `take` or `clear`; there is no
+ * expiry timer and no session hook here. A session that aborts between
+ * `tools/post-execute` and the next `llm/stream` therefore parks its entry for
+ * the process lifetime, so the owning hook must `clear` at session end. Failing
+ * to clear only costs memory, never a wrong call — a stale entry is compared by
+ * `callId` and rejected — but the parked `args` are still a leak.
  */
 export class PendingQueue {
   private readonly bySession = new Map<string, PendingEntry>()
@@ -91,19 +115,39 @@ export class PendingQueue {
 }
 
 /**
- * The deterministic id for one candidate in one session and turn.
+ * The deterministic id for one candidate at one step of one turn in one session.
  *
  * Exactly the first 16 hex characters of
- * `sha256(sessionId + '/' + turn + '/' + candidateId)`. Sixteen hex characters
- * is 64 bits, far beyond any collision a session can produce, while keeping the
- * id short enough to read in a receipt.
+ * `sha256(JSON.stringify([sessionId, String(turn), String(step), candidateId]))`.
+ * Sixteen hex characters is 64 bits, far beyond any collision a session can
+ * produce, while keeping the id short enough to read in a receipt.
+ *
+ * **Encoding.** The four identity components are hashed as a JSON array, not
+ * joined with `'/'`. With a join, `('s', '1/2', 0, 'c')` and
+ * `('s', '1', 0, '2/c')` would hash identically: a `/` inside a component
+ * impersonates the separator.
+ * JSON quotes each string and delimits the elements, so no component can spill
+ * into another. `turn` and `step` are stringified first, so the host's numeric
+ * index and a receipt's string form of the same value name one id — the
+ * original `number | string` normalisation is preserved.
+ *
+ * The array also carries `step`, which the old tuple omitted: the same
+ * candidate committed twice in one turn must receive different ids, or the host
+ * persists two assistant `tool_use` blocks with one id and Anthropic-style
+ * providers reject the request.
  *
  * Stable across processes because the input is fully spelled out and the hash
- * is SHA-256; idempotent for the same inputs; different for a different turn,
- * candidate, or session. `turn` is concatenated with `+`, so `3` and `'3'`
- * name the same id — the host and the receipt then agree whichever form they
- * hold.
+ * is SHA-256; idempotent for the same inputs; different for a different
+ * session, turn, step, or candidate.
  */
-export function callIdFor(sessionId: string, turn: string | number, candidateId: string): string {
-  return createHash('sha256').update(sessionId + '/' + turn + '/' + candidateId).digest('hex').slice(0, 16)
+export function callIdFor(
+  sessionId: string,
+  turn: string | number,
+  step: string | number,
+  candidateId: string,
+): string {
+  return createHash('sha256')
+    .update(JSON.stringify([sessionId, String(turn), String(step), candidateId]))
+    .digest('hex')
+    .slice(0, 16)
 }

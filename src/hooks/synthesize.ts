@@ -9,13 +9,24 @@
  * 2. a `tool-call` block, then
  * 3. a terminal `finish` with reason `tool-calls`.
  *
- * The reasoning block is not decoration. DeepSeek's thinking mode requires the
- * assistant `tool_use` message to carry a sibling `thinking` block on the next
- * request; a synthesized turn with only a `tool-call` block makes that request
- * fail with a 400 (`content[].thinking … must be passed back`, appendix §7).
+ * The reasoning block is emitted first so the assistant turn carries the
+ * sibling a reasoning-preserving adapter needs. DeepSeek's thinking mode
+ * requires the assistant `tool_use` message to carry a sibling `thinking` block
+ * (`content[].thinking … must be passed back`, appendix §7), and a synthesized
+ * turn with only a `tool-call` block cannot satisfy that on such a route.
+ *
+ * It does **not** reach the wire on this host build's current
+ * `openai-completions` route. A settled assistant message with no `replayState`
+ * is routed to `foreignAssistant` and stamped `api:'dsh-foreign'`
+ * (`dsh-llm-pi-ai/lib/index.js:180,250-252`), and pi-ai's `transformMessages`
+ * drops every thinking block of a non-same-model message
+ * (`transform-messages.js:87-96`). Emitting the block is still the right shape
+ * and costs nothing — a route that preserves reasoning needs it — but whether a
+ * route that enforces the sibling rule is satisfied end to end is a Task 24
+ * question, not a claim this module makes.
+ *
  * The host's `ReasoningBlock` has exactly `type` and `text` — there is no
- * signature field to fill in — so the block is emitted unsigned and the next
- * request carries it as the required sibling.
+ * signature field to fill in — so the block is emitted unsigned.
  *
  * No `usage` chunk is emitted: nothing was measured, and a fabricated usage
  * would corrupt the token ledger. The chunk shape follows
@@ -40,7 +51,7 @@ const UNSERIALISABLE_ARGS_CODE = 'BOOST_ARGS_UNSERIALISABLE'
  * The reasoning sibling's text.
  *
  * A short deterministic sentence is enough: the block's existence and position
- * are what the next request needs, not its content. It names the tool and the
+ * are what the sibling rule needs, not its content. It names the tool and the
  * candidate so a session log shows why the turn appeared, and it never reads
  * `createdAt` or any other clock value.
  */
@@ -81,11 +92,11 @@ function toolCallBlock(e: PendingEntry, argsJson: string): ToolCallBlock {
  * finish {reason:{kind:'tool-calls'}}
  * ```
  *
- * **Invalid call id.** A `PendingEntry` with an empty `callId` violates this
- * module's contract and cannot be repaired here: inventing one would make the
- * execute-side tamper check compare a different id and reject every dispatch
- * silently. The generator throws `RangeError` before its first yield, so no
- * partial turn reaches the host.
+ * **Invalid call id.** A `PendingEntry` with a blank `callId` (empty or
+ * whitespace-only) violates this module's contract and cannot be repaired here:
+ * inventing one would make the execute-side tamper check compare a different id
+ * and reject every dispatch silently. The generator throws `RangeError` before
+ * its first yield, so no partial turn reaches the host.
  *
  * **Unserialisable arguments.** `args` is plan-validated JSON in production,
  * but this function is exported and must be total. When `JSON.stringify`
@@ -97,8 +108,8 @@ function toolCallBlock(e: PendingEntry, argsJson: string): ToolCallBlock {
  * a partially-consumed stream must not blow up the host loop.
  */
 export async function* synthesizeTurn(e: PendingEntry): AsyncIterable<StreamChunk> {
-  if (typeof e.callId !== 'string' || e.callId.length === 0) {
-    throw new RangeError('PendingEntry.callId must be a non-empty string')
+  if (typeof e.callId !== 'string' || e.callId.trim().length === 0) {
+    throw new RangeError('PendingEntry.callId must be a non-blank string')
   }
 
   const reasoning = reasoningText(e)

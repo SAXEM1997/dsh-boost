@@ -7,11 +7,12 @@ import { synthesizeTurn } from '../src/hooks/synthesize.ts'
 
 function entry(overrides: Partial<PendingEntry> = {}): PendingEntry {
   return {
-    callId: callIdFor('session-1', 3, 'cand-7'),
+    callId: callIdFor('session-1', 3, 0, 'cand-7'),
     candidateId: 'cand-7',
     name: 'read',
     args: { path: '/tmp/example.txt', limit: 10 },
     turn: 3,
+    step: 0,
     createdAt: 1_700_000_000_000,
     ...overrides,
   }
@@ -42,10 +43,11 @@ test('队列按 sessionId 隔离：peek 另一会话返回 undefined', () => {
 })
 
 test('callIdFor 对同候选不同 turn 产生不同 id，同参数幂等', () => {
-  const id = callIdFor('session-1', 3, 'cand-7')
-  assert.equal(callIdFor('session-1', 3, 'cand-7'), id)
-  assert.notEqual(callIdFor('session-1', 4, 'cand-7'), id)
-  assert.notEqual(callIdFor('session-1', 3, 'cand-8'), id)
+  const id = callIdFor('session-1', 3, 0, 'cand-7')
+  assert.equal(callIdFor('session-1', 3, 0, 'cand-7'), id)
+  assert.notEqual(callIdFor('session-1', 4, 0, 'cand-7'), id)
+  assert.notEqual(callIdFor('session-1', 3, 1, 'cand-7'), id)
+  assert.notEqual(callIdFor('session-1', 3, 0, 'cand-8'), id)
 })
 
 test('合成回合的 chunk 类型序列恰为七块', async () => {
@@ -156,20 +158,30 @@ test('size 按会话计数，跨会话互不影响', () => {
 // ---------------------------------------------------------------------------
 
 test('callIdFor 固定输入的字面量哈希（跨进程稳定）', () => {
-  const id = callIdFor('sess-1', 3, 'cand-7')
+  const id = callIdFor('sess-1', 3, 0, 'cand-7')
   assert.match(id, /^[0-9a-f]{16}$/)
-  // sha256('sess-1/3/cand-7').slice(0, 16)，由独立进程复算后钉死。
-  assert.equal(id, '4b1a7bc52a16f2e1')
+  // sha256(JSON.stringify(['sess-1','3','0','cand-7'])).slice(0, 16)，独立进程复算后钉死。
+  assert.equal(id, '83ac747f564401e6')
 })
 
-test('callIdFor 对 turn 0 与字符串 turn 都返回 16 位十六进制', () => {
-  assert.match(callIdFor('session-1', 0, 'cand-7'), /^[0-9a-f]{16}$/)
-  assert.match(callIdFor('session-1', '3', 'cand-7'), /^[0-9a-f]{16}$/)
+test('callIdFor 对 turn 0、字符串 turn、字符串 step 都返回 16 位十六进制', () => {
+  assert.match(callIdFor('session-1', 0, 0, 'cand-7'), /^[0-9a-f]{16}$/)
+  assert.match(callIdFor('session-1', '3', '1', 'cand-7'), /^[0-9a-f]{16}$/)
 })
 
-test('callIdFor 对同值数字与字符串 turn 一致（拼接按字符串进行）', () => {
-  assert.equal(callIdFor('session-1', 3, 'cand-7'), callIdFor('session-1', '3', 'cand-7'))
-  assert.equal(callIdFor('session-1', 0, 'cand-7'), callIdFor('session-1', '0', 'cand-7'))
+test('callIdFor 对同值数字与字符串 turn/step 一致（先字符串化）', () => {
+  assert.equal(callIdFor('session-1', 3, 0, 'cand-7'), callIdFor('session-1', '3', '0', 'cand-7'))
+  assert.equal(callIdFor('session-1', 0, 1, 'cand-7'), callIdFor('session-1', '0', '1', 'cand-7'))
+})
+
+test('callIdFor 把 step 纳入身份：同 turn 同候选不同 step 不同 id', () => {
+  assert.notEqual(callIdFor('session-1', 3, 0, 'cand-7'), callIdFor('session-1', 3, 1, 'cand-7'))
+})
+
+test('callIdFor 用 JSON 数组编码：组件里的 / 无法冒充分隔符', () => {
+  // 旧的三段拼接在这里会碰撞（probe: 424b4dcb75e380dc）。
+  assert.notEqual(callIdFor('s', '1/2', 0, 'c'), callIdFor('s', '1', 0, '2/c'))
+  assert.notEqual(callIdFor('s', '1', '2/3', 'c'), callIdFor('s', '1/2', 3, 'c'))
 })
 
 // ---------------------------------------------------------------------------
@@ -236,8 +248,21 @@ test('生成不修改 entry.args', async () => {
   assert.deepEqual(pending.args, original)
 })
 
+test('提前 return 后生成器结束：再 next() 仍为 done，不发工具块', async () => {
+  const iterator = synthesizeTurn(entry()) as AsyncGenerator<StreamChunk>
+  assert.equal((await iterator.next()).value?.type, 'block-start')
+  assert.equal((await iterator.next()).value?.type, 'reasoning-delta')
+  assert.equal((await iterator.next()).value?.type, 'block-end')
+  assert.deepEqual(await iterator.return(undefined), { value: undefined, done: true })
+  assert.deepEqual(await iterator.next(), { value: undefined, done: true })
+})
+
 test('空 callId 被拒绝：生成器在首个 yield 前抛 RangeError', async () => {
-  await assert.rejects(collect(entry({ callId: '' })), /callId.*non-empty/)
+  await assert.rejects(collect(entry({ callId: '' })), /callId.*non-blank/)
+})
+
+test('空白 callId 也被拒绝：校验先 trim', async () => {
+  await assert.rejects(collect(entry({ callId: ' \t\n ' })), /callId.*non-blank/)
 })
 
 test('不可序列化 args（BigInt）不抛出，以 error finish 终止且不发 tool-call', async () => {
@@ -263,6 +288,53 @@ test('不可序列化 args（环）不抛出，以 error finish 终止', async (
   assert.equal(last.reason.kind, 'error')
   if (last.reason.kind !== 'error') throw new Error('finish reason is not error')
   assert.equal(last.reason.failure.code, 'BOOST_ARGS_UNSERIALISABLE')
+})
+
+test('args 为 undefined 时以 error finish 终止，不抛出', async () => {
+  const chunks = await collect(entry({ args: undefined as unknown as Record<string, unknown> }))
+  assert.equal(chunks.some(chunk => chunk.type === 'tool-call-delta'), false)
+  const last = chunks.at(-1)
+  assert.equal(last?.type, 'finish')
+  if (last?.type !== 'finish') throw new Error('last chunk is not finish')
+  assert.equal(last.reason.kind, 'error')
+  if (last.reason.kind !== 'error') throw new Error('finish reason is not error')
+  assert.equal(last.reason.failure.code, 'BOOST_ARGS_UNSERIALISABLE')
+})
+
+test('args 内 undefined 值的键被 JSON.stringify 丢弃（行为钉死）', async () => {
+  const pending = entry({ args: { path: '/tmp/x', extra: undefined } })
+  const chunks = await collect(pending)
+
+  const delta = chunks[4]
+  assert.equal(delta?.type, 'tool-call-delta')
+  if (delta?.type !== 'tool-call-delta') throw new Error('chunk 4 is not tool-call-delta')
+
+  const block = blockOf(chunks, 5)
+  if (block.type !== 'tool-call') throw new Error('chunk 5 does not carry a tool-call block')
+  assert.equal(block.arguments, '{"path":"/tmp/x"}')
+  assert.equal(block.arguments, delta.argumentsDelta)
+  assert.deepEqual(JSON.parse(block.arguments), { path: '/tmp/x' })
+  // 运行时参数树与线上参数树不同；Tamper check 会拒绝这种条目（fail closed）。
+  assert.notDeepEqual(JSON.parse(block.arguments), pending.args)
+})
+
+test('args 内 toJSON 抛错时被捕获为 error finish，不抛出', async () => {
+  const args = {
+    payload: {
+      toJSON(): never {
+        throw new Error('boom')
+      },
+    },
+  }
+  const chunks = await collect(entry({ args }))
+  assert.equal(chunks.some(chunk => chunk.type === 'tool-call-delta'), false)
+  const last = chunks.at(-1)
+  assert.equal(last?.type, 'finish')
+  if (last?.type !== 'finish') throw new Error('last chunk is not finish')
+  assert.equal(last.reason.kind, 'error')
+  if (last.reason.kind !== 'error') throw new Error('finish reason is not error')
+  assert.equal(last.reason.failure.code, 'BOOST_ARGS_UNSERIALISABLE')
+  assert.match(last.reason.failure.message, /boom/)
 })
 
 // ---------------------------------------------------------------------------
