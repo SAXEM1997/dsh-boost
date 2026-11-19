@@ -125,3 +125,55 @@ test('evaluateAll 返回第一个失败的 guard 对象本身', () => {
   assert.equal(result.failed, first)
   assert.notEqual(result.failed, second)
 })
+
+/* ------------------------------------------------------------------------- *
+ * 审查加固：F1–F3 与补充行为
+ * ------------------------------------------------------------------------- */
+
+test('ok 只认字面量 true，非 true 或非布尔值 fail closed（F1）', () => {
+  assert.equal(evaluateGuard({ ok: false } as any, r('x')), 'fail')
+  assert.equal(evaluateGuard({ ok: 1 } as any, r('x')), 'fail')
+  assert.equal(evaluateGuard({ ok: 'no' } as any, r('x')), 'fail')
+  assert.equal(evaluateGuard({ ok: true }, r('x')), 'pass')
+})
+
+test('text_contains 空串不可恒真（F2）', () => {
+  assert.equal(evaluateGuard({ text_contains: '' }, r('')), 'fail')
+  assert.equal(evaluateGuard({ text_contains: '' }, r('x')), 'fail')
+  assert.equal(evaluateGuard({ text_contains: '' }, r('x', true)), 'fail')
+  // text_not_contains 的空串本来就恒假，保持不变
+  assert.equal(evaluateGuard({ text_not_contains: '' }, r('x')), 'fail')
+})
+
+test('非对象 guard 判 fail，不抛错（F3）', () => {
+  for (const guard of [null, undefined, 42, 'x', true]) {
+    assert.equal(evaluateGuard(guard as any, r('x')), 'fail', String(guard))
+  }
+  assert.doesNotThrow(() => evaluateAll([null as any], r('x')))
+  assert.deepEqual(evaluateAll([null as any], r('x')), { ok: false, failed: null })
+})
+
+test('空键对象用 / 取到；数字键在对象和数组上都按下标 0 取到', () => {
+  assert.equal(evaluateGuard({ json_equals: { pointer: '/', value: 1 } }, r('{"":1}')), 'pass')
+  assert.equal(evaluateGuard({ json_equals: { pointer: '/0', value: 1 } }, r('{"0":1}')), 'pass')
+  assert.equal(evaluateGuard({ json_equals: { pointer: '/0', value: 1 } }, r('[1]')), 'pass')
+})
+
+test('json_equals 不读 isError：错误回执仍按文本判定', () => {
+  assert.equal(evaluateGuard({ json_equals: { pointer: '/a', value: 1 } }, r('{"a":1}', true)), 'pass')
+})
+
+test('整段文档是数组时不可能等于标量', () => {
+  assert.equal(evaluateGuard({ json_equals: { pointer: '', value: 1 } }, r('[]')), 'fail')
+})
+
+test('10 000 层嵌套文档用迭代走查，匹配指针 pass', () => {
+  const depth = 10_000
+  const text = '['.repeat(depth) + '1' + ']'.repeat(depth)
+  const pointer = '/0'.repeat(depth)
+  assert.equal(evaluateGuard({ json_equals: { pointer, value: 1 } }, r(text)), 'pass')
+})
+
+test('BOM 前缀的 JSON 判 fail（JSON.parse 拒绝，不剥 BOM）', () => {
+  assert.equal(evaluateGuard({ json_equals: { pointer: '/a', value: 1 } }, r('\uFEFF{"a":1}')), 'fail')
+})

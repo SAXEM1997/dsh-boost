@@ -7,10 +7,15 @@
  * array element, a path that runs into a scalar, a value of the wrong type —
  * is `fail`, never `pass`, and no path throws.
  *
- * `ok` is the trivial form and reads only `isError`, never the text.
+ * `ok` reads `isError`, never the text, and only a literal `ok: true` passes.
  * `text_contains` / `text_not_contains` are byte-faithful, case-sensitive
  * `String#includes` checks on the canonical text: no trim, no normalisation,
  * no regex.
+ *
+ * The evaluators do not rely on `parsePlan` having rejected bad guards: within
+ * the forms, `ok` must be literally `true`, an empty `text_contains` operand
+ * is a `fail` rather than vacuously true (`text_not_contains: ''` is already
+ * vacuously false), and a non-object guard is a `fail` instead of a throw.
  *
  * `json_equals` parses the whole text as JSON and walks the pointer by hand.
  * A pointer is `''` (the whole document) or starts with `/`; anything else is
@@ -33,9 +38,9 @@
  * by design §5.2), so a guard matching none of the four forms fails closed.
  *
  * Within the gate's contract, guards come from `parsePlan` (exactly one form
- * key per guard) and receipts from `canonicalise`; this module does not
- * re-validate either. A receipt is never projected here — guards read the
- * canonical original.
+ * key per guard) and receipts from `canonicalise`; the defensive checks above
+ * are this module's floor, not a full re-validation of either input. A receipt
+ * is never projected here — guards read the canonical original.
  *
  * @module dsh-boost/gate/guard
  */
@@ -54,14 +59,22 @@ function verdict(holds: boolean): GuardResult {
   return holds ? 'pass' : 'fail'
 }
 
-/** `ok` reads `isError` and nothing else; a passing guard says nothing about text. */
-function evaluateOk(_g: { ok: true }, r: CanonicalReceipt): GuardResult {
-  return verdict(!r.isError)
+/**
+ * `ok` asserts the receipt is not an error. The value must be the literal
+ * `true`: a hand-built `{ ok: false }` (or `1`, or `'no'`) asserting an error
+ * must not be read as "success is fine".
+ */
+function evaluateOk(g: { ok: true }, r: CanonicalReceipt): GuardResult {
+  return verdict(g.ok === true && !r.isError)
 }
 
-/** Case-sensitive substring presence, on the canonical text exactly as received. */
+/**
+ * Case-sensitive substring presence, on the canonical text exactly as
+ * received. An empty operand would be true for every text and could smuggle a
+ * constant through `guard-trivial`, so it fails closed here too.
+ */
 function evaluateContains(g: { text_contains: string }, r: CanonicalReceipt): GuardResult {
-  return verdict(r.text.includes(g.text_contains))
+  return verdict(g.text_contains.length > 0 && r.text.includes(g.text_contains))
 }
 
 /** Case-sensitive substring absence; used to exclude error footers and stacks. */
@@ -163,8 +176,11 @@ function evaluateJsonEquals(
 /**
  * Evaluate one guard. Dispatch is by presence of the form key, so a guard
  * matching none of the four forms falls through to `fail` instead of passing.
+ * A non-object guard fails before dispatch: the `in` operator would throw, and
+ * throwing would abort the turn instead of falling back to the model.
  */
 export function evaluateGuard(g: Guard, r: CanonicalReceipt): GuardResult {
+  if (typeof g !== 'object' || g === null) return 'fail'
   if ('ok' in g) return evaluateOk(g, r)
   if ('text_contains' in g) return evaluateContains(g, r)
   if ('text_not_contains' in g) return evaluateNotContains(g, r)
