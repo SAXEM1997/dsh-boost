@@ -6,6 +6,8 @@
 
 **Architecture:** 一个 cordis 插件，挂 `tools/post-execute`（投影）、`tools/execute`（防篡改）、`llm/stream`（合成替换回合）与 `ctx.systemPrompt.section`（协议段）。纯函数层（截断、守卫、绑定、计划解析、准入）与宿主适配层（钩子、spill、scope 解析）分离，前者用 `node --test` 表驱动，后者用假宿主集成测试。
 
+**Task Map:** 共 26 个任务——T1–T22 是单元层（每个都能独立 RED→GREEN），T23–T26 是装配层与验收层（接线、端到端、降级、发布门）。
+
 **Tech Stack:** TypeScript 5.6 / ESM / Node ≥ 22.18 / `node --test` + `tsx` / cordis 插件 API（`@deepseek-ai/dsh-tools`、`dsh-llm`、`dsh-system-prompt`）。
 
 **Spec:** `docs/superpowers/specs/2026-11-18-dsh-token-efficiency-design.md`（下称"设计稿"，行号引用以该文件为准）
@@ -20,39 +22,57 @@
 - v1 替换白名单只有 `read` / `grep` / `glob`；投影覆盖 `read` / `grep` / `glob` / `bash` / `ssh`（§5.2-5）。
 - 计量单位：投影长度按 **Unicode code point**，spill 页脚按 **UTF-8 字节**，两者不许混写（§5.4-7）。
 - 默认值一律以 §5.3 的表为准，测试里逐字断言这些数字。
-- 提交信息用 `feat:` / `test:` / `chore:` 前缀；每个 task 一次提交。
+- 提交信息**一律英文**，用 `feat:` / `test:` / `chore:` 前缀；每个 task 一次提交。
+- 每个 task 稳定节奏：功能测试 GREEN → `REFACTOR`（无重构就写明「无需重构」）→ 全量 `npm test` → 提交；单文件 GREEN 不算完成。
 
 ## Review Focus
 
 1. **空回执**（`text === ''`）——投影必须原样放行，不得产出"showing first 0 and last 0"这种空窗口页脚。（T4）
 2. **纯 CJK / emoji 回执**——截断不得切开代理对，页脚字节数不等于字符数。（T4）
-3. **模板指向不存在的图节点**（`after: "C"` 但图上只有 A、B）——判不可解析并回退，不得静默取 `root`。（T13）
+3. **模板指向不存在的图节点**（`after: "C"` 但图上只有 A、B）——判不可解析并回退，不得静默取 `root`。（T12；图节点存在性由 T15 `decide` 的 `receipts` 集合保证。）
 4. **`scope.json` 被外部改成 version 1 或写坏**——只读降级到 `selected+[]`，不得覆盖原文件、不得抛错中断插件。（T8）
-5. **同一 turn 第 9 次替换**——必须命中 `steps-exhausted` 回主模型，而不是继续替换。（T19）
+5. **同一 turn 第 9 次替换**——必须命中 `steps-exhausted` 回主模型，而不是继续替换。（T23）
 
 ---
 
 ### Task 1: 插件骨架与加载
 
 **Files:**
-- Create: `package.json`, `tsconfig.json`, `cordis.patch.yml`, `LICENSE`（Apache-2.0 全文）, `NOTICE`（注明移植自 HarnessMM）, `README.en.md`, `src/index.ts`, `src/types.ts`, `test/plugin-load.test.ts`, `.gitignore`
+- Create: `package.json`, `tsconfig.json`, `cordis.patch.yml`, `LICENSE`（Apache-2.0 全文）, `NOTICE`（注明移植自 HarnessMM）, `README.md`（中文主）, `README.en.md`, `locale/zh.json`, `locale/en.json`, `scripts/.gitkeep`, `test/regression/.gitkeep`, `src/index.ts`, `src/types.ts`, `test/plugin-load.test.ts`, `.gitignore`
 
 **Interfaces:**
-- Produces: `export const name = 'dsh-boost'`；`export const inject = ['tools', 'llm', 'systemPrompt'] as const`；`export function apply(ctx: PluginContext): void`
+- Produces: `export const name = 'dsh-boost'`；`export const inject = ['tools', 'llm', 'systemPrompt'] as const`；`export function apply(ctx: PluginContext, config: unknown): void`
+- Produces: `src/types.ts` 的 `export interface PluginContext { logger: { info(msg: string): void; warn(msg: string): void }; on(event: string, handler: (...args: any[]) => unknown): void; tools: { register(def: unknown, opts?: { when?: (c: { agent?: unknown; signal?: unknown }) => boolean }): void }; llm: { stream(opts: unknown): AsyncIterable<{ text?: string }> }; systemPrompt: { section(s: { name: string; order: number; text: string; interpolate: false }): void }; get<T = unknown>(name: string): T | undefined }`
 - Produces: `src/types.ts` 的 `export type ToolFamily = 'read' | 'grep' | 'glob' | 'bash' | 'ssh'`、`export interface BoostConfig { projection: Record<ToolFamily, ProjectionParams>; admission: { thresholdTokens: number }; selector: { maxTokens: number }; stepsPerTurn: number; horizonSteps: number; historyTurns: number }`、`export interface ProjectionParams { triggerChars: number; headChars: number; tailChars: number }`
+- Produces: `src/types.ts` 的 `declare module '@deepseek-ai/dsh-llm/types' { interface LlmRequestPurposeMap { 'boost-selector': true } }`（T14 的 `purpose` 靠它通过编译）
 
 - [ ] **Step 1: 写失败的加载测试**
 
 ```ts
-// test/plugin-load.test.ts
 import test from 'node:test'
 import assert from 'node:assert/strict'
+import { readFile } from 'node:fs/promises'
 import * as plugin from '../src/index.ts'
 
 test('插件导出 cordis 需要的元数据', () => {
   assert.equal(plugin.name, 'dsh-boost')
   assert.deepEqual([...plugin.inject], ['tools', 'llm', 'systemPrompt'])
   assert.equal(typeof plugin.apply, 'function')
+})
+
+test('apply 接受 ctx 与 config 两个参数', () => {
+  assert.equal(plugin.apply.length, 2)
+})
+
+test('patch 行的 id/name 与 plugin.name、包名三者一致（R50）', async () => {
+  const pkg = JSON.parse(await readFile(new URL('../package.json', import.meta.url), 'utf8'))
+  const yml = await readFile(new URL('../cordis.patch.yml', import.meta.url), 'utf8')
+  const rowId = yml.match(/^\s*-\s*id:\s*['"]?([^'"\s]+?)['"]?\s*$/m)?.[1]
+  const rowName = yml.match(/^\s*name:\s*['"]?([^'"\s]+?)['"]?\s*$/m)?.[1]
+  assert.equal(plugin.name, 'dsh-boost')
+  assert.equal(pkg.name, plugin.name)
+  assert.equal(rowId, plugin.name)
+  assert.equal(rowName, plugin.name)
 })
 ```
 
@@ -63,21 +83,44 @@ Expected: FAIL，`Cannot find module '../src/index.ts'`
 
 - [ ] **Step 3: 建骨架**
 
-`package.json` 逐字采用设计稿 §11 的块（含 `version: 0.1.0`、`exports`、`peerDependencies` + `peerDependenciesMeta.optional`、`engines.dsh`、`dsh.bundle.patch`），只补 `"scripts": { "build": "tsc -p tsconfig.json", "test": "node --import tsx --test test/**/*.test.ts" }` 与 `devDependencies: { typescript, tsx }`。
-`tsconfig.json`：`target: ES2023`、`module: NodeNext`、`strict: true`、`outDir: dist`、`rootDir: src`、`include: ["src"]`。
+`package.json` 逐字采用设计稿 §11 的块（含 `version: 0.1.0`、`exports`、`peerDependencies` + `peerDependenciesMeta.optional`、`engines.dsh`、`dsh.bundle.patch`），只补 `"scripts": { "build": "tsc -p tsconfig.json", "test": "node --import tsx --test \"test/**/*.test.ts\"" }` 与 `devDependencies: { typescript, tsx, @types/node }`。**glob 必须加引号**：不加引号时 sh 只展开单层，根目录测试会被漏跑。
+`tsconfig.json`：`target: ES2023`、`module: NodeNext`、`strict: true`、`declaration: true`、`types: ["node"]`、`outDir: dist`、`rootDir: src`、`include: ["src"]`。`declaration` 缺失时 `prepublishOnly` 的 `test -f dist/index.d.ts` 必挂；`types: ["node"]` 让 `node:fs` / `Buffer` 通过编译。
 `src/index.ts` 只导出上面三个符号；`apply` 暂为空函数体加 `ctx.logger?.info?.('dsh-boost loaded')`。
-`cordis.patch.yml` 按 §5.3 的完整 config 面写，`maxInlineTokens` 不下发（那是宿主 spill 的键，不是本插件的）。
+`cordis.patch.yml` 按 §5.3 的完整 config 面写，`maxInlineTokens` 不下发（那是宿主 spill 的键，不是本插件的）；行必须是 `- id: dsh-boost` + `name: 'dsh-boost'`（缺一个宿主就静默跳过，§11）。`README.md` 用中文写主文档、`README.en.md` 是英文对应版（§11.2）；`locale/zh.json` / `locale/en.json` 放配置项标题；`scripts/` 与 `test/regression/` 先放 `.gitkeep` 占位，由 T26 落内容。
 
 - [ ] **Step 4: 运行确认通过**
 
 Run: `node --import tsx --test test/plugin-load.test.ts`
-Expected: PASS（1 test）
+Expected: PASS（3 tests）
 
-- [ ] **Step 5: 提交**
+- [ ] **Step 5: 构建产物校验**
+
+Run: `npm run build && test -f dist/index.d.ts && test -f dist/index.js`
+Expected: exit 0（`declaration: true` 生效；`dist/` 被 `.gitignore` 忽略）
+
+- [ ] **Step 6: 布置 remote**
+
+Run:
+```bash
+git remote add origin https://gitlab.ai.isv.iridesc.cn:23000/zyx/dsh-boost.git
+git remote -v
+```
+Expected: `origin` 指向内网镜像。开发期先推内网，GitHub 作为第二个 remote 后加（§11；不要先把 GitHub 设成 origin）。
+
+- [ ] **Step 7: 重构**
+
+无需重构（骨架任务，只有常量与测试）。若"读仓库文件"出现第二次，抽成 `readRepoFile(name)`。
+
+- [ ] **Step 8: 全量测试**
+
+Run: `npm test`
+Expected: 全部 PASS（3 tests）
+
+- [ ] **Step 9: 提交**
 
 ```bash
-git add package.json tsconfig.json cordis.patch.yml LICENSE NOTICE README.en.md src/ test/ .gitignore
-git commit -m "feat: 插件骨架与加载测试"
+git add package.json tsconfig.json cordis.patch.yml LICENSE NOTICE README.md README.en.md locale/ scripts/ test/ src/ .gitignore
+git commit -m "feat: scaffold plugin and load test"
 ```
 
 ---
@@ -89,7 +132,7 @@ git commit -m "feat: 插件骨架与加载测试"
 - Modify: `src/index.ts`（在 `apply` 里调用 `resolveConfig`）
 
 **Interfaces:**
-- Consumes: `BoostConfig`、`ProjectionParams`（Task 1）
+- Consumes: `BoostConfig`、`ProjectionParams`、`PluginContext`（Task 1）
 - Produces: `export const DEFAULT_CONFIG: BoostConfig`；`export function resolveConfig(raw: unknown): BoostConfig`
 
 - [ ] **Step 1: 写失败测试**
@@ -133,6 +176,7 @@ Expected: FAIL，`Cannot find module '../src/config.ts'`
 
 - [ ] **Step 3: 实现**
 
+`src/index.ts` 的 `apply(ctx: PluginContext, config: unknown)` 里先 `const cfg = resolveConfig(config)`，再把 `cfg` 传给 T17 的 `registerHooks` 与 T19 的工具注册；`config` 就是 patch 的 `config`（整体替换，缺键逐键回落）。
 `resolveConfig` 对 `projection` 的每个族逐键合并（`raw?.projection?.[family]?.triggerChars ?? DEFAULT...`），其余标量同理。非对象输入一律返回 `DEFAULT_CONFIG` 的深拷贝（`structuredClone`），避免调用方改写默认值。**不做校验抛错**——错配置退化为默认值是这里要的行为。
 
 - [ ] **Step 4: 运行确认通过**
@@ -140,11 +184,20 @@ Expected: FAIL，`Cannot find module '../src/config.ts'`
 Run: `node --import tsx --test test/config.test.ts`
 Expected: PASS（3 tests）
 
-- [ ] **Step 5: 提交**
+- [ ] **Step 5: 重构**
+
+无重构则写明「无需重构」；逐键回落的重复表达式抽成 `pick` 辅助。
+
+- [ ] **Step 6: 全量测试**
+
+Run: `npm test`
+Expected: 全部 PASS（含本任务与全部前序任务的测试）
+
+- [ ] **Step 7: 提交**
 
 ```bash
 git add src/config.ts src/index.ts test/config.test.ts
-git commit -m "feat: 配置解析与逐键回落"
+git commit -m "feat: config resolution with per-key fallback"
 ```
 
 ---
@@ -155,7 +208,7 @@ git commit -m "feat: 配置解析与逐键回落"
 - Create: `src/projection/canonicalise.ts`, `test/canonicalise.test.ts`
 
 **Interfaces:**
-- Produces: `export interface CanonicalReceipt { text: string; isError: boolean; empty: boolean }`；`export function canonicalise(blocks: ReadonlyArray<{ type: string; text?: string }>, isError: boolean): CanonicalReceipt`
+- Produces: `export interface CanonicalReceipt { text: string; isError: boolean; empty: boolean; textBlocks: number }`；`export function canonicalise(blocks: ReadonlyArray<{ type: string; text?: string }>, isError: boolean): CanonicalReceipt`
 
 - [ ] **Step 1: 写失败测试**
 
@@ -167,21 +220,26 @@ import { canonicalise } from '../src/projection/canonicalise.ts'
 test('多个 text block 按顺序拼成一个字符串', () => {
   const r = canonicalise([{ type: 'text', text: 'a' }, { type: 'text', text: 'b' }], false)
   assert.equal(r.text, 'ab')
+  assert.equal(r.textBlocks, 2)
 })
 
 test('非 text block 被跳过，图片不参与规范化', () => {
   const r = canonicalise([{ type: 'text', text: 'x' }, { type: 'image' }, { type: 'text', text: 'y' }], false)
   assert.equal(r.text, 'xy')
+  assert.equal(r.textBlocks, 2)   // 不是 blocks.length（= 3）
 })
 
 test('空回执标记 empty', () => {
   assert.equal(canonicalise([], false).empty, true)
+  assert.equal(canonicalise([], false).textBlocks, 0)
   assert.equal(canonicalise([{ type: 'text', text: '' }], false).empty, true)
   assert.equal(canonicalise([{ type: 'text', text: ' ' }], false).empty, false)
 })
 
 test('isError 透传', () => {
-  assert.equal(canonicalise([{ type: 'text', text: 'boom' }], true).isError, true)
+  const r = canonicalise([{ type: 'text', text: 'boom' }], true)
+  assert.equal(r.isError, true)
+  assert.equal(r.textBlocks, 1)
 })
 ```
 
@@ -192,18 +250,27 @@ Expected: FAIL，模块不存在
 
 - [ ] **Step 3: 实现**
 
-按顺序 `filter(type === 'text')` 后 `map(b => b.text ?? '').join('')`；`empty = text.length === 0`。**不做 trim**：规范化文本要逐字可比对。不做任何转义或截断。
+按顺序 `filter(type === 'text')` 后 `map(b => b.text ?? '').join('')`；`textBlocks` = **过滤后的元素个数**（不是入参 `blocks.length`，图片等非 text block 不计）；`empty = text.length === 0`。**不做 trim**：规范化文本要逐字可比对。不做任何转义或截断。
 
 - [ ] **Step 4: 运行确认通过**
 
 Run: `node --import tsx --test test/canonicalise.test.ts`
 Expected: PASS（4 tests）
 
-- [ ] **Step 5: 提交**
+- [ ] **Step 5: 重构**
+
+无重构则写明「无需重构」；单函数，无可抽取点。
+
+- [ ] **Step 6: 全量测试**
+
+Run: `npm test`
+Expected: 全部 PASS（含本任务与全部前序任务的测试）
+
+- [ ] **Step 7: 提交**
 
 ```bash
 git add src/projection/canonicalise.ts test/canonicalise.test.ts
-git commit -m "feat: 回执规范化"
+git commit -m "feat: canonicalise tool receipts"
 ```
 
 ---
@@ -283,11 +350,20 @@ Expected: FAIL，模块不存在
 Run: `node --import tsx --test test/truncate.test.ts`
 Expected: PASS（6 tests）
 
-- [ ] **Step 5: 提交**
+- [ ] **Step 5: 重构**
+
+无重构则写明「无需重构」；code point 切片与字节差各抽一个小函数。
+
+- [ ] **Step 6: 全量测试**
+
+Run: `npm test`
+Expected: 全部 PASS（含本任务与全部前序任务的测试）
+
+- [ ] **Step 7: 提交**
 
 ```bash
 git add src/projection/truncate.ts test/truncate.test.ts
-git commit -m "feat: 截断窗口与页脚头行"
+git commit -m "feat: truncation window and footer head line"
 ```
 
 ---
@@ -298,10 +374,10 @@ git commit -m "feat: 截断窗口与页脚头行"
 - Create: `src/projection/apply.ts`, `test/projection-shadow.test.ts`
 
 **Interfaces:**
-- Consumes: `canonicalise`（T3）、`truncate`/`shouldTruncate`（T4）、`resolveConfig`（T2）
+- Consumes: `truncate`/`shouldTruncate`/`renderHeadLine`（T4）、`BoostConfig`/`ToolFamily`（T1）
 - Produces: `export type ProjectionMode = 'off' | 'shadow' | 'on'`
 - Produces: `export interface ProjectionOutcome { kind: 'skipped' | 'shadow' | 'applied'; reason?: string; before?: number; after?: number; saved?: number }`
-- Produces: `export async function projectShadow(text: string, family: ToolFamily, cfg: BoostConfig, estimate: (s: string) => number): Promise<ProjectionOutcome>`
+- Produces: `export async function projectShadow(input: { text: string; isError: boolean; family: ToolFamily; cfg: BoostConfig; estimate: (s: string) => number }): Promise<ProjectionOutcome>`
 
 - [ ] **Step 1: 写失败测试**
 
@@ -315,7 +391,7 @@ const estimate = (s: string) => Math.ceil(s.length / 4)
 
 test('影子模式不改动文本，只报前后 token', async () => {
   const text = 'x'.repeat(20000)
-  const o = await projectShadow(text, 'read', DEFAULT_CONFIG, estimate)
+  const o = await projectShadow({ text, isError: false, family: 'read', cfg: DEFAULT_CONFIG, estimate })
   assert.equal(o.kind, 'shadow')
   assert.equal(o.before, 5000)
   assert.ok(o.after! < o.before!)
@@ -323,8 +399,14 @@ test('影子模式不改动文本，只报前后 token', async () => {
 })
 
 test('未配置的工具族直接跳过', async () => {
-  const o = await projectShadow('x'.repeat(9999), 'web_fetch' as never, DEFAULT_CONFIG, estimate)
+  const o = await projectShadow({ text: 'x'.repeat(9999), isError: false, family: 'web_fetch' as never, cfg: DEFAULT_CONFIG, estimate })
   assert.equal(o.kind, 'skipped')
+  assert.equal(o.reason, 'family-not-configured')
+})
+
+test('错误回执不裁剪、不记账（R24）', async () => {
+  const o = await projectShadow({ text: 'x'.repeat(20000), isError: true, family: 'read', cfg: DEFAULT_CONFIG, estimate })
+  assert.deepEqual(o, { kind: 'skipped', reason: 'error-receipt' })
 })
 ```
 
@@ -335,18 +417,27 @@ Expected: FAIL，模块不存在
 
 - [ ] **Step 3: 实现**
 
-`projectShadow` 只读文本、算两份估计，**不触碰 content**（§5.4：shadow 不落盘、不依赖 spillStore）。`after` 的估计对象是"头行 + head + 省略说明 + tail"的拼接串，用同一个 `estimate`。未配置族返回 `{ kind: 'skipped', reason: 'family-not-configured' }`。
+入口第一判 `isError` → `{ kind: 'skipped', reason: 'error-receipt' }`（错误回执原样进历史，§5.4-4）。`projectShadow` 只读文本、算两份估计，**不触碰 content**（§5.4：shadow 不落盘、不依赖 spillStore）。`after` 的估计对象是"头行 + head + 省略说明 + tail"的拼接串，用同一个 `estimate`。未配置族返回 `{ kind: 'skipped', reason: 'family-not-configured' }`。
 
 - [ ] **Step 4: 运行确认通过**
 
 Run: `node --import tsx --test test/projection-shadow.test.ts`
-Expected: PASS（2 tests）
+Expected: PASS（3 tests）
 
-- [ ] **Step 5: 提交**
+- [ ] **Step 5: 重构**
+
+无重构则写明「无需重构」；两次 `estimate` 调用收成一次成对估计。
+
+- [ ] **Step 6: 全量测试**
+
+Run: `npm test`
+Expected: 全部 PASS（含本任务与全部前序任务的测试）
+
+- [ ] **Step 7: 提交**
 
 ```bash
 git add src/projection/apply.ts test/projection-shadow.test.ts
-git commit -m "feat: 影子模式投影计量"
+git commit -m "feat: shadow-mode projection accounting"
 ```
 
 ---
@@ -354,12 +445,14 @@ git commit -m "feat: 影子模式投影计量"
 ### Task 6: 投影执行——真替换（spill 落盘 + 页脚）
 
 **Files:**
-- Modify: `src/projection/apply.ts`, `test/projection-apply.test.ts`
+- Modify: `src/projection/apply.ts`
+- Create: `test/projection-apply.test.ts`
 
 **Interfaces:**
+- Consumes: `truncate`/`renderHeadLine`（T4）、`ProjectionOutcome`（T5）
 - Produces: `export interface SpillHandle { locator: string; retrievalHint: string }`
-- Produces: `export interface SpillBackend { saveText(input: { owner: { sessionId: string }; source: { kind: 'tool'; toolName: string; callId?: string; label?: string }; suggestedName: string; content: string }): Promise<SpillHandle> }`
-- Produces: `export async function projectApply(input: { text: string; family: ToolFamily; cfg: BoostConfig; sessionId: string | undefined; toolName: string; spill: SpillBackend | undefined; formatFooter: ((o: { kind: 'exact'; count: number }, ref: SpillHandle) => string) | undefined }): Promise<{ content: string; outcome: ProjectionOutcome }>`
+- Produces: `export interface SpillBackend { saveText(input: { owner: { sessionId: string }; source: { kind: 'tool'; toolName: string; callId: string; label: string }; suggestedName: string; content: string }): Promise<SpillHandle> }`（`callId` / `label` **必填**，对齐宿主 `SaveTextSpill` 的真实形状）
+- Produces: `export async function projectApply(input: { text: string; isError: boolean; family: ToolFamily; cfg: BoostConfig; sessionId: string | undefined; toolName: string; callId?: string; label?: string; spill: SpillBackend | undefined; formatFooter: ((o: { kind: 'exact'; count: number }, ref: SpillHandle) => string) | undefined }): Promise<{ content: string; outcome: ProjectionOutcome }>`
 
 - [ ] **Step 1: 写失败测试**
 
@@ -367,6 +460,7 @@ git commit -m "feat: 影子模式投影计量"
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { projectApply } from '../src/projection/apply.ts'
+import { truncate } from '../src/projection/truncate.ts'
 import { DEFAULT_CONFIG } from '../src/config.ts'
 
 const spill = { saveText: async () => ({ locator: '/spill/read-1.txt', retrievalHint: 'Use read with offset/limit' }) }
@@ -375,7 +469,7 @@ const footer = (o: { count: number }, ref: { locator: string }) =>
 
 test('on 模式：原文落盘、content 变短、页脚含 locator', async () => {
   const text = 'a'.repeat(18432)
-  const r = await projectApply({ text, family: 'read', cfg: DEFAULT_CONFIG, sessionId: 's1', toolName: 'read', spill, formatFooter: footer })
+  const r = await projectApply({ text, isError: false, family: 'read', cfg: DEFAULT_CONFIG, sessionId: 's1', toolName: 'read', spill, formatFooter: footer })
   assert.ok(r.content.length < text.length)
   assert.match(r.content, /Full formatted result stored at: \/spill\/read-1\.txt/)
   assert.equal(r.outcome.kind, 'applied')
@@ -383,16 +477,55 @@ test('on 模式：原文落盘、content 变短、页脚含 locator', async () =
 
 test('缺 spill 后端：不投影，原样返回（§5.4 可见性三条 3）', async () => {
   const text = 'a'.repeat(18432)
-  const r = await projectApply({ text, family: 'read', cfg: DEFAULT_CONFIG, sessionId: 's1', toolName: 'read', spill: undefined, formatFooter: footer })
+  const r = await projectApply({ text, isError: false, family: 'read', cfg: DEFAULT_CONFIG, sessionId: 's1', toolName: 'read', spill: undefined, formatFooter: footer })
   assert.equal(r.content, text)
   assert.equal(r.outcome.reason, 'no-spill')
 })
 
 test('缺 sessionId：不投影', async () => {
   const text = 'a'.repeat(18432)
-  const r = await projectApply({ text, family: 'read', cfg: DEFAULT_CONFIG, sessionId: undefined, toolName: 'read', spill, formatFooter: footer })
+  const r = await projectApply({ text, isError: false, family: 'read', cfg: DEFAULT_CONFIG, sessionId: undefined, toolName: 'read', spill, formatFooter: footer })
   assert.equal(r.content, text)
   assert.equal(r.outcome.reason, 'no-owner')
+})
+
+test('错误回执不裁剪（R24）', async () => {
+  const text = 'x'.repeat(18432)
+  const r = await projectApply({ text, isError: true, family: 'read', cfg: DEFAULT_CONFIG, sessionId: 's1', toolName: 'read', spill, formatFooter: footer })
+  assert.equal(r.content, text)
+  assert.equal(r.outcome.reason, 'error-receipt')
+})
+
+test('saveText 抛错时回退原文（R18）', async () => {
+  const text = 'x'.repeat(18432)
+  const bad = { saveText: async () => { throw new Error('disk full') } }
+  const r = await projectApply({ text, isError: false, family: 'read', cfg: DEFAULT_CONFIG, sessionId: 's1', toolName: 'read', spill: bad, formatFooter: footer })
+  assert.equal(r.content, text)
+  assert.equal(r.outcome.reason, 'spill-failed')
+})
+
+test('缺 formatFooter 不落盘（R16）', async () => {
+  const text = 'a'.repeat(18432)
+  let saved = 0
+  const counting = { saveText: async () => { saved++; return { locator: '/x', retrievalHint: 'h' } } }
+  const r = await projectApply({ text, isError: false, family: 'read', cfg: DEFAULT_CONFIG, sessionId: 's1', toolName: 'read', spill: counting, formatFooter: undefined })
+  assert.equal(r.content, text)
+  assert.equal(r.outcome.reason, 'projection-skipped:no-footer')
+  assert.equal(saved, 0)
+})
+
+test('原文完整落盘、页脚字节账闭合（R28）', async () => {
+  const text = 'a'.repeat(18432)
+  let saved: any
+  let footerCount = 0
+  const capture = { saveText: async (i: any) => { saved = i; return { locator: '/spill/read-1.txt', retrievalHint: 'h' } } }
+  const countingFooter = (o: { count: number }, ref: { locator: string }) => { footerCount = o.count; return `Omitted ${o.count} bytes. Full formatted result stored at: ${ref.locator}.` }
+  const t = truncate(text, DEFAULT_CONFIG.projection.read)!
+  await projectApply({ text, isError: false, family: 'read', cfg: DEFAULT_CONFIG, sessionId: 's1', toolName: 'read', callId: 'call-1', label: 'read /a', spill: capture, formatFooter: countingFooter })
+  assert.equal(saved.content, text)
+  assert.deepEqual(saved.source, { kind: 'tool', toolName: 'read', callId: 'call-1', label: 'read /a' })
+  assert.equal(footerCount, t.omittedBytes)
+  assert.equal(Buffer.byteLength(text, 'utf8'), t.omittedBytes + Buffer.byteLength(t.head, 'utf8') + Buffer.byteLength(t.tail, 'utf8'))
 })
 ```
 
@@ -403,18 +536,27 @@ Expected: FAIL，`projectApply is not a function`
 
 - [ ] **Step 3: 实现**
 
-顺序：`shouldTruncate` 为假 → `{kind:'skipped'}`；缺 `spill` → `no-spill`；缺 `sessionId` → `no-owner`；缺 `formatFooter` → `no-footer`。都过了才 `saveText({ content: text })`（**存规范化原文，不是投影后文本**，§5.4），再拼 `renderHeadLine + head + footer + tail`。`formatFooter` 由调用方动态导入宿主函数（Task 17 接），这里只收函数，不 import——保证纯函数可测。
+入口第一判 `isError` → `{ kind: 'skipped', reason: 'error-receipt' }`（错误回执必须原样进历史，§5.4-4）；`shouldTruncate` 为假 → `{kind:'skipped'}`；缺 `spill` → `no-spill`；缺 `sessionId` → `no-owner`；缺 `formatFooter` → `projection-skipped:no-footer`（**不落盘**）。都过了才在 try/catch 里 `await saveText({ owner, source: { kind: 'tool', toolName, callId, label }, suggestedName, content: text })`（**存规范化原文，不是投影后文本**，§5.4）；`saveText` 抛错 → 原样返回 `{ content: text, outcome: { kind: 'skipped', reason: 'spill-failed' } }`，不得让异常冒到 `post-execute`。成功后再拼 `renderHeadLine + head + footer + tail`。`source.callId` / `source.label` 必填，缺省用 `callId = toolName`、`label = family` 兜底。`formatFooter` 由调用方动态导入宿主函数（T17/T25 接），这里只收函数，不 import——保证纯函数可测。
 
 - [ ] **Step 4: 运行确认通过**
 
 Run: `node --import tsx --test test/projection-apply.test.ts`
-Expected: PASS（3 tests）
+Expected: PASS（7 tests）
 
-- [ ] **Step 5: 提交**
+- [ ] **Step 5: 重构**
+
+无重构则写明「无需重构」；前置条件按序抽成 `precheck`，主函数只留编排。
+
+- [ ] **Step 6: 全量测试**
+
+Run: `npm test`
+Expected: 全部 PASS（含本任务与全部前序任务的测试）
+
+- [ ] **Step 7: 提交**
 
 ```bash
 git add src/projection/apply.ts test/projection-apply.test.ts
-git commit -m "feat: 投影真替换与 spill 落盘"
+git commit -m "feat: apply projection with spill persistence"
 ```
 
 ---
@@ -426,28 +568,56 @@ git commit -m "feat: 投影真替换与 spill 落盘"
 
 **Interfaces:**
 - Produces: `export type ReceiptKind = 'substitute' | 'shadow' | 'projection' | 'skip' | 'reset'`
-- Produces: `export interface Receipt { v: 1; ts: string; sessionId: string; turn: number; kind: ReceiptKind; code: string; [k: string]: unknown }`
-- Produces: `export class ReceiptStore { constructor(root: string); append(r: Receipt): Promise<void>; failures(): number; stopped(): boolean }`
+- Produces: `export interface Receipt { version: 1; ts: string; sessionId: string; turn: number; stepId?: string; kind: ReceiptKind; code: string; tool?: string; receipt_hash: string; preview: string; [k: string]: unknown }`
+- Produces: `export function receiptHash(r: { sessionId: string; turn: number; stepId?: string; tool?: string }): string`——`sha256(稳定 JSON)` 的十六进制前 16 位
+- Produces: `export class ReceiptStore { constructor(root: string, opts?: { fsyncEveryLines?: number; maxBytes?: number; maxLines?: number }); append(r: Receipt): Promise<void>; flush(): Promise<void>; count(sessionId: string): Promise<number>; scan(sessionId?: string): AsyncIterable<Receipt>; failures(): number; stopped(): boolean }`
 
 - [ ] **Step 1: 写失败测试**
 
 ```ts
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtemp, readFile } from 'node:fs/promises'
+import { appendFile, mkdtemp, readFile, stat } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { ReceiptStore } from '../src/receipts/store.ts'
+import { ReceiptStore, receiptHash } from '../src/receipts/store.ts'
 
-const rec = (sessionId: string): any => ({ v: 1, ts: '2026-11-19T00:00:00.000Z', sessionId, turn: 1, kind: 'shadow', code: 'ok' })
+const rec = (sessionId: string, over: any = {}): any => ({
+  version: 1, ts: '2026-11-19T00:00:00.000Z', sessionId, turn: 1,
+  stepId: 'A', tool: 'read', kind: 'shadow', code: 'ok', preview: 'x', ...over,
+})
 
-test('按 session 分片写入', async () => {
+test('按 session 分片写入，补齐 version/hash/preview', async () => {
   const root = await mkdtemp(join(tmpdir(), 'boost-'))
   const s = new ReceiptStore(root)
   await s.append(rec('a'))
   await s.append(rec('b'))
   const a = await readFile(join(root, 'receipts', 'a.jsonl'), 'utf8')
   assert.equal(a.trim().split('\n').length, 1)
+  const line = JSON.parse(a.trim())
+  assert.equal(line.version, 1)
+  assert.equal(line.receipt_hash, receiptHash({ sessionId: 'a', turn: 1, stepId: 'A', tool: 'read' }))
+})
+
+test('preview 截到 256 code point', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'boost-'))
+  const s = new ReceiptStore(root)
+  await s.append(rec('a', { preview: '😀'.repeat(300) }))
+  const line = JSON.parse((await readFile(join(root, 'receipts', 'a.jsonl'), 'utf8')).trim())
+  assert.equal(Array.from(line.preview).length, 256)
+})
+
+test('count 与 scan 可读回，scan(undefined) 跨会话', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'boost-'))
+  const s = new ReceiptStore(root)
+  await s.append(rec('a')); await s.append(rec('a')); await s.append(rec('b'))
+  assert.equal(await s.count('a'), 2)
+  const rows: any[] = []
+  for await (const r of s.scan('a')) rows.push(r)
+  assert.equal(rows.length, 2)
+  const all: any[] = []
+  for await (const r of s.scan()) all.push(r)
+  assert.equal(all.length, 3)
 })
 
 test('连续 3 次写失败后停止替换（fail-closed）', async () => {
@@ -457,11 +627,23 @@ test('连续 3 次写失败后停止替换（fail-closed）', async () => {
   assert.equal(s.stopped(), true)
 })
 
-test('半行损坏被忽略，不抛错', async () => {
+test('半行在读取时丢弃并从该偏移截断（R51）', async () => {
   const root = await mkdtemp(join(tmpdir(), 'boost-'))
   const s = new ReceiptStore(root)
   await s.append(rec('a'))
+  await appendFile(join(root, 'receipts', 'a.jsonl'), '{"version":1,"half":')
   assert.equal(await s.count('a'), 1)
+  const text = await readFile(join(root, 'receipts', 'a.jsonl'), 'utf8')
+  assert.equal(text.endsWith('\n'), true)
+  assert.equal(text.includes('"half"'), false)
+})
+
+test('超限轮转保留当前 + .1 两份（R47）', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'boost-'))
+  const s = new ReceiptStore(root, { maxBytes: 400, maxLines: 4 })
+  for (let i = 0; i < 9; i++) await s.append(rec('a', { turn: i }))
+  assert.equal(await s.count('a'), 9)
+  await stat(join(root, 'receipts', 'a.1.jsonl'))
 })
 ```
 
@@ -472,18 +654,27 @@ Expected: FAIL，模块不存在
 
 - [ ] **Step 3: 实现**
 
-路径 `<root>/receipts/<sessionId>.jsonl`；`append` 用 `appendFile` 后 `open(f).sync()` 每 20 行一次（不每行 fsync，§5.3 备注）。捕获异常→`failures++`、内存缓冲、返回；不抛给调用方。`stopped()` 当 `failures >= 3`。单文件超 8 MiB 或 20,000 行时轮转（`.1` 保留一份）。
+路径 `<root>/receipts/<sessionId>.jsonl`；`append` 先补齐 `version` / `receipt_hash` / `preview`（`Array.from(s).slice(0, 256).join('')`，**不存全文**）再落一行。`receiptHash` 对 `{ sessionId, turn, stepId, tool }` 的稳定 JSON 求 sha256，取前 16 位十六进制。fsync **不每行做**：每 `fsyncEveryLines`（默认 100）行或显式 `flush()`（**每 turn 结束**由 T17/T23 调用）时 `open(f).sync()`。捕获异常→`failures++`、内存缓冲、返回；不抛给调用方。`stopped()` 当 `failures >= 3`。单文件超 8 MiB 或 20,000 行时轮转：当前文件改名 `<sessionId>.1.jsonl`（已有的 `.1` 覆盖，**只保留当前 + .1 共 2 个**），再新建当前文件。`count` / `scan` 按 `.1` → 当前的顺序读；遇到**不以 `\n` 结尾的尾行**即丢弃并从该偏移截断文件；`scan(sessionId?)` 省略参数时遍历 `receipts/` 下所有分片。
 
 - [ ] **Step 4: 运行确认通过**
 
 Run: `node --import tsx --test test/receipts.test.ts`
-Expected: PASS（3 tests）
+Expected: PASS（6 tests）
 
-- [ ] **Step 5: 提交**
+- [ ] **Step 5: 重构**
+
+无重构则写明「无需重构」；行序列化与 hash 计算抽成纯函数。
+
+- [ ] **Step 6: 全量测试**
+
+Run: `npm test`
+Expected: 全部 PASS（含本任务与全部前序任务的测试）
+
+- [ ] **Step 7: 提交**
 
 ```bash
 git add src/receipts/store.ts test/receipts.test.ts
-git commit -m "feat: 分片收据存储与失败熔断"
+git commit -m "feat: sharded receipt store with circuit breaker"
 ```
 
 ---
@@ -494,9 +685,12 @@ git commit -m "feat: 分片收据存储与失败熔断"
 - Create: `src/scope/doc.ts`, `test/scope-doc.test.ts`
 
 **Interfaces:**
+- Consumes: `ProjectionMode`（T5）
+- Produces: `export type ScopeCode = 'ERR_SCOPE_UNKNOWN_VERSION' | 'ERR_SCOPE_PARSE_FAILED' | 'ERR_SCOPE_READ_FAILED' | 'ERR_SCOPE_REVISION_CONFLICT' | 'ERR_SCOPE_LOCKED'`
+- Produces: 五个 `export const ERR_SCOPE_UNKNOWN_VERSION` / `ERR_SCOPE_PARSE_FAILED` / `ERR_SCOPE_READ_FAILED` / `ERR_SCOPE_REVISION_CONFLICT` / `ERR_SCOPE_LOCKED` 常量（值等于上面的字符串，T9 用）
 - Produces: `export interface ScopeDoc { version: 2; revision: number; updatedAt?: string; mode: 'selected' | 'global'; workspaceIds: string[]; shadow: boolean; projection: ProjectionMode }`
 - Produces: `export const DEFAULT_SCOPE: ScopeDoc`（`selected + []`，`shadow: true`，`projection: 'shadow'`）
-- Produces: `export function parseScope(raw: unknown): { doc: ScopeDoc; degraded?: 'unknown-version' | 'parse-failed' }`
+- Produces: `export function parseScope(raw: unknown): { doc: ScopeDoc; code?: 'ERR_SCOPE_UNKNOWN_VERSION' | 'ERR_SCOPE_PARSE_FAILED' }`
 - Produces: `export function isVisible(doc: ScopeDoc, workspaceId: string | undefined): boolean`
 
 - [ ] **Step 1: 写失败测试**
@@ -514,13 +708,16 @@ test('默认谁都不给', () => {
 
 test('version 1 只读降级，不抛错（Review Focus #4）', () => {
   const r = parseScope({ version: 1, mode: 'global' })
-  assert.equal(r.degraded, 'unknown-version')
+  assert.equal(r.code, 'ERR_SCOPE_UNKNOWN_VERSION')
   assert.deepEqual(r.doc, DEFAULT_SCOPE)
 })
 
-test('坏 JSON 对象降级', () => {
-  assert.equal(parseScope('not an object').degraded, 'parse-failed')
-  assert.equal(parseScope(null).degraded, 'parse-failed')
+test('非对象 / 数组 / null 判 parse-failed；对象但 version≠2 判 unknown-version（R12）', () => {
+  for (const raw of ['not an object', null, [], 42]) {
+    assert.equal(parseScope(raw).code, 'ERR_SCOPE_PARSE_FAILED')
+  }
+  assert.equal(parseScope({ version: 2.1 }).code, 'ERR_SCOPE_UNKNOWN_VERSION')
+  assert.equal(parseScope({ mode: 'global' }).code, 'ERR_SCOPE_UNKNOWN_VERSION')
 })
 
 test('selected + [ws] 只对该工作区可见', () => {
@@ -543,18 +740,27 @@ Expected: FAIL，模块不存在
 
 - [ ] **Step 3: 实现**
 
-`parseScope` 只认 `version === 2`；其余一律 `{ doc: structuredClone(DEFAULT_SCOPE), degraded: 'unknown-version' }`。`mode` 非 `'selected' | 'global'` 时按 `'selected'`、`workspaceIds` 非数组时按 `[]`（更严的一侧）。`isVisible`：`workspaceId === undefined` 一律 false（无 scope = 全局视图 = 不注入，§5.5）。
+`parseScope` 先做**类型定界**：`raw === null || typeof raw !== 'object' || Array.isArray(raw)` → `{ doc: structuredClone(DEFAULT_SCOPE), code: 'ERR_SCOPE_PARSE_FAILED' }`；是对象但 `version !== 2`（含缺 version）→ `{ doc: structuredClone(DEFAULT_SCOPE), code: 'ERR_SCOPE_UNKNOWN_VERSION' }`；只有 `version === 2` 才读其余字段。`mode` 非 `'selected' | 'global'` 时按 `'selected'`、`workspaceIds` 非数组时按 `[]`（更严的一侧）。`isVisible`：`workspaceId === undefined` 一律 false（无 scope = 全局视图 = 不注入，§5.5）。
 
 - [ ] **Step 4: 运行确认通过**
 
 Run: `node --import tsx --test test/scope-doc.test.ts`
 Expected: PASS（5 tests）
 
-- [ ] **Step 5: 提交**
+- [ ] **Step 5: 重构**
+
+无重构则写明「无需重构」；分支定界写成常量表，不散在 if 里。
+
+- [ ] **Step 6: 全量测试**
+
+Run: `npm test`
+Expected: 全部 PASS（含本任务与全部前序任务的测试）
+
+- [ ] **Step 7: 提交**
 
 ```bash
 git add src/scope/doc.ts test/scope-doc.test.ts
-git commit -m "feat: scope 文档模型与严格序"
+git commit -m "feat: scope document model and strict ordering"
 ```
 
 ---
@@ -565,9 +771,9 @@ git commit -m "feat: scope 文档模型与严格序"
 - Create: `src/scope/store.ts`, `test/scope-store.test.ts`
 
 **Interfaces:**
-- Consumes: `ScopeDoc`、`parseScope`（T8）
-- Produces: `export class ScopeStore { constructor(dir: string); read(): Promise<{ doc: ScopeDoc; degraded?: string }>; write(mutate: (d: ScopeDoc) => ScopeDoc, baseRevision: number): Promise<ScopeDoc> }`
-- Produces: 错误码常量 `ERR_SCOPE_LOCKED`、`ERR_SCOPE_REVISION_CONFLICT`、`ERR_SCOPE_READ_FAILED`
+- Consumes: `ScopeDoc`、`parseScope`、`ERR_SCOPE_*`（T8）
+- Produces: `export class ScopeStore { constructor(dir: string); read(): Promise<{ doc: ScopeDoc; degraded?: 'scope-degraded'; code?: ScopeCode }>; write(mutate: (d: ScopeDoc) => ScopeDoc, baseRevision: number): Promise<ScopeDoc> }`
+- Produces: 写入失败抛出的 `Error` 带 `code` 属性（`ERR_SCOPE_LOCKED` / `ERR_SCOPE_REVISION_CONFLICT` / `ERR_SCOPE_READ_FAILED`），消息里带同一个码
 
 - [ ] **Step 1: 写失败测试**
 
@@ -583,7 +789,16 @@ test('缺失文件返回默认并标 degraded', async () => {
   const dir = await mkdtemp(join(tmpdir(), 'scope-'))
   const r = await new ScopeStore(dir).read()
   assert.equal(r.doc.mode, 'selected')
-  assert.equal(r.degraded, 'read-failed')
+  assert.equal(r.degraded, 'scope-degraded')
+  assert.equal(r.code, 'ERR_SCOPE_READ_FAILED')
+})
+
+test('version 1 映射为 scope-degraded + ERR_SCOPE_UNKNOWN_VERSION（R34）', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'scope-'))
+  await writeFile(join(dir, 'scope.json'), JSON.stringify({ version: 1, mode: 'global' }))
+  const r = await new ScopeStore(dir).read()
+  assert.equal(r.degraded, 'scope-degraded')
+  assert.equal(r.code, 'ERR_SCOPE_UNKNOWN_VERSION')
 })
 
 test('写后 revision 自增，mtime 变化让缓存失效', async () => {
@@ -617,18 +832,27 @@ Expected: FAIL，模块不存在
 
 - [ ] **Step 3: 实现**
 
-`read`：`stat` 取 mtime + 读文件 → `parseScope`；缓存命中条件 = `mtime` 与 `revision` 都未变。`write`：`open(lock,'wx')`（`await` 一次）→ 读 → 校验 `baseRevision` → `mutate` → `revision + 1` → **同步** `writeFileSync` 到临时文件 + `renameSync` → `unlink(lock)`。锁已存在时先判回收（`mtime > 60s` 且 pid 不存活），否则抛 `ERR_SCOPE_LOCKED`。
+`read`：`stat` 取 mtime + 读文件 → `parseScope`；缓存命中条件 = `mtime` 与 `revision` 都未变。任何读取 / 解析失败都返回 `{ doc: DEFAULT_SCOPE 的深拷贝, degraded: 'scope-degraded', code }`，**不抛错、不覆盖原文件**；`code` 取 `parseScope` 给的码，读文件失败则 `ERR_SCOPE_READ_FAILED`。`write`：`open(lock,'wx')`（`await` 一次）→ 读 → 校验 `baseRevision` → `mutate` → `revision + 1` → **同步** `writeFileSync` 到临时文件 + `renameSync` → `unlink(lock)`。锁已存在时先判回收（`mtime > 60s` 且 pid 不存活），否则抛 `ERR_SCOPE_LOCKED`。
 
 - [ ] **Step 4: 运行确认通过**
 
 Run: `node --import tsx --test test/scope-store.test.ts`
-Expected: PASS（4 tests）
+Expected: PASS（5 tests）
 
-- [ ] **Step 5: 提交**
+- [ ] **Step 5: 重构**
+
+无重构则写明「无需重构」；锁的获取与回收抽成 `acquireLock`。
+
+- [ ] **Step 6: 全量测试**
+
+Run: `npm test`
+Expected: 全部 PASS（含本任务与全部前序任务的测试）
+
+- [ ] **Step 7: 提交**
 
 ```bash
 git add src/scope/store.ts test/scope-store.test.ts
-git commit -m "feat: scope 原子写与锁"
+git commit -m "feat: atomic scope writes with lock"
 ```
 
 ---
@@ -640,9 +864,9 @@ git commit -m "feat: scope 原子写与锁"
 
 **Interfaces:**
 - Consumes: `isVisible`（T8）、`ScopeStore`（T9）
-- Produces: `export function workspaceIdOf(agent: { session?: { header?: { cwd?: string } } } | undefined): string | undefined`
-- Produces: `export async function resolveVisible(store: ScopeStore, agent: unknown): Promise<boolean>`
-- Produces: `export function supportsStepWhen(tools: { resolve?: unknown } | undefined): boolean`（`typeof tools?.resolve === 'function'`）
+- Produces: `export interface WorkspaceRegistry { byPath(p: string): { id: string } | undefined }`
+- Produces: `export function workspaceIdOf(agent: { session?: { header?: { cwd?: string } } } | undefined, registry: WorkspaceRegistry | undefined): string | undefined`（`cwd` 经 `registry.byPath(cwd)?.id` 换成宿主 UUID，**不是路径本身**）
+- Produces: `export async function resolveVisible(store: ScopeStore, agent: unknown, registry: WorkspaceRegistry | undefined): Promise<boolean>`
 - Produces: `test/fakes/host.ts` 的 `export function fakeHost(overrides?: Record<string, unknown>): any`（可注入 `tools.register/resolve/definitions`、`llm.stream`、`systemPrompt.section`、`tokenMeter`、`spillStore`）
 
 - [ ] **Step 1: 写失败测试**
@@ -656,21 +880,26 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { ScopeStore } from '../src/scope/store.ts'
 
-test('cwd 映射到 workspace id', () => {
-  assert.equal(workspaceIdOf({ session: { header: { cwd: '/w/a' } } }), '/w/a')
-  assert.equal(workspaceIdOf(undefined), undefined)
+test('cwd 经 registry 映射到 workspace UUID，不是路径本身（R10）', () => {
+  const registry = { byPath: (p: string) => (p === '/w/a' ? { id: 'ws-uuid-1' } : undefined) }
+  assert.equal(workspaceIdOf({ session: { header: { cwd: '/w/a' } } }, registry), 'ws-uuid-1')
+  assert.equal(workspaceIdOf({ session: { header: { cwd: '/w/b' } } }, registry), undefined)
+  assert.equal(workspaceIdOf(undefined, registry), undefined)
+  assert.equal(workspaceIdOf({ session: { header: { cwd: '/w/a' } } }, undefined), undefined)
 })
 
 test('无 agent 一律不可见', async () => {
   const dir = await mkdtemp(join(tmpdir(), 'scope-'))
-  assert.equal(await resolveVisible(new ScopeStore(dir), undefined), false)
+  const registry = { byPath: () => ({ id: 'ws-uuid-1' }) }
+  assert.equal(await resolveVisible(new ScopeStore(dir), undefined, registry), false)
 })
 
-test('global 模式下有 cwd 即可见', async () => {
+test('global 模式下能解析出 UUID 即可见', async () => {
   const dir = await mkdtemp(join(tmpdir(), 'scope-'))
   const s = new ScopeStore(dir)
   await s.write(d => ({ ...d, mode: 'global' }), 0)
-  assert.equal(await resolveVisible(s, { session: { header: { cwd: '/w/a' } } }), true)
+  const registry = { byPath: () => ({ id: 'ws-uuid-1' }) }
+  assert.equal(await resolveVisible(s, { session: { header: { cwd: '/w/a' } } }, registry), true)
 })
 
 test('宿主没有 tools.resolve 时判不支持步骤级 when', () => {
@@ -686,18 +915,27 @@ Expected: FAIL，模块不存在
 
 - [ ] **Step 3: 实现**
 
-`workspaceIdOf` 读 `agent?.session?.header?.cwd`（`Session.header` 非可选，不套多余可选链）。`resolveVisible` 先取 doc 再 `isVisible(doc, workspaceIdOf(agent))`，任何异常 → `false`。`supportsStepWhen` 只做 `typeof` 判断。`test/fakes/host.ts` 提供一个最小假宿主：记录 `register` 调用（含 `when`）、`resolve()` 返回已注册列表、`llm.stream` 可控返回。
+`workspaceIdOf` 读 `agent?.session?.header?.cwd`（`Session.header` 非可选，不套多余可选链），再 `registry?.byPath(cwd)?.id`；没有 registry 或查不到 → `undefined`（**不可见**）。`resolveVisible` 先取 doc 再 `isVisible(doc, workspaceIdOf(agent, registry))`，任何异常 → `false`。`supportsStepWhen` 只做 `typeof` 判断。`test/fakes/host.ts` 提供一个最小假宿主：记录 `register` 调用（含 `when`）、`resolve()` 返回已注册列表、`llm.stream` 可控返回。
 
 - [ ] **Step 4: 运行确认通过**
 
 Run: `node --import tsx --test test/scope-resolve.test.ts`
 Expected: PASS（4 tests）
 
-- [ ] **Step 5: 提交**
+- [ ] **Step 5: 重构**
+
+无重构则写明「无需重构」；本任务无可抽取的重复结构。
+
+- [ ] **Step 6: 全量测试**
+
+Run: `npm test`
+Expected: 全部 PASS（含本任务与全部前序任务的测试）
+
+- [ ] **Step 7: 提交**
 
 ```bash
 git add src/scope/resolve.ts test/scope-resolve.test.ts test/fakes/host.ts
-git commit -m "feat: workspace 解析与 when 能力探测"
+git commit -m "feat: workspace resolution and step-when probe"
 ```
 
 ---
@@ -750,18 +988,27 @@ Expected: FAIL，模块不存在
 
 - [ ] **Step 3: 实现**
 
-用 `/<CHISEL_PLAN>([\s\S]*?)<\/CHISEL_PLAN>/` 取第一块；`JSON.parse` 失败 → `bad-json`；`steps` 非数组或某项缺 `id`/`tool`/`guards` → `bad-shape`。**只收字面量**：`args` 里出现非字面量结构（函数、`$eval` 等）→ `bad-shape`；`$public` 模板原样保留，校验交给 Task 13。
+用 `/<CHISEL_PLAN>([\s\S]*?)<\/CHISEL_PLAN>/` 取第一块；`JSON.parse` 失败 → `bad-json`；`steps` 非数组或某项缺 `id`/`tool`/`guards` → `bad-shape`。**只收字面量**：`args` 里出现非字面量结构（函数、`$eval` 等）→ `bad-shape`；`$public` 模板原样保留，校验交给 Task 12（绑定）。
 
 - [ ] **Step 4: 运行确认通过**
 
 Run: `node --import tsx --test test/plan.test.ts`
 Expected: PASS（4 tests）
 
-- [ ] **Step 5: 提交**
+- [ ] **Step 5: 重构**
+
+无重构则写明「无需重构」；失败路径统一走 `fail(code)`。
+
+- [ ] **Step 6: 全量测试**
+
+Run: `npm test`
+Expected: 全部 PASS（含本任务与全部前序任务的测试）
+
+- [ ] **Step 7: 提交**
 
 ```bash
 git add src/gate/plan.ts test/plan.test.ts
-git commit -m "feat: 计划解析与平凡守卫判定"
+git commit -m "feat: plan parsing and trivial-guard detection"
 ```
 
 ---
@@ -772,7 +1019,7 @@ git commit -m "feat: 计划解析与平凡守卫判定"
 - Create: `src/gate/binding.ts`, `test/binding.test.ts`
 
 **Interfaces:**
-- Consumes: `CanonicalReceipt`（T3）
+- Consumes: `CanonicalReceipt`（T3，含 `textBlocks`）
 - Produces: `export type PublicTemplate = { $public: { after: 'root' | string; field: string } }`
 - Produces: `export function isTemplate(v: unknown): v is PublicTemplate`
 - Produces: `export function bindArgs(args: Record<string, unknown>, receipts: ReadonlyMap<string, CanonicalReceipt>): { ok: true; args: Record<string, unknown> } | { ok: false; reason: 'ambiguous' | 'unresolvable' | 'missing-receipt' | 'not-single-text' }`
@@ -785,11 +1032,14 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import { bindArgs, extractField } from '../src/gate/binding.ts'
 
-const r = (text: string) => ({ text, isError: false, empty: text.length === 0 })
+const r = (text: string) => ({ text, isError: false, empty: text.length === 0, textBlocks: 1 })
 
-test('identifier 取 name: "x" / name=x', () => {
+test('identifier 只认带引号的值；无引号判歧义（R29）', () => {
   assert.equal(extractField('garbage\nname: "abc"\n', 'name'), 'abc')
-  assert.equal(extractField('name=abc', 'name'), 'abc')
+  assert.equal(extractField('name="abc"', 'name'), 'abc')
+  assert.equal(extractField('name=abc', 'name'), undefined)
+  const out = bindArgs({ p: { $public: { after: 'A', field: 'name' } } }, new Map([['A', r('name=abc')]]))
+  assert.deepEqual(out, { ok: false, reason: 'ambiguous' })
 })
 
 test('$scalar 整段匹配，含空格即失败', () => {
@@ -817,9 +1067,15 @@ test('引用不存在的图节点判 unresolvable（Review Focus #3）', () => {
 })
 
 test('引用出错回执判 missing-receipt', () => {
-  const m = new Map([['A', { text: 'x', isError: true, empty: false }]])
+  const m = new Map([['A', { text: 'x', isError: true, empty: false, textBlocks: 1 }]])
   const out = bindArgs({ p: { $public: { after: 'A', field: '$scalar' } } }, m)
   assert.deepEqual(out, { ok: false, reason: 'missing-receipt' })
+})
+
+test('回执不是单个 text block 时判 not-single-text（R40）', () => {
+  const m = new Map([['A', { text: 'x', isError: false, empty: false, textBlocks: 2 }]])
+  const out = bindArgs({ p: { $public: { after: 'A', field: '$scalar' } } }, m)
+  assert.deepEqual(out, { ok: false, reason: 'not-single-text' })
 })
 ```
 
@@ -830,18 +1086,27 @@ Expected: FAIL，模块不存在
 
 - [ ] **Step 3: 实现**
 
-`extractField`：`$scalar` 用 `/^[A-Za-z0-9_+@.:/-]+$/` 对 trim 后全文；`$single` 用 `/^\['([^']*)'\]$/`；标识符用 `new RegExp(`(?:^|\\n)\\s*${escape(field)}[:=]\\s*"?([^"\\n]+)"?`)` 全局匹配，**恰好 1 个**才算成功。`bindArgs` 递归替换模板；`after` 不在 `receipts` 里 → `unresolvable`；命中回执 `isError` 或 `empty` → `missing-receipt`；非模板值原样保留。
+`extractField`：`$scalar` 用 `/^[A-Za-z0-9_+@.:/-]+$/` 对 trim 后全文；`$single` 用 `/^\['([^']*)'\]$/`；标识符用 `new RegExp(`(?:^|\n)\s*${escape(field)}\s*[:=]\s*"([^"\n]+)"`)` 全局匹配，**值必须带双引号**（`name=abc` 不匹配 → 0 个匹配 → 歧义）；**恰好 1 个**才算成功。`bindArgs` 递归替换模板；`after` 不在 `receipts` 里 → `unresolvable`；命中回执 `isError` 或 `empty` → `missing-receipt`；`textBlocks !== 1` → `not-single-text`（设计稿要求"成功且只有单个 text block"）；非模板值原样保留。
 
 - [ ] **Step 4: 运行确认通过**
 
 Run: `node --import tsx --test test/binding.test.ts`
-Expected: PASS（7 tests）
+Expected: PASS（8 tests）
 
-- [ ] **Step 5: 提交**
+- [ ] **Step 5: 重构**
+
+无重构则写明「无需重构」；三个 field 分支各一个函数。
+
+- [ ] **Step 6: 全量测试**
+
+Run: `npm test`
+Expected: 全部 PASS（含本任务与全部前序任务的测试）
+
+- [ ] **Step 7: 提交**
 
 ```bash
 git add src/gate/binding.ts test/binding.test.ts
-git commit -m "feat: \$public 参数绑定与唯一性判定"
+git commit -m "feat: $public argument binding and uniqueness"
 ```
 
 ---
@@ -864,7 +1129,7 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import { evaluateGuard, evaluateAll } from '../src/gate/guard.ts'
 
-const r = (text: string, isError = false) => ({ text, isError, empty: text.length === 0 })
+const r = (text: string, isError = false) => ({ text, isError, empty: text.length === 0, textBlocks: 1 })
 
 test('ok 读 isError', () => {
   assert.equal(evaluateGuard({ ok: true }, r('x')), 'pass')
@@ -908,11 +1173,20 @@ Expected: FAIL，模块不存在
 Run: `node --import tsx --test test/guard.test.ts`
 Expected: PASS（5 tests）
 
-- [ ] **Step 5: 提交**
+- [ ] **Step 5: 重构**
+
+无重构则写明「无需重构」；本任务无可抽取的重复结构。
+
+- [ ] **Step 6: 全量测试**
+
+Run: `npm test`
+Expected: 全部 PASS（含本任务与全部前序任务的测试）
+
+- [ ] **Step 7: 提交**
 
 ```bash
 git add src/gate/guard.ts test/guard.test.ts
-git commit -m "feat: 四类守卫求值"
+git commit -m "feat: four guard evaluators"
 ```
 
 ---
@@ -923,10 +1197,10 @@ git commit -m "feat: 四类守卫求值"
 - Create: `src/selector/jev.ts`, `test/jev.test.ts`
 
 **Interfaces:**
-- Consumes: 宿主 `llm`（`{ stream(opts): AsyncIterable<{ text?: string }> }`）
+- Consumes: 宿主 `llm`（`{ stream(opts): AsyncIterable<{ text?: string }> }`）；`LlmRequestPurposeMap` 的 `'boost-selector'` 声明合并（T1）
 - Produces: `export interface LlmLike { stream(opts: unknown): AsyncIterable<{ text?: string }> }`
 - Produces: `export const SELECTOR_PURPOSE = 'boost-selector'`
-- Produces: `export async function choose(input: { llm: LlmLike; candidates: { id: string; summary: string }[]; receiptText: string; maxTokens: number; timeoutMs?: number }): Promise<{ choice: string } | { abstain: 'timeout' | 'error' | 'no-label' }>`
+- Produces: `export async function choose(input: { llm: LlmLike; route: { provider: string; model: string }; candidates: { id: string; summary: string }[]; receiptText: string; maxTokens: number; timeoutMs?: number }): Promise<{ choice: string } | { abstain: 'timeout' | 'error' | 'no-label' }>`
 
 - [ ] **Step 1: 写失败测试**
 
@@ -934,6 +1208,8 @@ git commit -m "feat: 四类守卫求值"
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { choose, SELECTOR_PURPOSE } from '../src/selector/jev.ts'
+
+const ROUTE = { provider: 'deepseek', model: 'deepseek-chat' }
 
 const llmOf = (chunks: string[], delay = 0) => ({
   async *stream(opts: any) {
@@ -945,26 +1221,34 @@ const llmOf = (chunks: string[], delay = 0) => ({
 const cands = [{ id: 'A', summary: 'read /a' }, { id: 'B', summary: 'read /b' }]
 
 test('单标签被解析为选择', async () => {
-  const r = await choose({ llm: llmOf(['B']) as any, candidates: cands, receiptText: 'x', maxTokens: 512 })
+  const r = await choose({ llm: llmOf(['B']) as any, route: ROUTE, candidates: cands, receiptText: 'x', maxTokens: 512 })
   assert.deepEqual(r, { choice: 'B' })
 })
 
 test('问号与其它字符一律 abstain:no-label', async () => {
   for (const s of ['?', 'AB', 'neither']) {
-    const r = await choose({ llm: llmOf([s]) as any, candidates: cands, receiptText: 'x', maxTokens: 512 })
+    const r = await choose({ llm: llmOf([s]) as any, route: ROUTE, candidates: cands, receiptText: 'x', maxTokens: 512 })
     assert.deepEqual(r, { abstain: 'no-label' })
   }
 })
 
 test('超时 abstain:timeout', async () => {
-  const r = await choose({ llm: llmOf(['A'], 100) as any, candidates: cands, receiptText: 'x', maxTokens: 512, timeoutMs: 10 })
+  const r = await choose({ llm: llmOf(['A'], 100) as any, route: ROUTE, candidates: cands, receiptText: 'x', maxTokens: 512, timeoutMs: 10 })
   assert.deepEqual(r, { abstain: 'timeout' })
 })
 
 test('调用抛错 abstain:error', async () => {
   const llm = { async *stream() { throw new Error('boom') } }
-  const r = await choose({ llm: llm as any, candidates: cands, receiptText: 'x', maxTokens: 512 })
+  const r = await choose({ llm: llm as any, route: ROUTE, candidates: cands, receiptText: 'x', maxTokens: 512 })
   assert.deepEqual(r, { abstain: 'error' })
+})
+
+test('stream 收到 purpose 与 route（R17）', async () => {
+  let seen: any
+  const llm = { async *stream(opts: any) { seen = opts; yield { text: 'B' } } }
+  await choose({ llm: llm as any, route: ROUTE, candidates: cands, receiptText: 'x', maxTokens: 512 })
+  assert.equal(seen.purpose, SELECTOR_PURPOSE)
+  assert.deepEqual(seen.route, ROUTE)
 })
 ```
 
@@ -975,18 +1259,27 @@ Expected: FAIL，模块不存在
 
 - [ ] **Step 3: 实现**
 
-调 `llm.stream({ purpose: SELECTOR_PURPOSE, maxTokens, messages: [...] })`，`for await` 收集文本；`Promise.race` 加 20s 默认超时。只接受**恰好等于某个候选 id 的单字符**；`?` 或其它 → `no-label`。系统提示逐字限定"只允许输出一个候选标签或 `?`"。
+调 `llm.stream({ purpose: SELECTOR_PURPOSE, route, maxTokens, messages: [...] })`（`route` 必填，透传边界请求自身的 provider/model），`for await` 收集文本；`Promise.race` 加 20s 默认超时。只接受**恰好等于某个候选 id 的单字符**；`?` 或其它 → `no-label`。系统提示逐字限定"只允许输出一个候选标签或 `?`"。`purpose` 已在 T1 经 `LlmRequestPurposeMap` 声明合并；网关拒绝该字段时回退到 `route` 指定的专用路由（§5.1）。
 
 - [ ] **Step 4: 运行确认通过**
 
 Run: `node --import tsx --test test/jev.test.ts`
-Expected: PASS（4 tests）
+Expected: PASS（5 tests）
 
-- [ ] **Step 5: 提交**
+- [ ] **Step 5: 重构**
+
+无重构则写明「无需重构」；超时包装抽成 `withTimeout`。
+
+- [ ] **Step 6: 全量测试**
+
+Run: `npm test`
+Expected: 全部 PASS（含本任务与全部前序任务的测试）
+
+- [ ] **Step 7: 提交**
 
 ```bash
 git add src/selector/jev.ts test/jev.test.ts
-git commit -m "feat: 单标签选择器与合作超时"
+git commit -m "feat: single-label selector with cooperative timeout"
 ```
 
 ---
@@ -997,9 +1290,9 @@ git commit -m "feat: 单标签选择器与合作超时"
 - Create: `src/gate/decide.ts`, `test/decide.test.ts`
 
 **Interfaces:**
-- Consumes: `parsePlan`/`isTrivial`（T11）、`bindArgs`（T12）、`evaluateAll`（T13）、`choose`（T14）
+- Consumes: `parsePlan`/`isTrivial`（T11）、`bindArgs`（T12）、`evaluateAll`（T13）
 - Produces: `export type Decision = { kind: 'commit'; candidateId: string; args: Record<string, unknown> } | { kind: 'ask-selector'; candidates: Candidate[] } | { kind: 'fallback'; code: string }`
-- Produces: `export function decide(input: { plan: Plan; stepId: string; receipts: ReadonlyMap<string, CanonicalReceipt> }): Decision`
+- Produces: `export function decide(input: { plan: Plan; stepId: string; receipts: ReadonlyMap<string, CanonicalReceipt>; whitelist: ReadonlySet<string> }): Decision`
 
 - [ ] **Step 1: 写失败测试**
 
@@ -1008,14 +1301,15 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import { decide } from '../src/gate/decide.ts'
 
-const rc = (t: string) => ({ text: t, isError: false, empty: false })
+const rc = (t: string) => ({ text: t, isError: false, empty: false, textBlocks: 1 })
 const plan = (cands: any[]) => ({ goal: 'g', steps: cands })
+const WL = new Set(['read', 'grep', 'glob'])
 
 test('唯一合格候选直接提交', () => {
   const d = decide({
     plan: plan([{ id: 'A', tool: 'read', args: { path: '/a' }, guards: [{ text_contains: 'x' }] },
                 { id: 'B', tool: 'read', args: { path: '/b' }, guards: [{ text_contains: 'nope' }] }]),
-    stepId: 'root', receipts: new Map([['root', rc('x')]]),
+    stepId: 'root', whitelist: WL, receipts: new Map([['root', rc('x')]]),
   })
   assert.equal(d.kind, 'commit')
   if (d.kind === 'commit') assert.deepEqual(d.args, { path: '/a' })
@@ -1025,22 +1319,38 @@ test('多候选且全合格 → ask-selector', () => {
   const d = decide({
     plan: plan([{ id: 'A', tool: 'read', args: { path: '/a' }, guards: [{ text_contains: 'x' }] },
                 { id: 'B', tool: 'read', args: { path: '/b' }, guards: [{ text_contains: 'x' }] }]),
-    stepId: 'root', receipts: new Map([['root', rc('x')]]),
+    stepId: 'root', whitelist: WL, receipts: new Map([['root', rc('x')]]),
   })
   assert.equal(d.kind, 'ask-selector')
 })
 
-test('平凡守卫回退 guard-trivial', () => {
-  const d = decide({ plan: plan([{ id: 'A', tool: 'read', args: {}, guards: [{ ok: true }] }]), stepId: 'root', receipts: new Map([['root', rc('x')]]) })
+test('非白名单工具即使守卫合格也淘汰（R1）', () => {
+  const d = decide({
+    plan: plan([{ id: 'A', tool: 'bash', args: { command: 'ls' }, guards: [{ text_contains: 'x' }] }]),
+    stepId: 'root', whitelist: WL, receipts: new Map([['root', rc('x')]]),
+  })
+  assert.deepEqual(d, { kind: 'fallback', code: 'tool-not-whitelisted' })
+})
+
+test('全部平凡守卫回退 guard-trivial（R13）', () => {
+  const d = decide({ plan: plan([{ id: 'A', tool: 'read', args: {}, guards: [{ ok: true }] }]), stepId: 'root', whitelist: WL, receipts: new Map([['root', rc('x')]]) })
   assert.deepEqual(d, { kind: 'fallback', code: 'guard-trivial' })
 })
 
-test('绑定歧义回退', () => {
+test('非平凡候选全部失败回退 no-candidate（R13）', () => {
   const d = decide({
     plan: plan([{ id: 'A', tool: 'read', args: { path: { $public: { after: 'root', field: 'name' } } }, guards: [{ text_contains: 'x' }] }]),
-    stepId: 'root', receipts: new Map([['root', rc('x')]]),
+    stepId: 'root', whitelist: WL, receipts: new Map([['root', rc('x')]]),
   })
-  assert.equal(d.kind, 'fallback')
+  assert.deepEqual(d, { kind: 'fallback', code: 'no-candidate' })
+})
+
+test('候选引用图上不存在的节点 C → fallback（R43）', () => {
+  const d = decide({
+    plan: plan([{ id: 'A', tool: 'read', args: { path: { $public: { after: 'C', field: '$scalar' } } }, guards: [{ text_contains: 'x' }] }]),
+    stepId: 'root', whitelist: WL, receipts: new Map([['root', rc('x')], ['A', rc('y')], ['B', rc('z')]]),
+  })
+  assert.deepEqual(d, { kind: 'fallback', code: 'no-candidate' })
 })
 ```
 
@@ -1051,18 +1361,27 @@ Expected: FAIL，模块不存在
 
 - [ ] **Step 3: 实现**
 
-流程：过滤平凡 → 逐个 `bindArgs`（失败即该候选淘汰）→ `evaluateAll`（非 `pass` 淘汰）→ 0 个 `fallback: no-candidate`，1 个 `commit`，≥2 个 `ask-selector`。**不做**任何"猜一个"。
+流程：① 白名单过滤 `whitelist.has(c.tool)`，全被滤掉 → `{ kind: 'fallback', code: 'tool-not-whitelisted' }`（非白名单候选永不提交，**不在派发路径补判**）；② 过滤平凡候选，若全部平凡 → `guard-trivial`；③ 逐个 `bindArgs`（失败即淘汰）→ `evaluateAll`（非 `pass` 淘汰），0 个 → `no-candidate`，1 个 → `commit`，≥2 个 → `ask-selector`。**不做**任何"猜一个"。`bindArgs` 的 `unresolvable` 同时覆盖"模板指向图上不存在的节点"——`receipts` 只含已发生的步骤。
 
 - [ ] **Step 4: 运行确认通过**
 
 Run: `node --import tsx --test test/decide.test.ts`
-Expected: PASS（4 tests）
+Expected: PASS（6 tests）
 
-- [ ] **Step 5: 提交**
+- [ ] **Step 5: 重构**
+
+无重构则写明「无需重构」；过滤链改成数组组合，而非层层 if。
+
+- [ ] **Step 6: 全量测试**
+
+Run: `npm test`
+Expected: 全部 PASS（含本任务与全部前序任务的测试）
+
+- [ ] **Step 7: 提交**
 
 ```bash
 git add src/gate/decide.ts test/decide.test.ts
-git commit -m "feat: 替换决策编排"
+git commit -m "feat: substitution decision pipeline"
 ```
 
 ---
@@ -1073,7 +1392,7 @@ git commit -m "feat: 替换决策编排"
 - Create: `src/admission/ledger.ts`, `test/ledger.test.ts`
 
 **Interfaces:**
-- Consumes: `BoostConfig`（T1）
+- Consumes: 无跨任务符号；默认值来源见 `BoostConfig`（T1）
 - Produces: `export function remainingSteps(input: { stepsSoFar: number[]; horizonSteps: number; historyTurns: number }): number`
 - Produces: `export function worthSubstituting(input: { savedTokens: number; overheadTokens: number; thresholdTokens: number; deterministicSingle: boolean }): boolean`
 - Produces: `export class StepBudget { constructor(max: number); take(): boolean; exhausted(): boolean; count(): number }`
@@ -1085,10 +1404,12 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import { remainingSteps, worthSubstituting, StepBudget } from '../src/admission/ledger.ts'
 
-test('剩余步数取 horizon 与历史均值的较小者', () => {
+test('不足 5 个 turn 直接用 horizon；满 5 个才取均值（R11）', () => {
   assert.equal(remainingSteps({ stepsSoFar: [50, 60, 70, 80, 90], horizonSteps: 20, historyTurns: 5 }), 20)
-  assert.equal(remainingSteps({ stepsSoFar: [2, 3], horizonSteps: 20, historyTurns: 5 }), 3)
+  assert.equal(remainingSteps({ stepsSoFar: [2, 3], horizonSteps: 20, historyTurns: 5 }), 20)
   assert.equal(remainingSteps({ stepsSoFar: [], horizonSteps: 20, historyTurns: 5 }), 20)
+  assert.equal(remainingSteps({ stepsSoFar: [10, 10, 10, 10, 10], horizonSteps: 20, historyTurns: 5 }), 10)
+  assert.equal(remainingSteps({ stepsSoFar: [10, 10, 10, 10, 10, 10], horizonSteps: 20, historyTurns: 5 }), 10)
 })
 
 test('确定性单候选豁免阈值', () => {
@@ -1113,18 +1434,27 @@ Expected: FAIL，模块不存在
 
 - [ ] **Step 3: 实现**
 
-`remainingSteps`：`stepsSoFar.length === 0` → `horizonSteps`；否则 `Math.min(horizonSteps, Math.round(mean))`，均值只取最后 `historyTurns` 个。`worthSubstituting`：`deterministicSingle || saved - overhead > threshold`。
+`remainingSteps`：`stepsSoFar.length < historyTurns` → `horizonSteps`（设计稿：不足 5 个 turn 直接用 20，**不拿短历史估均值**）；否则 `Math.min(horizonSteps, Math.round(mean))`，均值只取最后 `historyTurns` 个。`worthSubstituting`：`deterministicSingle || saved - overhead > threshold`。
 
 - [ ] **Step 4: 运行确认通过**
 
 Run: `node --import tsx --test test/ledger.test.ts`
 Expected: PASS（3 tests）
 
-- [ ] **Step 5: 提交**
+- [ ] **Step 5: 重构**
+
+无重构则写明「无需重构」；本任务无可抽取的重复结构。
+
+- [ ] **Step 6: 全量测试**
+
+Run: `npm test`
+Expected: 全部 PASS（含本任务与全部前序任务的测试）
+
+- [ ] **Step 7: 提交**
 
 ```bash
 git add src/admission/ledger.ts test/ledger.test.ts
-git commit -m "feat: 准入记账与每轮步数预算"
+git commit -m "feat: admission accounting and per-turn step budget"
 ```
 
 ---
@@ -1132,12 +1462,12 @@ git commit -m "feat: 准入记账与每轮步数预算"
 ### Task 17: 钩子装配（post-execute / llm-stream / execute / systemPrompt）
 
 **Files:**
-- Create: `src/hooks/post-execute.ts`, `src/hooks/llm-stream.ts`, `src/hooks/execute.ts`, `test/hooks.test.ts`
-- Modify: `src/index.ts`
+- Create: `src/hooks/post-execute.ts`, `src/hooks/llm-stream.ts`, `test/hooks.test.ts`
+- Modify: `src/index.ts`, `test/fakes/host.ts`
 
 **Interfaces:**
-- Consumes: `projectApply`/`projectShadow`（T5/T6）、`ReceiptStore`（T7）、`ScopeStore`/`resolveVisible`（T9/T10）、`SELECTOR_PURPOSE`（T14）
-- Produces: `export function registerHooks(ctx: PluginContext, deps: { config: BoostConfig; scope: ScopeStore; receipts: ReceiptStore }): void`
+- Consumes: `canonicalise`（T3）、`projectApply`/`projectShadow`（T5/T6）、`ReceiptStore`（T7）、`ScopeStore`/`resolveVisible`（T9/T10）、`SELECTOR_PURPOSE`（T14）
+- Produces: `export function registerHooks(ctx: PluginContext, deps: { config: BoostConfig; scope: ScopeStore; receipts: ReceiptStore }): void`（T23 会把 `deps` 扩成 `HookDeps`：queue / budget / resolveSession）
 
 - [ ] **Step 1: 写失败测试**
 
@@ -1145,24 +1475,45 @@ git commit -m "feat: 准入记账与每轮步数预算"
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { fakeHost } from './fakes/host.ts'
+import { registerHooks } from '../src/hooks/post-execute.ts'
+import { DEFAULT_CONFIG } from '../src/config.ts'
+import { DEFAULT_SCOPE } from '../src/scope/doc.ts'
 import { SELECTOR_PURPOSE } from '../src/selector/jev.ts'
 
-test('llm/stream 见到 selector 标记直接放行（不合成回合）', async () => {
+const setup = (over: any = {}) => {
   const host = fakeHost()
-  // registerHooks 已把 handler 挂到 host.on('llm/stream')
+  const deps = {
+    config: DEFAULT_CONFIG,
+    scope: over.scope ?? { read: async () => ({ doc: { ...DEFAULT_SCOPE, mode: 'global' } }) },
+    receipts: { append: async (r: any) => { host.receipts.push(r) } },
+  }
+  registerHooks(host, deps as any)
+  return { host, deps }
+}
+
+test('registerHooks 真的注册了四个挂载点（R4）', () => {
+  const { host } = setup()
+  assert.deepEqual(host.hooked().sort(), ['llm/stream', 'systemPrompt', 'tools/execute', 'tools/post-execute'])
+  const s = host.section('dsh-boost')
+  assert.equal(s.order, 100)
+  assert.equal(s.interpolate, false)
+})
+
+test('llm/stream 见到 selector 标记直接放行（不合成回合）', async () => {
+  const { host } = setup()
   const opts = { purpose: SELECTOR_PURPOSE, messages: [] }
   const out = await host.callHook('llm/stream', [opts], async () => 'PASSTHROUGH')
   assert.equal(out, 'PASSTHROUGH')
 })
 
 test('post-execute 对未配置族原样返回', async () => {
-  const host = fakeHost()
+  const { host } = setup()
   const res = await host.callHook('tools/post-execute', [{ name: 'web_fetch', agent: undefined }, { content: [{ type: 'text', text: 'x'.repeat(5000) }] }], async () => ({ kind: 'accept' }))
   assert.equal(res.kind, 'accept')
 })
 
 test('缺 agent 时不投影，记 skip:no-scope', async () => {
-  const host = fakeHost()
+  const { host } = setup()
   await host.callHook('tools/post-execute', [{ name: 'read', agent: undefined }, { content: [{ type: 'text', text: 'x'.repeat(5000) }] }], async () => ({ kind: 'accept' }))
   assert.ok(host.receipts.some((r: any) => r.code === 'skip:no-scope'))
 })
@@ -1175,18 +1526,27 @@ Expected: FAIL，`fakeHost` 未接钩子
 
 - [ ] **Step 3: 实现**
 
-`registerHooks` 里按 §5 的表注册四件事；`post-execute` 的顺序严格为 `canonicalise →（替换决策）→ 投影 → 返回 decision`；`llm/stream` 第一行判 `opts?.purpose === SELECTOR_PURPOSE` 即 `return next()`。`systemPrompt` 用 `ctx.systemPrompt.section({ name: 'dsh-boost', order: 100, text, interpolate: false })`。`execute` 做防篡改（Task 18 填充）。`fakeHost` 增加 `callHook(name: string, args: unknown[], next: () => Promise<unknown>)` 与 `receipts` 数组——瀑布钩子统一按"先参数数组、后 next"调用。
+`registerHooks(ctx, deps)` 从 `src/hooks/post-execute.ts` 导出（T23 会扩展 `deps` 并补全规则），本任务注册四件事：① `ctx.on('tools/post-execute', ...)`，顺序严格为 `canonicalise →（替换决策占位）→ 投影 → 返回 decision`，`exec.agent` 为空时直接 `next()` 并写 `skip:no-scope` 收据；② `ctx.on('llm/stream', ...)`，第一行 `opts?.purpose === SELECTOR_PURPOSE → next()`；③ `ctx.on('tools/execute', ...)` 先注册**直通占位**（T18 换成 `rejectIfTampered`）；④ `ctx.systemPrompt.section({ name: 'dsh-boost', order: 100, text: '', interpolate: false })`——空串由 T20 替换为 `PROTOCOL_TEXT`，但注册本身必须在 T17 完成且可断言。`fakeHost` 增加 `callHook(name, args, next)`、`receipts` 数组、`hooked()`、`section(name)` 与 `when` 注册捕获——瀑布钩子统一按"先参数数组、后 next"调用。
 
 - [ ] **Step 4: 运行确认通过**
 
 Run: `node --import tsx --test test/hooks.test.ts`
-Expected: PASS（3 tests）
+Expected: PASS（4 tests）
 
-- [ ] **Step 5: 提交**
+- [ ] **Step 5: 重构**
+
+无重构则写明「无需重构」；四个注册块各一个函数，`registerHooks` 只做编排。
+
+- [ ] **Step 6: 全量测试**
+
+Run: `npm test`
+Expected: 全部 PASS（含本任务与全部前序任务的测试）
+
+- [ ] **Step 7: 提交**
 
 ```bash
 git add src/hooks/ test/hooks.test.ts test/fakes/host.ts src/index.ts
-git commit -m "feat: 四挂载点装配"
+git commit -m "feat: wire the four hook mount points"
 ```
 
 ---
@@ -1194,11 +1554,12 @@ git commit -m "feat: 四挂载点装配"
 ### Task 18: 派发防篡改
 
 **Files:**
-- Create: `src/hooks/execute.ts`（覆盖 T17 的空壳）, `test/execute.test.ts`
+- Create: `src/hooks/execute.ts`, `test/execute.test.ts`
+- Modify: `src/hooks/post-execute.ts`（把 T17 的 `tools/execute` 直通占位换成 `rejectIfTampered`）
 
 **Interfaces:**
-- Consumes: `bindArgs`（T12）
-- Produces: `export function sameLiteral(a: unknown, b: unknown): boolean`；`export function rejectIfTampered(exec: { name: string; arguments: unknown }, pending: PendingDispatch | undefined): { reject: true; code: 'dispatch-rejected' } | { reject: false }`
+- Consumes: 无跨任务符号；pending 只按结构类型 `{ name: string; args: Record<string, unknown> }` 读取（与 T23 的 `PendingDispatch` 结构兼容，但不 import，避免前向引用）
+- Produces: `export function sameLiteral(a: unknown, b: unknown): boolean`；`export function rejectIfTampered(exec: { name: string; arguments: unknown }, pending: { name: string; args: Record<string, unknown> } | undefined): { reject: true; code: 'dispatch-rejected' } | { reject: false }`
 
 - [ ] **Step 1: 写失败测试**
 
@@ -1231,18 +1592,27 @@ Expected: FAIL，模块不存在
 
 - [ ] **Step 3: 实现**
 
-`sameLiteral` 递归比较：对象比键集合与每键递归，数组按序，标量 `Object.is`。`rejectIfTampered` 只比对 `name` 与 `arguments`；不一致返回 `dispatch-rejected` 并清 pending。
+`sameLiteral` 递归比较：对象比键集合与每键递归，数组按序，标量 `Object.is`。`rejectIfTampered` 只比对 `name` 与 `arguments`；不一致返回 `dispatch-rejected`。**本函数不清 pending**——它拿不到队列，清理由 `registerHooks` 在收到 reject 后做（T23 接线）。
 
 - [ ] **Step 4: 运行确认通过**
 
 Run: `node --import tsx --test test/execute.test.ts`
 Expected: PASS（3 tests）
 
-- [ ] **Step 5: 提交**
+- [ ] **Step 5: 重构**
+
+无重构则写明「无需重构」；本任务无可抽取的重复结构。
+
+- [ ] **Step 6: 全量测试**
+
+Run: `npm test`
+Expected: 全部 PASS（含本任务与全部前序任务的测试）
+
+- [ ] **Step 7: 提交**
 
 ```bash
 git add src/hooks/execute.ts test/execute.test.ts
-git commit -m "feat: 派发防篡改比对"
+git commit -m "feat: dispatch tamper check"
 ```
 
 ---
@@ -1254,9 +1624,10 @@ git commit -m "feat: 派发防篡改比对"
 - Modify: `src/index.ts`（在 `apply` 里 `ctx.tools.register(...)`，带 `when`）
 
 **Interfaces:**
-- Consumes: `ScopeStore`（T9）、`ReceiptStore`（T7）、`supportsStepWhen`（T10）
+- Consumes: `ScopeStore`（T9）、`ReceiptStore`（T7）、`supportsStepWhen`（T10）、`ProjectionMode`（T5）
 - Produces: `export interface BoostStatus { scope: { mode: string; workspaceIds: string[]; revision: number }; shadow: boolean; projection: ProjectionMode; saved: { substitution: number; projectionGross: number; projectionNet: number; retrievals: number }; counts: Record<string, number>; degraded: string[] }`
 - Produces: `export async function runBoost(input: { args: { cmd: 'status' | 'scope-get' | 'scope-set' | 'shadow'; body?: unknown; baseRevision?: number }; scope: ScopeStore; receipts: ReceiptStore }): Promise<{ ok: true; data: unknown } | { ok: false; code: string }>`
+- Produces: `export function boostTool(deps: { scope: ScopeStore; receipts: ReceiptStore }): { name: 'boost'; description: string; parameters: unknown; output: { schema: unknown; render: (args: unknown, value: unknown) => { type: 'text'; text: string }[] }; execute: (args: unknown, exec: unknown) => Promise<unknown> }`——`output` 与 `render` 是宿主工具定义的必填字段，缺了注册不合法；`render` 把 `{ ok, data }` 渲成一个 text block
 
 - [ ] **Step 1: 写失败测试**
 
@@ -1266,7 +1637,7 @@ import assert from 'node:assert/strict'
 import { mkdtemp } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { runBoost } from '../src/tools/boost.ts'
+import { runBoost, boostTool } from '../src/tools/boost.ts'
 import { ScopeStore } from '../src/scope/store.ts'
 import { ReceiptStore } from '../src/receipts/store.ts'
 
@@ -1297,6 +1668,16 @@ test('未知子命令返回稳定码', async () => {
   const r = await runBoost({ args: { cmd: 'nope' as any }, ...d })
   assert.equal(r.ok, false)
 })
+
+test('工具定义带宿主必填的 output.render（R32）', async () => {
+  const d = await deps()
+  const def = boostTool(d)
+  assert.equal(def.name, 'boost')
+  assert.equal(typeof def.output.render, 'function')
+  const blocks = def.output.render({ cmd: 'status' }, { ok: true, data: { shadow: true } })
+  assert.equal(blocks[0].type, 'text')
+  assert.match(blocks[0].text, /shadow/)
+})
 ```
 
 - [ ] **Step 2: 运行确认失败**
@@ -1306,19 +1687,29 @@ Expected: FAIL，模块不存在
 
 - [ ] **Step 3: 实现**
 
-四个子命令；`scope-set` 先 `validate → prune → write`，把 `ScopeStore.write` 的错误码原样透出（`ERR_SCOPE_REVISION_CONFLICT` / `ERR_SCOPE_LOCKED`）。`status` 扫收据聚合三类计数与两组账，`degraded` 收集 `no-spill` / `no-tokenmeter` / `scope-degraded`。工具注册用 `ctx.tools.register(def, { when })`；`supportsStepWhen` 为假时**整族不注册**并 `ctx.logger.warn('ERR_HOST_NO_STEP_WHEN')`；`boost` 自身**豁免 scope**（`when: () => true`），但协议段不豁免。
+四个子命令；`scope-set` 先 `validate → prune → write`，把 `ScopeStore.write` 的错误码原样透出（`ERR_SCOPE_REVISION_CONFLICT` / `ERR_SCOPE_LOCKED`）。`status` 扫收据聚合三类计数与两组账，`degraded` 收集稳定码 `ERR_HOST_NO_SPILL` / `ERR_HOST_NO_TOKENMETER` / `scope-degraded`（T25 再补 `ERR_HOST_PLATFORM_UNSUPPORTED` / `ERR_HOST_NO_STEP_WHEN`）。工具注册用 `ctx.tools.register(def, { when })`；`supportsStepWhen` 为假时**整族不注册**并 `ctx.logger.warn('ERR_HOST_NO_STEP_WHEN')`；`boost` 自身**豁免 scope**（`when: () => true`），但协议段不豁免。
+工具定义由 `boostTool(deps)` 产出：除 `name` / `description` / `parameters` / `execute` 外，必须带宿主必填的 `output: { schema, render }`；`render(_args, value)` 把 `{ ok, data }` 序列化为 `[{ type: 'text', text: JSON.stringify(value) }]`。注册用 `ctx.tools.register(boostTool(deps), { when: () => true })`。
 
 - [ ] **Step 4: 运行确认通过**
 
-Run: `node --import tsx --test test/boost-tool.test.ts && npm test`
-Expected: 全部 PASS
+Run: `node --import tsx --test test/boost-tool.test.ts`
+Expected: PASS（4 tests）
 
-- [ ] **Step 5: 提交并推送**
+- [ ] **Step 5: 重构**
+
+无重构则写明「无需重构」；子命令表驱动，`status` 的聚合单独一个函数。
+
+- [ ] **Step 6: 全量测试**
+
+Run: `npm test`
+Expected: 全部 PASS（含本任务与全部前序任务的测试）
+
+- [ ] **Step 7: 提交并推送**
 
 ```bash
 git add src/tools/boost.ts test/boost-tool.test.ts src/index.ts
-git commit -m "feat: boost 工具与状态聚合"
-git push origin main
+git commit -m "feat: boost tool and status aggregation"
+git push origin main   # remote 由 T1 布置（内网镜像）；GitHub 作为第二个 remote 后加
 ```
 
 ---
@@ -1327,6 +1718,7 @@ git push origin main
 
 **Files:**
 - Create: `src/prompt/protocol.ts`, `src/hooks/clock.ts`, `test/protocol.test.ts`
+- Modify: `src/hooks/post-execute.ts`（把 T17 的 `text: ''` 占位换成 `PROTOCOL_TEXT`）
 
 **Interfaces:**
 - Produces: `export const PROTOCOL_NAME = 'dsh-boost'`；`export const PROTOCOL_ORDER = 100`
@@ -1369,18 +1761,27 @@ Expected: FAIL，模块不存在
 
 - [ ] **Step 3: 实现**
 
-`PROTOCOL_TEXT` 用纯字符串模板写死四段：①计划格式（`<CHISEL_PLAN>` 内的 `goal` + `steps`，每步 `id`/`tool`/`args`/`guards`）；②允许的工具只有 `read`/`grep`/`glob`（其余写了也不会被替换）；③`$public` 三种取法；④"守卫失败即回主模型"的后果声明。**不得包含 `{{`**——协议段以 `interpolate: false` 注入，但保持字面量干净便于日后放松。
+`PROTOCOL_TEXT` 用纯字符串模板写死四段：①计划格式（`<CHISEL_PLAN>` 内的 `goal` + `steps`，每步 `id`/`tool`/`args`/`guards`）；②允许的工具只有 `read`/`grep`/`glob`（其余写了也不会被替换）；③`$public` 三种取法；④"守卫失败即回主模型"的后果声明。**不得包含 `{{`**——协议段以 `interpolate: false` 注入，但保持字面量干净便于日后放松。落文本的同时，在 `src/hooks/post-execute.ts` 把 T17 的 `text: ''` 占位替换为 `text: PROTOCOL_TEXT`（`name` / `order` / `interpolate` 三处不变）。
 
 - [ ] **Step 4: 运行确认通过**
 
 Run: `node --import tsx --test test/protocol.test.ts`
 Expected: PASS（3 tests）
 
-- [ ] **Step 5: 提交**
+- [ ] **Step 5: 重构**
+
+无重构则写明「无需重构」；本任务无可抽取的重复结构。
+
+- [ ] **Step 6: 全量测试**
+
+Run: `npm test`
+Expected: 全部 PASS（含本任务与全部前序任务的测试）
+
+- [ ] **Step 7: 提交**
 
 ```bash
 git add src/prompt/protocol.ts src/hooks/clock.ts test/protocol.test.ts
-git commit -m "feat: 计划协议段与回合时钟"
+git commit -m "feat: plan protocol section and turn clock"
 ```
 
 ---
@@ -1391,8 +1792,8 @@ git commit -m "feat: 计划协议段与回合时钟"
 - Create: `src/admission/usage.ts`, `test/usage.test.ts`
 
 **Interfaces:**
-- Produces: `export interface Usage { input: number; cacheRead: number }`
-- Produces: `export class UsageLedger { request(u: Usage): void; markSubstituted(candidateId: string): void; settle(): { saved_input_tokens: number | 'unknown'; cache_hit_delta: number | null } }`
+- Produces: `export interface Usage { input: number; cacheRead: number; output: number }`
+- Produces: `export class UsageLedger { request(u: Usage): void; markSubstituted(candidateId: string): void; settle(): { saved_input_tokens: number | 'unknown'; cache_hit_delta: number | null; output_tokens: number | 'unknown' } }`
 
 - [ ] **Step 1: 写失败测试**
 
@@ -1403,33 +1804,46 @@ import { UsageLedger } from '../src/admission/usage.ts'
 
 test('saved_input_tokens 取后一次请求的 input + cacheRead（不插值）', () => {
   const l = new UsageLedger()
-  l.request({ input: 100, cacheRead: 900 })   // 替换前那次
+  l.request({ input: 100, cacheRead: 900, output: 10 })   // 替换前那次
   l.markSubstituted('A')
-  l.request({ input: 200, cacheRead: 1800 })  // 后一次
+  l.request({ input: 200, cacheRead: 1800, output: 400 })  // 后一次
   const r = l.settle()
   assert.equal(r.saved_input_tokens, 2000)
+  assert.equal(r.output_tokens, 400)
 })
 
 test('后一次请求缺失记 unknown', () => {
   const l = new UsageLedger()
-  l.request({ input: 100, cacheRead: 900 })
+  l.request({ input: 100, cacheRead: 900, output: 10 })
   l.markSubstituted('A')
-  assert.equal(l.settle().saved_input_tokens, 'unknown')
+  const r = l.settle()
+  assert.equal(r.saved_input_tokens, 'unknown')
+  assert.equal(r.output_tokens, 'unknown')
 })
 
 test('cache_hit_delta = 前后命中率之差', () => {
   const l = new UsageLedger()
-  l.request({ input: 1000, cacheRead: 0 })    // 0%
+  l.request({ input: 1000, cacheRead: 0, output: 0 })    // 0%
   l.markSubstituted('A')
-  l.request({ input: 100, cacheRead: 900 })   // 90%
+  l.request({ input: 100, cacheRead: 900, output: 0 })   // 90%
   assert.equal(l.settle().cache_hit_delta, 0.9)
 })
 
 test('无前一次请求时 delta 记 null', () => {
   const l = new UsageLedger()
   l.markSubstituted('A')
-  l.request({ input: 100, cacheRead: 900 })
+  l.request({ input: 100, cacheRead: 900, output: 0 })
   assert.equal(l.settle().cache_hit_delta, null)
+})
+
+test('output 单独记一类，不混进 input（R30）', () => {
+  const l = new UsageLedger()
+  l.request({ input: 100, cacheRead: 900, output: 7 })
+  l.markSubstituted('A')
+  l.request({ input: 200, cacheRead: 1800, output: 33 })
+  const r = l.settle()
+  assert.equal(r.saved_input_tokens, 2000)
+  assert.equal(r.output_tokens, 33)   // 不是 200 + 33，也不是 33 个 input
 })
 ```
 
@@ -1440,18 +1854,27 @@ Expected: FAIL，模块不存在
 
 - [ ] **Step 3: 实现**
 
-只保留"上一次请求"与"待配对标记"两个槽位（不建全表，YAGNI）。`settle()` 消费并清空。命中率 = `cacheRead / (input + cacheRead)`，分母为 0 记 `null`。
+只保留"上一次请求"与"待配对标记"两个槽位（不建全表，YAGNI）。`settle()` 消费并清空。`output` 是**第三类计数**：`output_tokens` 取后一次请求的 `output`，缺失记 `'unknown'`，不并进 input。命中率 = `cacheRead / (input + cacheRead)`，分母为 0 记 `null`。
 
 - [ ] **Step 4: 运行确认通过**
 
 Run: `node --import tsx --test test/usage.test.ts`
-Expected: PASS（4 tests）
+Expected: PASS（5 tests）
 
-- [ ] **Step 5: 提交**
+- [ ] **Step 5: 重构**
+
+无重构则写明「无需重构」；本任务无可抽取的重复结构。
+
+- [ ] **Step 6: 全量测试**
+
+Run: `npm test`
+Expected: 全部 PASS（含本任务与全部前序任务的测试）
+
+- [ ] **Step 7: 提交**
 
 ```bash
 git add src/admission/usage.ts test/usage.test.ts
-git commit -m "feat: 用量配对与节省字段"
+git commit -m "feat: usage pairing and savings fields"
 ```
 
 ---
@@ -1463,21 +1886,21 @@ git commit -m "feat: 用量配对与节省字段"
 - Modify: `src/hooks/post-execute.ts`（调用失效检测与 `hasSpillNotice`）
 
 **Interfaces:**
-- Produces: `export interface PendingPlan { stepId: string; anchors: Record<string, string> }`（`anchors` = 候选引用的回执 id → 到达时的规范化原文）
-- Produces: `export const PRUNE_MARKER = '[…pruned'`（与宿主 `dsh-compaction-tool-result-pruner` 的 marker 前缀一致）
+- Produces: `export interface ReceiptAnchors { stepId: string; anchors: Record<string, string> }`（`anchors` = 候选引用的回执 id → 到达时的规范化原文；这是**锚点记录**，不是派发队列——`PendingQueue` 只存 T23 的 `PendingDispatch`，两者由同一个 `post-execute` 决策分别写入）
+- Produces: `export const PRUNE_MARKER = '\n\n[... tool result middle pruned ...]\n\n'`（宿主 `dsh-compaction-tool-result-pruner` 的真实串；用 `includes` 判定，不做前缀匹配）
 - Produces: `export function looksPruned(text: string): boolean`
 - Produces: `export function alreadySpilled(text: string, hasNotice: (t: string) => boolean): boolean`
-- Produces: `export function invalidate(pending: PendingPlan | undefined, receiptText: string): 'pruned-reset' | 'compaction-reset' | undefined`
+- Produces: `export function invalidate(pending: ReceiptAnchors | undefined, receiptText: string): 'pruned-reset' | 'compaction-reset' | undefined`
 
 - [ ] **Step 1: 写失败测试**
 
 ```ts
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { looksPruned, alreadySpilled, invalidate } from '../src/gate/invalidate.ts'
+import { PRUNE_MARKER, looksPruned, alreadySpilled, invalidate } from '../src/gate/invalidate.ts'
 
 test('识别宿主 pruner 的截断标记', () => {
-  assert.equal(looksPruned('head\n[…pruned 4096 of 9000 chars…]\ntail'), true)
+  assert.equal(looksPruned(`head${PRUNE_MARKER}tail`), true)
   assert.equal(looksPruned('plain output'), false)
 })
 
@@ -1486,14 +1909,20 @@ test('已含 spill 页脚的回执不再二次投影', () => {
   assert.equal(alreadySpilled('x', () => false), false)
 })
 
-test('锚点回执被 pruner 改写判 pruned-reset', () => {
-  const pending = { stepId: 'A', anchors: { A: 'head\n[…pruned 1 of 2 chars…]' } } as any
-  assert.equal(invalidate(pending, 'head\n[…pruned 1 of 2 chars…]'), 'pruned-reset')
+test('marker 出现即判 pruned-reset（锚点仍相等，pruner 保留锚点）', () => {
+  const t = `head${PRUNE_MARKER}tail`
+  const pending = { stepId: 'A', anchors: { A: t } } as any
+  assert.equal(invalidate(pending, t), 'pruned-reset')
 })
 
-test('锚点回执与实际不符判 compaction-reset', () => {
+test('锚点不符且无 marker 判 compaction-reset', () => {
   const pending = { stepId: 'A', anchors: { A: 'original text' } } as any
   assert.equal(invalidate(pending, 'completely different'), 'compaction-reset')
+})
+
+test('锚点相等且无 marker 不触发', () => {
+  const pending = { stepId: 'A', anchors: { A: 'same' } } as any
+  assert.equal(invalidate(pending, 'same'), undefined)
 })
 
 test('无 pending 不触发', () => {
@@ -1508,17 +1937,322 @@ Expected: FAIL，模块不存在
 
 - [ ] **Step 3: 实现**
 
-`looksPruned` 只做前缀匹配（宿主改文案时退化为"检测不到"，方向是安全的多裁一次，不会误放行）。`invalidate`：待用锚点与当前回执文本不一致 → 先判 `looksPruned` 得 `pruned-reset`，否则 `compaction-reset`；`pending` 为空返回 `undefined`。`post-execute` 里在投影前调用，命中即清 pending 并写收据（**不读历史当前正文**，§5.2-7）。
+`looksPruned` = `text.includes(PRUNE_MARKER)`（宿主换文案时就检测不到；方向是多裁一次，不会误放行）。`invalidate`：`pending` 为空 → `undefined`；`receiptText` 含 marker → `pruned-reset`（**无论锚点是否相等**——pruner 保留锚点，这正是最常见路径）；否则取 `pending.anchors[pending.stepId]`，存在且与 `receiptText` 不相等 → `compaction-reset`；anchor 缺失或相等 → `undefined`。`post-execute` 里在投影前调用，命中即清 pending 并写收据（**不读历史当前正文**，§5.2-7）。
 
 - [ ] **Step 4: 运行确认通过**
 
-Run: `node --import tsx --test test/invalidate.test.ts && npm test`
-Expected: 全部 PASS
+Run: `node --import tsx --test test/invalidate.test.ts`
+Expected: PASS（6 tests）
 
-- [ ] **Step 5: 提交并推送**
+- [ ] **Step 5: 重构**
+
+无重构则写明「无需重构」；本任务无可抽取的重复结构。
+
+- [ ] **Step 6: 全量测试**
+
+Run: `npm test`
+Expected: 全部 PASS（含本任务与全部前序任务的测试）
+
+- [ ] **Step 7: 提交并推送**
 
 ```bash
 git add src/gate/invalidate.ts test/invalidate.test.ts src/hooks/post-execute.ts
-git commit -m "feat: 外部失效源检测与二次投影防护"
+git commit -m "feat: external invalidation and double-projection guard"
+git push origin main   # remote 由 T1 布置（内网镜像）；GitHub 作为第二个 remote 后加
+```
+
+---
+
+### Task 23: 触发装配（`PendingDispatch` 与合成回合）
+
+**Files:**
+- Create: `src/hooks/pending.ts`, `src/hooks/synthesize.ts`
+- Modify: `src/hooks/post-execute.ts`, `src/hooks/llm-stream.ts`, `test/fakes/host.ts`, `test/hooks.test.ts`
+
+**Interfaces:**
+- Consumes: `decide`（T15）、`StepBudget`（T16）、`UsageLedger`（T21）、`registerHooks` 的位置（T17）、`isVisible`/`ScopeStore`（T8/T9）
+- Produces: `export interface PendingDispatch { stepId: string; candidateId: string; name: string; args: Record<string, unknown>; createdAt: number }`
+- Produces: `export class PendingQueue { set(p: PendingDispatch): void; take(): PendingDispatch | undefined; peek(): PendingDispatch | undefined; clear(): void }`
+- Produces: `export function synthesizeTurn(p: PendingDispatch): { role: 'assistant'; content: { type: 'tool-call'; name: string; arguments: unknown }[] }`
+- Produces: `export interface HookDeps { config: BoostConfig; scope: ScopeStore; receipts: ReceiptStore; queue: PendingQueue; budget: StepBudget; resolveSession: (sessionId: string) => string | undefined }`
+- Produces: `export function registerHooks(ctx: PluginContext, deps: HookDeps): void`——**四挂载点的真实接线**
+- Produces: `HookDeps.usage: UsageLedger`——每次模型请求 `usage.request({input, cacheRead, output})`；替换提交时 `usage.markSubstituted(candidateId)`；替换后下一次请求 `usage.settle()` 写入收据的 `saved_input_tokens` / `cache_hit_delta`
+
+- [ ] **Step 1: 写失败的装配测试**
+
+```ts
+// test/hooks.test.ts（替换 T17 的三条边角用例）
+import test from 'node:test'
+import assert from 'node:assert/strict'
+import { fakeHost } from './fakes/host.ts'
+import { registerHooks } from '../src/hooks/post-execute.ts'
+import { PendingQueue } from '../src/hooks/pending.ts'
+import { StepBudget } from '../src/admission/ledger.ts'
+import { DEFAULT_CONFIG } from '../src/config.ts'
+import { DEFAULT_SCOPE } from '../src/scope/doc.ts'
+import { SELECTOR_PURPOSE } from '../src/selector/jev.ts'
+
+const setup = (over: any = {}) => {
+  const host = fakeHost()
+  const queue = new PendingQueue()
+  const deps = {
+    config: DEFAULT_CONFIG,
+    scope: over.scope ?? { read: async () => ({ doc: { ...DEFAULT_SCOPE, mode: 'global' } }) },
+    receipts: over.receipts ?? { append: async (r: any) => host.receipts.push(r) },
+    queue, budget: new StepBudget(DEFAULT_CONFIG.stepsPerTurn),
+    resolveSession: over.resolveSession ?? (() => 'ws-1'),
+  }
+  registerHooks(host, deps as any)
+  return { host, queue, deps }
+}
+
+test('selector 内部调用直接放行', async () => {
+  const { host } = setup()
+  const out = await host.callHook('llm/stream', [{ purpose: SELECTOR_PURPOSE }], async () => 'PASS')
+  assert.equal(out, 'PASS')
+})
+
+test('shadow 为真时不合成，写 shadow 收据后原样放行', async () => {
+  const { host, queue } = setup({ scope: { read: async () => ({ doc: { ...DEFAULT_SCOPE, mode: 'global', shadow: true } }) } })
+  queue.set({ stepId: 'A', candidateId: 'A', name: 'read', args: { path: '/a' }, createdAt: 0 })
+  const out = await host.callHook('llm/stream', [{ sessionId: 's1' }], async () => 'PASS')
+  assert.equal(out, 'PASS')
+  assert.ok(host.receipts.some((r: any) => r.kind === 'shadow'))
+})
+
+test('有 pending 时合成 tool-call 回合且不调 next', async () => {
+  const { host, queue } = setup()
+  queue.set({ stepId: 'A', candidateId: 'A', name: 'read', args: { path: '/a' }, createdAt: 0 })
+  let called = false
+  const out = await host.callHook('llm/stream', [{ sessionId: 's1' }], async () => { called = true; return 'NEXT' })
+  assert.equal(called, false)
+  assert.equal(out.chunks[0].content[0].type, 'tool-call')
+})
+
+test('scope 不可见时放行并写 skip:no-scope', async () => {
+  const { host } = setup({ scope: { read: async () => ({ doc: DEFAULT_SCOPE }) } })
+  const out = await host.callHook('llm/stream', [{ sessionId: 's1' }], async () => 'PASS')
+  assert.equal(out, 'PASS')
+  assert.ok(host.receipts.some((r: any) => r.code === 'skip:no-scope'))
+})
+
+test('第 9 次替换被预算拦截并写 steps-exhausted', async () => {
+  const { host, queue, deps } = setup()
+  for (let i = 0; i < 8; i++) deps.budget.take()
+  queue.set({ stepId: 'I', candidateId: 'I', name: 'read', args: {}, createdAt: 0 })
+  const out = await host.callHook('llm/stream', [{ sessionId: 's1' }], async () => 'PASS')
+  assert.equal(out, 'PASS')
+  assert.ok(host.receipts.some((r: any) => r.code === 'steps-exhausted'))
+})
+
+test('when 逐步判定：scope 改变后下一步可见性翻转', async () => {
+  const host = fakeHost()
+  let mode: 'selected' | 'global' = 'selected'
+  registerHooks(host, {
+    config: DEFAULT_CONFIG,
+    scope: { read: async () => ({ doc: { ...DEFAULT_SCOPE, mode } }) },
+    receipts: { append: async () => {} },
+    queue: new PendingQueue(), budget: new StepBudget(8), resolveSession: () => 'ws-1',
+  } as any)
+  assert.equal(await host.visible('boost', { session: { header: { cwd: '/w/a' } } }), false)
+  mode = 'global'
+  assert.equal(await host.visible('boost', { session: { header: { cwd: '/w/a' } } }), true)
+})
+```
+
+- [ ] **Step 2: 运行确认失败**
+
+Run: `node --import tsx --test test/hooks.test.ts`
+Expected: FAIL，`Cannot find module '../src/hooks/pending.ts'`
+
+- [ ] **Step 3: 实现接线**
+
+`post-execute` 在 `decide` 返回 `commit` 时 `queue.set(...)`、`fallback` 时 `queue.clear()`。
+`llm/stream` 的四条规则按此顺序：① `purpose === SELECTOR_PURPOSE` → `next()`；② `scope.shadow` → 写 `{kind:'shadow'}` 收据后 `next()`；③ `budget.take() === false` → 写 `{code:'steps-exhausted'}` 后 `next()`；④ 有 pending → 记 `{kind:'substitute'}` 收据、`queue.take()`、返回 `{ chunks: [synthesizeTurn(p)] }`，**不调 `next()`**。scope 不可见时 `next()` 并写 `skip:no-scope`（在 ②之前判）。
+`fakeHost` 增加 `visible(name, agent)`：按注册时的 `when` 逐次求值。
+
+**用量配对（R21 的消费端）**：`llm/stream` 拿到 `options` 后先 `usage.request(...)`；`post-execute` 提交替换时 `usage.markSubstituted(...)`；下一次 `llm/stream` 后 `usage.settle()` 的结果写进替换收据——不接这一步，`saved_input_tokens` 永远是 `unknown`。
+
+**协议段的 scope 门控（R36）**：`ctx.systemPrompt.section` 注册的文本由 `isVisible(doc, workspaceIdOf(agent))` 决定——不可见时不注入该段，并只在内存累加 `skip:no-scope` 计数（不逐条写收据，§5.5 表）。`boost` 工具的**可见性**豁免 scope，但它的协议段不豁免。
+
+- [ ] **Step 4: 运行确认通过**
+
+Run: `node --import tsx --test test/hooks.test.ts && npm test`
+Expected: 全部 PASS
+
+- [ ] **Step 5: 重构**
+
+无重构则写明「无需重构」；否则抽出重复的收据构造。
+
+- [ ] **Step 6: 提交**
+
+```bash
+git add src/hooks/ test/hooks.test.ts test/fakes/host.ts
+git commit -m "feat: wire pending dispatch and synthesized turns"
+```
+
+---
+
+### Task 24: 端到端替换集成
+
+**Files:**
+- Create: `test/integration/substitute.test.ts`
+- Modify: `test/fakes/host.ts`（如需）
+
+**Interfaces:**
+- Consumes: T11 `parsePlan`、T12 `bindArgs`、T13 `evaluateAll`、T15 `decide`、T14 `choose`、T16 `worthSubstituting`、T23 `registerHooks`/`PendingQueue`
+
+- [ ] **Step 1: 写五条路径的失败测试**
+
+```ts
+// test/integration/substitute.test.ts
+import test from 'node:test'
+import assert from 'node:assert/strict'
+// 五条：成功替换 / 守卫失败回退 / 多候选选择 / 准入不过 / 预算耗尽
+test('成功替换：合成回合 + 收据字段齐全', async () => { /* 断言 substitute 收据含 saved_input_tokens */ })
+test('守卫失败：回退主模型，pending 清空', async () => { /* ... */ })
+test('多候选：selector 选 B 后合成 B 的调用', async () => { /* ... */ })
+test('准入不过：worthSubstituting 为假 → 回退', async () => { /* ... */ })
+test('第 9 次：steps-exhausted 且不发合成', async () => { /* ... */ })
+```
+
+- [ ] **Step 2: 运行确认失败**
+
+Run: `node --import tsx --test test/integration/substitute.test.ts`
+Expected: FAIL，文件不存在
+
+- [ ] **Step 3: 实现测试夹具**
+
+用 `fakeHost` + 内存 `ReceiptStore` + 假的 `spillStore`，把 11→12→13→15 串成一条 `simulateReceipt()` 辅助函数；每个用例只改一处输入。
+
+- [ ] **Step 4: 运行确认通过**
+
+Run: `node --import tsx --test test/integration/substitute.test.ts && npm test`
+Expected: 全部 PASS（含前序 23 个任务 T1–T23 的测试）
+
+- [ ] **Step 5: 重构**
+
+如果 `simulateReceipt()` 超过 40 行，拆成"构造回执"与"跑决策"两半。
+
+- [ ] **Step 6: 提交**
+
+```bash
+git add test/integration/substitute.test.ts test/fakes/host.ts
+git commit -m "test: end-to-end substitution paths"
+```
+
+---
+
+### Task 25: 观测、降级与平台
+
+**Files:**
+- Create: `src/admission/fixed-cost.ts`, `src/admission/retrieval.ts`, `src/host/loader.ts`, `src/host/root.ts`, `src/host/platform.ts`, `src/tools/family.ts`
+- Modify: `src/tools/boost.ts`, `src/hooks/post-execute.ts`
+- Create: `test/host.test.ts`, `test/family.test.ts`（测试文件）
+
+**Interfaces:**
+- Produces: `export async function loadOptional<T>(specifier: string): Promise<T | undefined>`
+- Produces: `export function resolveBoostRoot(): string`（`process.env.DSH_HOME ?? join(homedir(), '.dsh')` + `/boost`）
+- Produces: `export function familyOf(name: string): ToolFamily | undefined`（`mcp__ssh__execute-command` → `ssh`）
+- Produces: `export async function measureFixedCost(text: string): Promise<number | 'unknown'>`
+- Produces: `export function recordRetrieval(params: unknown, locators: ReadonlySet<string>): boolean`
+- Produces: `export const isPosixOnly: () => boolean`
+
+- [ ] **Step 1: 写失败测试**
+
+```ts
+test('familyOf 映射 ssh 的宿主工具名', () => {
+  assert.equal(familyOf('read'), 'read')
+  assert.equal(familyOf('mcp__ssh__execute-command'), 'ssh')
+  assert.equal(familyOf('web_fetch'), undefined)
+})
+
+test('resolveBoostRoot 在未设 DSH_HOME 时回退 ~/.dsh/boost', () => {
+  const saved = process.env.DSH_HOME
+  delete process.env.DSH_HOME
+  assert.ok(resolveBoostRoot().endsWith('.dsh/boost'))
+  process.env.DSH_HOME = saved
+})
+
+test('loadOptional 对不存在的包返回 undefined，不抛错', async () => {
+  assert.equal(await loadOptional('@deepseek-ai/definitely-not-installed'), undefined)
+})
+
+test('recordRetrieval 只认命中 locator 的参数', () => {
+  const locs = new Set(['/spill/read-1.txt'])
+  assert.equal(recordRetrieval({ path: '/spill/read-1.txt' }, locs), true)
+  assert.equal(recordRetrieval({ path: '/other' }, locs), false)
+})
+```
+
+- [ ] **Step 2: 运行确认失败**
+
+Run: `node --import tsx --test test/host.test.ts test/family.test.ts`
+Expected: FAIL，模块不存在
+
+- [ ] **Step 3: 实现**
+
+`loadOptional` 用 `await import(name)` 包 try/catch（这是 R16 的落点：静态 import 在宿主缺包时直接 `ERR_MODULE_NOT_FOUND`）。`measureFixedCost` 动态导入 `estimateSystemMessage`，失败返回 `'unknown'`。`boost status` 增加 `fixedOverheadTokens`、`projection_retrievals`、`projection_net_tokens`；`degraded` 一律输出 `ERR_HOST_*` / `ERR_SCOPE_*` 稳定码（含 `ERR_HOST_NO_TOKENMETER`、`ERR_HOST_PLATFORM_UNSUPPORTED`）。`isPosixOnly()` 为假时禁用替换（`degraded` 加码），投影照常。
+
+- [ ] **Step 4: 运行确认通过**
+
+Run: `node --import tsx --test test/host.test.ts test/family.test.ts && npm test`
+Expected: 全部 PASS
+
+- [ ] **Step 5: 重构**
+
+无重构则写明「无需重构」。
+
+- [ ] **Step 6: 提交**
+
+```bash
+git add src/host/ src/tools/family.ts src/admission/fixed-cost.ts src/admission/retrieval.ts src/tools/boost.ts test/host.test.ts test/family.test.ts
+git commit -m "feat: host capability probes, family mapping, fixed-cost measurement"
+```
+
+---
+
+### Task 26: 分析脚本与发布验收
+
+**Files:**
+- Create: `scripts/shadow-report.mjs`, `scripts/session-stats.mjs`, `scripts/session-snapshot.json`, `test/regression/tasks.jsonl`, `test/regression/run.mjs`, `test/scripts.test.ts`, `docs/RELEASE.md`
+
+**Interfaces:**
+- Consumes: 收据格式（T7）、`boost status`（T19/T25）
+
+- [ ] **Step 1: 写失败的验收脚本测试**
+
+```js
+// scripts/shadow-report.test.mjs（或 test/scripts.test.ts）
+test('shadow-report 对空收据目录输出四项零值，不抛错', async () => { /* ... */ })
+test('session-stats 对固定 snapshot 复算出 54,123 步 / 62,621 调用', async () => { /* ... */ })
+```
+
+- [ ] **Step 2: 运行确认失败**
+
+Run: `node --import tsx --test test/scripts.test.ts`
+Expected: FAIL，脚本不存在
+
+- [ ] **Step 3: 实现三个脚本 + 一个门**
+
+`shadow-report.mjs` 扫 `receipts/*.jsonl`，输出四类标签：真实可省比例、按族命中率、候选集召回、取回率上界（`取回调用数 / 投影回执数`）。
+`session-stats.mjs` 按 `session-snapshot.json` 复算 §2.1 全部统计。
+`test/regression/run.mjs` 读 `tasks.jsonl`（20 条，每条 `{ id, prompt, expect }`），pass 谓词按设计稿 §6.1：`两轮都完成且 isError=false 的任务数 ≥ 19 ∧ 每条被投影回执可取回且字节数 = count + 保留窗口字节数`。
+`docs/RELEASE.md` 写清 `npm pack` → 空项目安装 → 分别卸掉 `dsh-spill-policy` / `dsh-token-meter` 验证两条降级路径（isolated 布局；hoisted 布局测不出 `ERR_MODULE_NOT_FOUND`）。
+
+- [ ] **Step 4: 运行确认通过**
+
+Run: `npm run stats && node --import tsx --test test/scripts.test.ts && npm test`
+Expected: 全部 PASS
+
+- [ ] **Step 5: 重构**
+
+无重构则写明「无需重构」。
+
+- [ ] **Step 6: 提交并推送**
+
+```bash
+git add scripts/ test/regression/ test/scripts.test.ts docs/RELEASE.md
+git commit -m "feat: shadow report, stats replay and release acceptance"
 git push origin main
 ```
