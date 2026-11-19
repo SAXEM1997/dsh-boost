@@ -5,13 +5,18 @@
  * task fills in, and the registration is split one function per mount so each
  * body can be replaced without rewriting the mount:
  *
- * - `tools/post-execute` canonicalises the result, abandons the decision when
- *   the host rewrote the receipt under the stored anchors (pruner / compaction,
- *   design §5.2-7), refuses to project a receipt that already carries the host
- *   spill footer, and then leaves a slot for the substitution decision (Task
- *   23b) and one for projection (Task 23b/T25). A call with no `exec.agent` is
- *   not the plugin's to inspect: the downstream decision is returned untouched
- *   and a `skip:no-scope` receipt keeps the pass visible (design §5.5).
+ * - `tools/post-execute` first gates on the same cached scope judgement the
+ *   protocol section reads, then canonicalises the result and runs a
+ *   conservative invalidation check plus the double-projection guard. Neither
+ *   guard can see the host pruner or compaction from this waterfall — those
+ *   rewrite session surface nodes, not the result object this listener
+ *   receives — so the real check belongs to the model-request path (Task 23c);
+ *   here only a tool output that literally carries the prune marker, or an
+ *   anchor mismatch, can abandon the decision. The mount then leaves a slot for
+ *   the substitution decision (Task 23b) and one for projection (Task 23b/T25).
+ *   A call with no `exec.agent` is not the plugin's to inspect: the downstream
+ *   decision is returned untouched and a `skip:no-scope` receipt keeps the pass
+ *   visible (design §5.5).
  * - `llm/stream` lets the plugin's own selector request through before any
  *   synthesis exists; a boundary request is likewise delegated to `next()`
  *   until Task 23c adds the pending-turn branch.
@@ -83,6 +88,16 @@ type PendingEntry = {
 type PostExecuteDeps = {
   config: BoostConfig
   receipts: ReceiptStore
+  /**
+   * The scope store whose per-agent judgement cache says whether the plugin is
+   * active for this session.
+   *
+   * The same cached value the protocol section reads, keyed by session id. A
+   * missing store, a store without `judgement`, or a cache miss means "not
+   * active" (fail-closed): an out-of-scope call must not pay for the guards,
+   * let alone project. T23b reads the same value.
+   */
+  scope?: ScopeStore
   /**
    * Per-session receipt anchors.
    *
@@ -237,6 +252,25 @@ function sessionIdOf(exec: PostExecuteExec | undefined): string | undefined {
 }
 
 /**
+ * Whether the plugin is active for this session.
+ *
+ * Reads the same synchronous judgement cache the protocol section uses; a miss
+ * is `false` (fail-closed), and a missing or throwing store is "not active".
+ * An out-of-scope call must not pay for the guards, let alone project, so the
+ * post-execute body returns at this point without touching anchors, the notice
+ * predicate, or the dynamic import behind it.
+ */
+function isActiveSession(deps: PostExecuteDeps, sessionId: string): boolean {
+  const scope = deps.scope
+  if (scope == null || typeof scope.judgement !== 'function') return false
+  try {
+    return scope.judgement(sessionId)
+  } catch {
+    return false
+  }
+}
+
+/**
  * Read the session's pending anchors without ever failing the call.
  *
  * The store is a plain map in production, but it arrives through an injected
@@ -338,6 +372,23 @@ function resolveNoticePredicate(
 }
 
 /**
+ * The canonical text of the decision that will enter history, when it carries
+ * a content array.
+ *
+ * The host spill policy registers with `{ prepend: true }`: it calls `next()`
+ * and applies its footer to *that* decision, so the footer lives in
+ * `decision.content` and never in the `result.content` this listener received.
+ * `undefined` means "the decision carries no content"; the caller then falls
+ * back to the receiver as it arrived. A non-array `content` contributes no
+ * text, exactly like `canonicalise`.
+ */
+function decisionTextOf(decision: PostExecuteDecision): string | undefined {
+  const content = decision.content
+  if (!Array.isArray(content)) return undefined
+  return canonicalise(content as ReadonlyArray<{ type: string; text?: string }>, false).text
+}
+
+/**
  * Whether projection must be skipped because the host already spilled this
  * receipt (design §5.4).
  *
@@ -378,10 +429,10 @@ function projectDecision(
  * `next()` runs first, exactly like the host's own spill policy: a listener
  * either returns a decision or calls `next()` and returns its result, and
  * bypassing it would silently drop the listeners mounted after this one. The
- * fixed order that follows is `canonicalise → invalidate → substitution
- * decision → double-projection guard → projection → return the decision`
- * (design §5.2-7/§5.4-5); Task 23b puts real bodies in the decision and
- * projection stages.
+ * fixed order that follows is `scope gate → canonicalise → invalidate →
+ * substitution decision → double-projection guard → projection → return the
+ * decision` (design §5.2-7/§5.4-5); Task 23b puts real bodies in the decision
+ * and projection stages.
  *
  * Both Task-22 guards may abandon the decision, and neither may throw: the host
  * turns a throwing `post-execute` listener into an error result and the real
@@ -400,32 +451,45 @@ async function postExecute(
     return decision
   }
 
+  // Exposure gate: an out-of-scope session pays nothing. This is the same
+  // cached judgement the protocol section reads; a miss is false (fail-closed,
+  // design §5.5).
+  const sessionId = sessionIdOf(exec)
+  if (sessionId === undefined || !isActiveSession(deps, sessionId)) return decision
+
   // Canonicalise the original receiver, not a downstream replacement: guards
   // and the selector read the receipt as it arrived.
   const receipt = canonicalise(result?.content ?? [], result?.isError === true)
 
-  // External invalidation first: a receipt the host rewrote under our anchors
-  // must abandon the decision before any stage reads it (design §5.2-7).
-  const sessionId = sessionIdOf(exec)
-  if (sessionId !== undefined) {
-    const pending = pendingAnchorsOf(deps, sessionId)
-    // `!= null` rather than `!== undefined`: a foreign store can hand back a
-    // null, and dereferencing it would throw out of the hook.
-    if (pending != null) {
-      const reset = invalidationOf(pending, receipt.text)
-      if (reset !== undefined) {
-        await resetInvalidatedPending(deps, exec, sessionId, pending, reset)
-        return decision
-      }
+  // Conservative local invalidation check. The tool-result path cannot see the
+  // host pruner (it rewrites session surface nodes, not this waterfall) or
+  // compaction, so this call site only catches a receipt whose tool output
+  // literally carries the marker, plus an anchor mismatch; a hit only abandons
+  // the decision, which is always safe. Task 23c owns the real check on the
+  // model-request path.
+  const pending = pendingAnchorsOf(deps, sessionId)
+  // `!= null` rather than `!== undefined`: a foreign store can hand back a
+  // null, and dereferencing it would throw out of the hook.
+  if (pending != null) {
+    const reset = invalidationOf(pending, receipt.text)
+    if (reset !== undefined) {
+      await resetInvalidatedPending(deps, exec, sessionId, pending, reset)
+      return decision
     }
   }
 
   const substituted = decideSubstitution(receipt)
   if (substituted !== undefined) return substituted
 
-  // Second-projection guard: a receipt that already carries the host spill
-  // footer must not be projected again (design §5.4).
+  // Second-projection guard. The host spiller registers with `{ prepend: true }`,
+  // so its footer is applied to the decision *after* this listener's next(),
+  // never to the `result.content` received here. Check the decision that will
+  // enter history, and the receiver as it arrived (design §5.4).
   if (await isAlreadySpilled(deps, receipt.text)) return decision
+  const downstreamText = decisionTextOf(decision) ?? receipt.text
+  if (downstreamText !== receipt.text && await isAlreadySpilled(deps, downstreamText)) {
+    return decision
+  }
   return projectDecision(deps, receipt, decision)
 }
 

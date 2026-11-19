@@ -93,6 +93,39 @@ test('已含 spill 页脚但无 marker：alreadySpilled 拦截且 invalidate 沉
   assert.equal(invalidate(pending, footer), undefined)
 })
 
+test('marker 出现多次仍只判一次 pruned-reset', () => {
+  const twice = `${PRUNE_MARKER}body${PRUNE_MARKER}`
+  assert.equal(looksPruned(twice), true)
+  const pending = { stepId: 'A', anchors: { A: 'original' } } as any
+  assert.equal(invalidate(pending, twice), 'pruned-reset')
+})
+
+test('malformed anchor 记录是"无锚点"：缺 anchors / null / 非对象', () => {
+  assert.equal(invalidate({ stepId: 'A' } as any, 'anything'), undefined)
+  assert.equal(invalidate({ stepId: 'A', anchors: null } as any, 'anything'), undefined)
+  assert.equal(invalidate({ stepId: 'A', anchors: 'nope' } as any, 'anything'), undefined)
+  assert.equal(invalidate({ stepId: 'A', anchors: [] } as any, 'anything'), undefined)
+  assert.equal(invalidate({ stepId: 42, anchors: { A: 'x' } } as any, 'x'), undefined)
+  assert.equal(invalidate({ stepId: 'A', anchors: { A: 42 } } as any, '42'), undefined)
+})
+
+test('marker 优先于 malformed anchor 记录', () => {
+  const t = `head${PRUNE_MARKER}tail`
+  assert.equal(invalidate({ stepId: 'A' } as any, t), 'pruned-reset')
+  assert.equal(invalidate({ stepId: 'A', anchors: null } as any, t), 'pruned-reset')
+})
+
+test('step id 走原型链不算锚点（__proto__ / constructor / toString）', () => {
+  const plain = {} as any
+  for (const stepId of ['__proto__', 'constructor', 'toString', 'hasOwnProperty']) {
+    assert.equal(invalidate({ stepId, anchors: plain } as any, 'anything'), undefined)
+  }
+  // 自有的 __proto__ 数据属性仍然可以当锚点（computed key 不触发原型 setter）。
+  const own = { ['__proto__']: 'anything' } as any
+  assert.equal(invalidate({ stepId: '__proto__', anchors: own } as any, 'anything'), undefined) // 相等
+  assert.equal(invalidate({ stepId: '__proto__', anchors: own } as any, 'other'), 'compaction-reset')
+})
+
 // ---------------------------------------------------------------------------
 // 规则 6：AnchorStore 是纯会话键映射
 // ---------------------------------------------------------------------------
@@ -135,12 +168,14 @@ function hookSetup(over: {
   anchors?: any
   hasSpillNotice?: (text: string) => boolean
   receipts?: any
+  scope?: any
 } = {}): { host: any; receipts: any[] } {
   const host = fakeHost()
   const receipts: any[] = []
   const deps: any = {
     config: DEFAULT_CONFIG,
-    scope: {},
+    // Same cached judgement the protocol section reads; in scope by default.
+    scope: over.scope ?? { judgement: () => true },
     receipts: over.receipts ?? { append: async (r: any) => { receipts.push(r) } },
     // Default: no host notice, so the suite never needs the host spill package.
     hasSpillNotice: over.hasSpillNotice ?? (() => false),
@@ -150,11 +185,16 @@ function hookSetup(over: {
   return { host, receipts }
 }
 
-/** Run the post-execute waterfall once with one text receipt. */
-async function runPost(host: any, text: string, decision: any = { kind: 'accept' }): Promise<any> {
+/** Run the post-execute waterfall once; `content` may be one string or several text blocks. */
+async function runPost(
+  host: any,
+  content: string | ReadonlyArray<{ type: string; text?: string }>,
+  decision: any = { kind: 'accept' },
+): Promise<any> {
+  const blocks = typeof content === 'string' ? [{ type: 'text', text: content }] : content
   return host.callHook(
     'tools/post-execute',
-    [agentExec(), { content: [{ type: 'text', text }] }],
+    [agentExec(), { content: blocks }],
     async () => decision,
   )
 }
@@ -306,4 +346,160 @@ test('已含 spill 页脚：post-execute 先问 notice 断言，且不写 reset 
   assert.deepEqual(seen, [footer])
   assert.equal(receipts.length, 0)
   assert.notEqual(anchors.get(SESSION), undefined)
+})
+
+// ---------------------------------------------------------------------------
+// 评审修复：scope 闸门、跨 block 页脚、marker 位置与优先级
+// ---------------------------------------------------------------------------
+
+test('超出 scope 的会话：两个守卫都不运行，pending 不动、notice 不调用', async () => {
+  const seen: string[] = []
+  const anchors = new AnchorStore()
+  anchors.set(SESSION, { stepId: 'A', anchors: { A: 'original text' } })
+  const { host, receipts } = hookSetup({
+    anchors,
+    scope: { judgement: () => false },
+    hasSpillNotice: (text) => { seen.push(text); return false },
+  })
+
+  const res = await runPost(host, 'completely different')
+
+  assert.equal(res.kind, 'accept')
+  assert.notEqual(anchors.get(SESSION), undefined)
+  assert.equal(receipts.length, 0)
+  assert.deepEqual(seen, [])
+})
+
+test('judgement 缓存未命中（无 judgement 方法）同样 fail-closed：守卫不运行', async () => {
+  const seen: string[] = []
+  const anchors = new AnchorStore()
+  anchors.set(SESSION, { stepId: 'A', anchors: { A: 'original text' } })
+  const { host, receipts } = hookSetup({
+    anchors,
+    scope: {},
+    hasSpillNotice: (text) => { seen.push(text); return false },
+  })
+
+  const res = await runPost(host, 'completely different')
+
+  assert.equal(res.kind, 'accept')
+  assert.notEqual(anchors.get(SESSION), undefined)
+  assert.equal(receipts.length, 0)
+  assert.deepEqual(seen, [])
+})
+
+test('marker 出现两次：只写一条 reset 收据', async () => {
+  const anchors = new AnchorStore()
+  const text = `${PRUNE_MARKER}body${PRUNE_MARKER}`
+  anchors.set(SESSION, { stepId: 'A', anchors: { A: text } })
+  const { host, receipts } = hookSetup({ anchors })
+
+  const res = await runPost(host, text)
+
+  assert.equal(res.kind, 'accept')
+  assert.equal(receipts.length, 1)
+  assert.equal(receipts[0].code, 'pruned-reset')
+})
+
+test('marker 在非第一个 text block 里也识别（canonicalise 合并后判定）', async () => {
+  const anchors = new AnchorStore()
+  const joined = `head${PRUNE_MARKER}tail`
+  anchors.set(SESSION, { stepId: 'A', anchors: { A: joined } })
+  const { host, receipts } = hookSetup({ anchors })
+
+  const res = await runPost(host, [
+    { type: 'text', text: 'head' },
+    { type: 'text', text: PRUNE_MARKER },
+    { type: 'text', text: 'tail' },
+  ])
+
+  assert.equal(res.kind, 'accept')
+  assert.equal(receipts.length, 1)
+  assert.equal(receipts[0].code, 'pruned-reset')
+})
+
+test('跨 block 的 spill 页脚：canonicalise 合并后仍被 notice 断言识别', async () => {
+  const footer = 'head\n\n(Omitted 12 bytes. Full formatted result stored at: /spill/x.txt. Use read.)'
+  const seen: string[] = []
+  const { host, receipts } = hookSetup({
+    hasSpillNotice: (text) => { seen.push(text); return text === footer },
+  })
+
+  const res = await runPost(host, [
+    { type: 'text', text: 'head\n\n(Omitted 12 bytes. Full formatted ' },
+    { type: 'text', text: 'result stored at: /spill/x.txt. Use read.)' },
+  ])
+
+  assert.equal(res.kind, 'accept')
+  assert.deepEqual(seen, [footer])
+  assert.equal(receipts.length, 0)
+})
+
+test('next() 的 decision 已带 spill 页脚（result 没有）：跳过投影', async () => {
+  const footer = 'head\n\n(Omitted 12 bytes. Full formatted result stored at: /spill/x.txt. Use read.)'
+  const seen: string[] = []
+  const { host, receipts } = hookSetup({
+    hasSpillNotice: (text) => { seen.push(text); return text === footer },
+  })
+  const decision = {
+    kind: 'accept',
+    content: [
+      { type: 'text', text: 'head\n\n(Omitted 12 bytes. Full formatted ' },
+      { type: 'text', text: 'result stored at: /spill/x.txt. Use read.)' },
+    ],
+  }
+
+  const res = await runPost(host, 'plain tool output', decision)
+
+  assert.equal(res, decision)
+  // 先看到达时的原文，再看 next() 之后的 decision 正文；页脚只存在于后者。
+  assert.deepEqual(seen, ['plain tool output', footer])
+  assert.equal(receipts.length, 0)
+})
+
+test('pruned 与 already-spilled 同时成立：pruned-reset 先赢，只写一条收据', async () => {
+  const footer = 'body\n\n(Omitted 12 bytes. Full formatted result stored at: /spill/x.txt. Use read.)'
+  const text = `${PRUNE_MARKER}${footer}`
+  const seen: string[] = []
+  const anchors = new AnchorStore()
+  anchors.set(SESSION, { stepId: 'A', anchors: { A: text } })
+  const { host, receipts } = hookSetup({
+    anchors,
+    hasSpillNotice: (value) => { seen.push(value); return true },
+  })
+
+  const res = await runPost(host, text)
+
+  assert.equal(res.kind, 'accept')
+  assert.equal(anchors.get(SESSION), undefined)
+  assert.equal(receipts.length, 1)
+  assert.equal(receipts[0].code, 'pruned-reset')
+  assert.deepEqual(seen, [])
+})
+
+test('malformed anchor 记录在 hook 里不抛：marker 仍判 pruned-reset', async () => {
+  const anchors = {
+    get: () => ({ stepId: 'A' }),
+    clear: () => {},
+  }
+  const { host, receipts } = hookSetup({ anchors })
+
+  const res = await runPost(host, `head${PRUNE_MARKER}tail`)
+
+  assert.equal(res.kind, 'accept')
+  assert.equal(receipts.length, 1)
+  assert.equal(receipts[0].code, 'pruned-reset')
+})
+
+test('非对象 anchors 且无 marker：hook 不写收据、不抛', async () => {
+  const anchors = {
+    get: () => ({ stepId: 'A', anchors: 'nope' }),
+    clear: () => {},
+  }
+  const { host, receipts } = hookSetup({ anchors })
+
+  const res = await runPost(host, 'plain output')
+
+  assert.equal(res.kind, 'accept')
+  assert.equal(receipts.length, 0)
 })
