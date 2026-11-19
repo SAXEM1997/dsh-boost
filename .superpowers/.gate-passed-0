@@ -1,0 +1,10 @@
+# Gate 0: 设计评审收敛
+# 评审形态：文档类 3Agent × 3 轮（结构/落地/对齐）+ 合并 + 监督
+name=2026-11-18-dsh-token-efficiency
+gate=0
+phase=phase0
+date=2026-11-19
+rounds=3
+p0_final=0
+p1_final=0
+exit_reason=P0=0 且 P1=0，仅剩元数据级 P2/P3 并已修复；用户批准进入 Phase 2

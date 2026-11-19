@@ -1,0 +1,28 @@
+{
+  "name": "2026-11-18-dsh-token-efficiency",
+  "currentPhase": "phase2",
+  "completedPhases": [
+    "phase0",
+    "phase1"
+  ],
+  "mode": "complex",
+  "blockedReason": null,
+  "evidence": {
+    "phase1": {
+      "PP-03": {
+        "decision": "skip",
+        "reason": "用户 m00705 选择 A：跳过 Phase 1 propose，直接进 Phase 2"
+      },
+      "PP-04": {
+        "decision": "skipped",
+        "note": "PP-03=skip，无 OpenSpec 对照表"
+      }
+    },
+    "phase2": {
+      "PP-05": {
+        "decision": "generate",
+        "reason": "docs/superpowers/plans/ 下无既有 plan，重新生成"
+      }
+    }
+  }
+}
