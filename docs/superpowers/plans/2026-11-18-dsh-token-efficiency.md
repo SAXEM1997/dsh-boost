@@ -2051,7 +2051,7 @@ git commit -m "feat: pending queue and synthesized tool turn"
 
 顺序固定：`next() → canonicalise → invalidate → decide → （shadow 写收据 | 非 shadow 准入后入队 | fallback 清队列）→ 投影 → 返回 decision`。
 投影放在 decide 之后，因为守卫与 Jev 读的是**规范化原文**；投影只影响进历史的内容。
-`tools/execute`：`peek(sessionId)` 后交 `rejectIfTampered(exec, entry)`；拒绝写 `dispatch-rejected` 收据、清队列、返回 `ToolExecutionResult` 的 failure 分支（`{isError:true, error:{message, info:{code}}, content}`，见附录 §2.3）。
+`tools/execute`：`peek(sessionId)` 取 entry；先比对 `exec.callId === entry.callId`（`rejectIfTampered` 只比 name/args，callId 由本处负责），再交 `rejectIfTampered(exec, entry)`。**两条路径都必须 `clear(sessionId)`**——拒绝路径写 `dispatch-rejected` 收据并返回 failure 分支（`{isError:true, error:{message, info:{code}}, content}`，见附录 §2.3）；接受路径也必须清，否则残留的 entry 会让该 session 后续每一个不同的调用都被误判为 `dispatch-rejected`。`DispatchExec` 需要 `callId` 与 `agent` 两个字段（T18 只声明了 `name`/`arguments`）。
 
 - [ ] **Step 4: 运行确认通过** — 5 tests PASS
 - [ ] **Step 5: 重构** — 抽 `applyDecision(deps, result, ctx)`
@@ -2091,7 +2091,7 @@ git commit -m "feat: wire post-execute decisions, admission, projection and tamp
 - [ ] **Step 3: 实现**
 
 规则顺序（**检查必须在写收据与 `queue.take` 之前**）：`purpose` → `receipts.stopped()` → 可见性（`resolveSession` **必填**，返回 `undefined` 即放行并清该 session 队列）→ 无 pending → `budget.take()` → 合成。
-合成分支：`markSubstituted(candidateId)` → 写 `{kind:'substitute'}` → `take` → `yield* synthesizeTurn(e)`，**不再调 `next()`**。
+合成分支：`markSubstituted(candidateId)` → 写 `{kind:'substitute'}` → **`peek`（不是 `take`）** → `yield* synthesizeTurn(e)`，**不再调 `next()`**。entry 必须存活到 `tools/execute`：合成的回合在流结束后才派发工具调用，若此处 `take` 掉，T23b 的 `peek` 永远为空，防篡改在生产路径上**一次都不会触发**（而 T23b 的单元测试手工塞队列仍然全绿）。消费方是 T23b 的 execute 钩子。
 透传分支：`yield* next()`，遇 `{type:'usage'}` 映射后 `request()`；若上一轮有 `markSubstituted`，此时 `settle()` 并追加 `substitute-settled`。
 `plans`：拼 `text-delta` 成文本，流结束后 `parsePlan` 存进 map。
 `clock`：由 `agent/request` 的 `{turn, step}` 驱动 `onModelRequest()`，turn 变化时 `budget.reset()`。
