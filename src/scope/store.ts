@@ -9,8 +9,11 @@
  * (`DEFAULT_SCOPE`) and a stable code for the receipt/status channel — and a
  * failed read never touches the file. Writes are compare-and-swap: the caller
  * passes the revision it last saw, the store locks, verifies that revision,
- * mutates, bumps it, and renames a temporary file over `scope.json`, so a lost
- * update is impossible and a crash never leaves a half-written document.
+ * mutates, bumps it, and renames a temporary file over `scope.json`. The rename
+ * makes a crash leave either the old or the new document, never a half-written
+ * one. The revision check makes a lost update require the narrow stale-lock
+ * reclaim race documented at `acquireLock`; it cannot silently corrupt or merge
+ * a document.
  *
  * ## Sync/async boundary
  *
@@ -22,12 +25,16 @@
  *
  * ## Cache
  *
- * The cache is valid only when both the mtime and the parsed `revision` are
- * unchanged. mtime alone is not enough: filesystem timestamp granularity is
- * coarse enough for two writes to land in the same millisecond, and the write
- * that wins then carries the higher revision. Cache hits keep the cached
- * document object internally, so every returned document is a deep copy: a
- * caller that mutates a result must never poison the cache.
+ * The cache stores the last validated parse next to the exact bytes and mtime
+ * it was parsed from. A read reuses that parse only when both the mtime and the
+ * exact bytes match. Byte identity implies the parsed `revision` is unchanged
+ * (the invariant design §5.5 asks for), and it is strictly safer than an
+ * mtime+revision key: an external edit that preserves both would otherwise be
+ * served from the old parse. The cache therefore avoids re-parsing the same
+ * bytes, not the read itself — the revision check requires reading
+ * `scope.json`. Cache hits keep the cached document object internally and
+ * every returned document is a deep copy, so a caller mutating a result cannot
+ * poison the cache.
  *
  * The judgement cache is intentionally per agent key (the session id). A
  * single global value would leak one workspace's visibility into every other
@@ -63,15 +70,18 @@ const SCOPE_FILE = 'scope.json'
 const LOCK_FILE = 'scope.lock'
 /** A lock older than this is a reclaim candidate — but only if its pid is dead. */
 const LOCK_STALE_MS = 60_000
+/** Largest value `process.kill` accepts as a pid (signed 32-bit). */
+const MAX_PID = 2_147_483_647
 
 /**
  * One disk read. `ok: false` still carries a document to serve (the strict
  * default), the stable code to report, and whether the file simply did not
  * exist — only `write` uses `missing`, to tell a first write from an I/O error.
+ * `cause` keeps the underlying error for the write path's diagnostic.
  */
 type DiskRead =
-  | { ok: true; doc: ScopeDoc; mtimeMs: number }
-  | { ok: false; doc: ScopeDoc; code: ScopeCode; missing: boolean }
+  | { ok: true; doc: ScopeDoc; mtimeMs: number; text: string }
+  | { ok: false; doc: ScopeDoc; code: ScopeCode; missing: boolean; cause?: unknown }
 
 /** A write-path failure: the stable code is on `.code` and in the message. */
 function scopeError(code: ScopeCode, detail: string): Error & { code: ScopeCode } {
@@ -96,6 +106,8 @@ function messageOf(error: unknown): string {
  * `EPERM` means the process exists but belongs to another user, so it counts as
  * alive; only `ESRCH` proves the recorded writer is gone. Any other outcome is
  * treated as alive too: reclamation must never evict a writer on a guess.
+ * `readLockPid` bounds the pid to the range `process.kill` accepts, so the
+ * impossible-pid `ERR_INVALID_ARG_TYPE` path is never reached.
  */
 function isProcessAlive(pid: number): boolean {
   try {
@@ -118,6 +130,7 @@ function readFailed(error: unknown): DiskRead {
     doc: cloneDoc(DEFAULT_SCOPE),
     code: ERR_SCOPE_READ_FAILED,
     missing: errorCode(error) === 'ENOENT',
+    cause: error,
   }
 }
 
@@ -126,20 +139,27 @@ function decode(text: string, mtimeMs: number): DiskRead {
   let raw: unknown
   try {
     raw = JSON.parse(text)
-  } catch {
-    return { ok: false, doc: cloneDoc(DEFAULT_SCOPE), code: ERR_SCOPE_PARSE_FAILED, missing: false }
+  } catch (error) {
+    return {
+      ok: false,
+      doc: cloneDoc(DEFAULT_SCOPE),
+      code: ERR_SCOPE_PARSE_FAILED,
+      missing: false,
+      cause: error,
+    }
   }
   const parsed = parseScope(raw)
   if (parsed.code !== undefined) {
     return { ok: false, doc: parsed.doc, code: parsed.code, missing: false }
   }
-  return { ok: true, doc: parsed.doc, mtimeMs }
+  return { ok: true, doc: parsed.doc, mtimeMs, text }
 }
 
 export class ScopeStore {
   private readonly file: string
   private readonly lockFile: string
-  private cached?: { mtimeMs: number; doc: ScopeDoc }
+  private cached?: { mtimeMs: number; text: string; doc: ScopeDoc }
+  private lockOwner?: string
   private readonly judgements = new Map<string, boolean>()
 
   constructor(private readonly dir: string) {
@@ -161,15 +181,9 @@ export class ScopeStore {
       return { doc: cloneDoc(result.doc), degraded: 'scope-degraded', code: result.code }
     }
 
-    const cached = this.cached
-    if (
-      cached !== undefined &&
-      cached.mtimeMs === result.mtimeMs &&
-      cached.doc.revision === result.doc.revision
-    ) {
-      return { doc: cloneDoc(cached.doc) }
-    }
-    this.cached = { mtimeMs: result.mtimeMs, doc: result.doc }
+    // On a cache hit `result.doc` is the cached object (identical bytes);
+    // either way the caller gets a copy, so a mutation cannot poison it.
+    this.cached = { mtimeMs: result.mtimeMs, text: result.text, doc: result.doc }
     return { doc: cloneDoc(result.doc) }
   }
 
@@ -189,7 +203,8 @@ export class ScopeStore {
     try {
       const current = this.readDiskSync()
       if (!current.ok && current.code === ERR_SCOPE_READ_FAILED && !current.missing) {
-        throw scopeError(ERR_SCOPE_READ_FAILED, `cannot read ${this.file}`)
+        const detail = current.cause === undefined ? 'unknown read error' : messageOf(current.cause)
+        throw scopeError(ERR_SCOPE_READ_FAILED, `cannot read ${this.file}: ${detail}`)
       }
       if (current.doc.revision !== baseRevision) {
         throw scopeError(
@@ -203,15 +218,17 @@ export class ScopeStore {
         revision: baseRevision + 1,
         updatedAt: new Date().toISOString(),
       }
-      let mtimeMs: number
+      let written: { mtimeMs: number; text: string }
       try {
-        mtimeMs = this.writeAtomic(doc)
+        written = this.writeAtomic(doc)
       } catch (error) {
         // Serialization and disk failures are storage failures too; rule 8
         // requires a stable code on every error the write path raises.
         throw scopeError(ERR_SCOPE_READ_FAILED, `cannot write ${this.file}: ${messageOf(error)}`)
       }
-      this.cached = { mtimeMs, doc }
+      // Clone before caching: `doc` may still share arrays with an object the
+      // caller (or `mutate`) holds, and the cache must never alias those.
+      this.cached = { mtimeMs: written.mtimeMs, text: written.text, doc: cloneDoc(doc) }
       return cloneDoc(doc)
     } finally {
       this.releaseLock()
@@ -233,10 +250,23 @@ export class ScopeStore {
     try {
       const stats = await stat(this.file)
       const text = await readFile(this.file, 'utf8')
-      return decode(text, stats.mtimeMs)
+      return this.decodeFromCache(text, stats.mtimeMs)
     } catch (error) {
       return readFailed(error)
     }
+  }
+
+  /**
+   * Reuse the previous parse only when the exact bytes and mtime were already
+   * parsed. Byte identity is a stronger key than mtime+revision: an external
+   * edit that keeps both cannot be served from the old parse.
+   */
+  private decodeFromCache(text: string, mtimeMs: number): DiskRead {
+    const cached = this.cached
+    if (cached !== undefined && cached.mtimeMs === mtimeMs && cached.text === text) {
+      return { ok: true, doc: cached.doc, mtimeMs, text }
+    }
+    return decode(text, mtimeMs)
   }
 
   /** Sync read path, used only inside the write lock (see the module comment). */
@@ -263,16 +293,22 @@ export class ScopeStore {
    * Take the write lock, reclaiming a stale lock at most once.
    *
    * A lock is stale only when it is older than 60 s **and** its recorded pid is
-   * dead (or unrecorded/unparseable); a live writer is never evicted by timeout
-   * alone. If the exclusive create still loses the race, the write is refused.
+   * dead (or unrecorded/unparseable/out of pid range); a live writer is never
+   * evicted by timeout alone. The staleness decision and the unlink are
+   * synchronous here, so they share one tick. A residual cross-process race
+   * remains: two writers can both judge the same lock stale, and one can unlink
+   * the other's fresh lock. `releaseLock` therefore only removes a lock whose
+   * content it wrote, and the CAS revision check still refuses to merge
+   * divergent writes; a lost update in that window is possible, corruption is
+   * not.
    */
   private async acquireLock(): Promise<void> {
     if (await this.createLock()) return
-    if (!(await this.lockIsStale())) {
+    if (!this.lockIsStale()) {
       throw scopeError(ERR_SCOPE_LOCKED, `${this.lockFile} is held by another writer`)
     }
     try {
-      await unlink(this.lockFile)
+      unlinkSync(this.lockFile)
     } catch (error) {
       if (errorCode(error) !== 'ENOENT') {
         throw scopeError(ERR_SCOPE_LOCKED, `cannot reclaim ${this.lockFile}: ${messageOf(error)}`)
@@ -293,9 +329,10 @@ export class ScopeStore {
       throw scopeError(ERR_SCOPE_LOCKED, `cannot create ${this.lockFile}: ${messageOf(error)}`)
     }
 
+    const content = JSON.stringify({ pid: process.pid, startedAt: Date.now() })
     let failure: unknown
     try {
-      await handle.writeFile(JSON.stringify({ pid: process.pid, startedAt: Date.now() }))
+      await handle.writeFile(content)
     } catch (error) {
       failure = error
     } finally {
@@ -306,14 +343,15 @@ export class ScopeStore {
       await unlink(this.lockFile).catch(() => {})
       throw scopeError(ERR_SCOPE_LOCKED, `cannot write ${this.lockFile}: ${messageOf(failure)}`)
     }
+    this.lockOwner = content
     return true
   }
 
   /** Both halves of the reclamation condition: old enough, and owner dead. */
-  private async lockIsStale(): Promise<boolean> {
+  private lockIsStale(): boolean {
     let mtimeMs: number
     try {
-      mtimeMs = (await stat(this.lockFile)).mtimeMs
+      mtimeMs = statSync(this.lockFile).mtimeMs
     } catch (error) {
       // It vanished between EEXIST and stat; let the retry race for it.
       return errorCode(error) === 'ENOENT'
@@ -325,40 +363,55 @@ export class ScopeStore {
 
   /**
    * The pid recorded in the lock file, or undefined when it is absent,
-   * unparseable or not a positive integer (never pass a negative pid to
-   * `process.kill`: it signals a process group).
+   * unparseable or outside the range `process.kill` accepts. An impossible pid
+   * is effectively pid-less: it makes the lock reclaimable after 60 s instead
+   * of wedging every future write. A negative pid is also rejected here —
+   * `process.kill` would interpret it as a process group.
    */
   private readLockPid(): number | undefined {
     try {
       const parsed: unknown = JSON.parse(readFileSync(this.lockFile, 'utf8'))
       if (parsed === null || typeof parsed !== 'object') return undefined
       const pid = (parsed as { pid?: unknown }).pid
-      return typeof pid === 'number' && Number.isInteger(pid) && pid > 0 ? pid : undefined
+      return typeof pid === 'number' && Number.isInteger(pid) && pid > 0 && pid <= MAX_PID
+        ? pid
+        : undefined
     } catch {
       return undefined
     }
   }
 
-  /** Remove the lock; ENOENT means it is already gone, which is success. */
+  /**
+   * Remove the lock only if it still contains exactly what this acquisition
+   * wrote. An unconditional unlink would delete a replacement lock another
+   * writer created after a stale-reclaim race. Every error is swallowed:
+   * cleanup must never mask the causal error (rule 8), and a lock left behind
+   * is reclaimable after 60 s while a masked conflict is not diagnosable.
+   */
   private releaseLock(): void {
+    const owner = this.lockOwner
+    this.lockOwner = undefined
+    if (owner === undefined) return
     try {
-      unlinkSync(this.lockFile)
-    } catch (error) {
-      if (errorCode(error) !== 'ENOENT') throw error
+      if (readFileSync(this.lockFile, 'utf8') === owner) unlinkSync(this.lockFile)
+    } catch {
+      // See the method comment: cleanup never rethrows.
     }
   }
 
   /**
-   * Write `doc` to a temporary file, fsync it, and rename it over `scope.json`.
-   * Returns the stored file's mtime for the cache. A failed write removes the
-   * temporary file; the caller's `finally` removes the lock.
+   * Serialize `doc` into a temporary file, fsync it, and rename it over
+   * `scope.json`. Returns the stored file's mtime and the exact text written
+   * (for the cache). A failed write removes the temporary file; the caller's
+   * `finally` removes the lock.
    */
-  private writeAtomic(doc: ScopeDoc): number {
+  private writeAtomic(doc: ScopeDoc): { mtimeMs: number; text: string } {
     const tempFile = join(this.dir, `.${SCOPE_FILE}.${process.pid}.${randomUUID()}.tmp`)
+    const text = `${JSON.stringify(doc)}\n`
     let fd: number | undefined
     try {
       fd = openSync(tempFile, 'w')
-      writeFileSync(fd, `${JSON.stringify(doc)}\n`)
+      writeFileSync(fd, text)
       fsyncSync(fd)
       closeSync(fd)
       fd = undefined
@@ -366,7 +419,7 @@ export class ScopeStore {
       // and the mtime of the inode is what `read()` will observe afterwards.
       const mtimeMs = statSync(tempFile).mtimeMs
       renameSync(tempFile, this.file)
-      return mtimeMs
+      return { mtimeMs, text }
     } catch (error) {
       if (fd !== undefined) {
         try {

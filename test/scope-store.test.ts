@@ -1,9 +1,19 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdir, mkdtemp, readdir, readFile, stat, utimes, writeFile } from 'node:fs/promises'
+import {
+  mkdir,
+  mkdtemp,
+  readdir,
+  readFile,
+  rmdir,
+  stat,
+  unlink,
+  utimes,
+  writeFile,
+} from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { existsSync } from 'node:fs'
+import { existsSync, mkdirSync, unlinkSync, writeFileSync } from 'node:fs'
 import { ScopeStore } from '../src/scope/store.ts'
 
 /** A lock mtime comfortably past the 60 s threshold; no test sleeps for it. */
@@ -56,6 +66,17 @@ test('base revision 不符时拒绝（TOCTOU）', async () => {
   await assert.rejects(() => s.write(d => d, 0), /ERR_SCOPE_REVISION_CONFLICT/)
 })
 
+test('base revision 非法值（-1 / NaN / Infinity）一律冲突且不写盘', async () => {
+  const dir = await tempDir()
+  const s = new ScopeStore(dir)
+  for (const base of [-1, Number.NaN, Number.POSITIVE_INFINITY]) {
+    await assert.rejects(() => s.write(d => d, base), /ERR_SCOPE_REVISION_CONFLICT/)
+    assert.equal(existsSync(join(dir, 'scope.json')), false)
+    assert.equal(existsSync(join(dir, 'scope.lock')), false)
+  }
+  assert.equal((await s.write(d => d, 0)).revision, 1)
+})
+
 test('锁被占用时拒绝', async () => {
   const dir = await mkdtemp(join(tmpdir(), 'scope-'))
   await writeFile(join(dir, 'scope.lock'), JSON.stringify({ pid: process.pid, startedAt: Date.now() }))
@@ -91,6 +112,24 @@ test('mtime 相同但 revision 变了，缓存仍失效（同毫秒两次写）'
   assert.equal(second.doc.mode, 'global')
 })
 
+test('mtime 与 revision 都不变但文件内容变了，read 返回新内容', async () => {
+  const dir = await tempDir()
+  const file = join(dir, 'scope.json')
+  const pinned = new Date(1_700_000_001_000)
+  await writeFile(file, JSON.stringify({ version: 2, revision: 1, mode: 'selected' }))
+  await utimes(file, pinned, pinned)
+
+  const s = new ScopeStore(dir)
+  assert.equal((await s.read()).doc.mode, 'selected')
+  const cachedMtime = (await stat(file)).mtimeMs
+
+  await writeFile(file, JSON.stringify({ version: 2, revision: 1, mode: 'global' }))
+  await utimes(file, pinned, pinned)
+  assert.equal((await stat(file)).mtimeMs, cachedMtime, 'test premise: mtime must be unchanged')
+
+  assert.equal((await s.read()).doc.mode, 'global')
+})
+
 test('缓存命中返回副本：改写 read 结果不污染缓存', async () => {
   const dir = await tempDir()
   await writeFile(
@@ -107,6 +146,19 @@ test('缓存命中返回副本：改写 read 结果不污染缓存', async () =>
   assert.deepEqual(second.doc.workspaceIds, ['ws-1'])
   assert.equal(second.doc.mode, 'selected')
   assert.equal(second.doc.revision, 3)
+})
+
+test('mutate 返回的数组被调用方改写，不污染缓存与下一次读', async () => {
+  const dir = await tempDir()
+  const s = new ScopeStore(dir)
+  const held: string[] = ['ws-1']
+  await s.write(d => ({ ...d, workspaceIds: held }), 0)
+  held.push('ws-INJECTED')
+
+  const after = await s.read()
+  assert.deepEqual(after.doc.workspaceIds, ['ws-1'])
+  const stored = JSON.parse(await readFile(join(dir, 'scope.json'), 'utf8'))
+  assert.deepEqual(stored.workspaceIds, ['ws-1'])
 })
 
 test('降级结果不进缓存：文件出现后下一次读取立即看到', async () => {
@@ -152,6 +204,36 @@ test('原子写失败时锁仍被释放，且不残留临时文件', async () =>
   assert.equal((await s.write(d => d, 0)).revision, 1)
 })
 
+test('释放锁只删自己写的锁：临界区内被替换的锁文件保留', async () => {
+  const dir = await tempDir()
+  const lock = join(dir, 'scope.lock')
+  const s = new ScopeStore(dir)
+  await s.write(d => {
+    unlinkSync(lock)
+    writeFileSync(lock, JSON.stringify({ pid: 1, startedAt: 1 }))
+    return d
+  }, 0)
+
+  assert.equal(existsSync(lock), true)
+  assert.deepEqual(JSON.parse(await readFile(lock, 'utf8')), { pid: 1, startedAt: 1 })
+  await unlink(lock)
+})
+
+test('清理锁失败不掩盖写入成功（releaseLock 吞掉清理错误）', async () => {
+  const dir = await tempDir()
+  const lock = join(dir, 'scope.lock')
+  const s = new ScopeStore(dir)
+  const result = await s.write(d => {
+    unlinkSync(lock)
+    mkdirSync(lock)
+    return d
+  }, 0)
+
+  assert.equal(result.revision, 1)
+  assert.equal(existsSync(join(dir, 'scope.json')), true)
+  await rmdir(lock)
+})
+
 test('60 秒前创建且 pid 已死的锁被回收', async () => {
   const dir = await tempDir()
   const lock = join(dir, 'scope.lock')
@@ -194,6 +276,16 @@ test('过期但不可解析或无 pid 的锁可回收', async () => {
   await writeFile(lock, JSON.stringify({ startedAt: Date.now() - 61_000 }))
   await utimes(lock, STALE_LOCK_AT, STALE_LOCK_AT)
   assert.equal((await s.write(d => d, 1)).revision, 2)
+  assert.equal(existsSync(lock), false)
+})
+
+test('pid 超出 32 位范围的过期锁按无主锁回收', async () => {
+  const dir = await tempDir()
+  const lock = join(dir, 'scope.lock')
+  await writeFile(lock, JSON.stringify({ pid: 2 ** 32, startedAt: Date.now() - 61_000 }))
+  await utimes(lock, STALE_LOCK_AT, STALE_LOCK_AT)
+
+  assert.equal((await new ScopeStore(dir).write(d => d, 0)).revision, 1)
   assert.equal(existsSync(lock), false)
 })
 
@@ -314,6 +406,9 @@ test('scope.json 不可读（是目录）时 read 降级、write 抛 ERR_SCOPE_R
       const scopeError = error as NodeJS.ErrnoException
       assert.equal(scopeError.code, 'ERR_SCOPE_READ_FAILED')
       assert.match(scopeError.message, /ERR_SCOPE_READ_FAILED/)
+      // The underlying errno must survive: EACCES/EISDIR/ENOTDIR are different
+      // operator problems, and the message is the only diagnostic channel.
+      assert.match(scopeError.message, /EISDIR/)
       return true
     },
   )
