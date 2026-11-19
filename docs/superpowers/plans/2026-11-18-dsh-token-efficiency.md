@@ -883,6 +883,7 @@ git commit -m "feat: atomic scope writes with lock"
 - Produces: `export interface WorkspaceRegistry { list(): readonly { id: string; path: string }[]; resolveByPath?(path: string): Promise<{ id: string } | undefined> }`——**宿主只有同步 `list()` 与异步 `resolveByPath()`，没有 `byPath`**
 - Produces: `export function workspaceIdOf(agent: { session?: { header?: { cwd?: string } } } | undefined, registry: WorkspaceRegistry | undefined): string | undefined`（`cwd` 经 `registry.list()` 按 `path` 精确匹配换成宿主 UUID；**不是路径本身**，也不 await——`systemPrompt` 装配是同步的。异步 `resolveByPath` 只用于预热缓存）
 - Produces: `export async function resolveVisible(store: ScopeStore, agent: unknown, registry: WorkspaceRegistry | undefined): Promise<boolean>`
+- Produces: `export function supportsStepWhen(tools: { resolve?: unknown }): boolean`——探测宿主 `ctx.tools.resolve` 是否可用（`typeof tools?.resolve === 'function'`）；为假时 T19 整族不注册
 - Produces: `test/fakes/host.ts` 的 `export function fakeHost(overrides?: Record<string, unknown>): any`——**必须暴露**：`register/resolve/definitions`、`llm.stream`、`systemPrompt.section`、`tokenMeter`、`spillStore`、`callHook(name, args, next)`、`receipts: unknown[]`、`hooked(): string[]`、`section(name?): { text: (c: any) => string } | undefined`、`nextCalls: number`、`synthesized: number`、`stream(sessionId: string, options?: Partial<GenerateOptions>): AsyncIterable<StreamChunk>`、`lastStream(): AsyncIterable<StreamChunk> | undefined`、`visible(name: string, agent: AgentLike): Promise<boolean>`
 
 - [ ] **Step 1: 写失败测试**
@@ -1480,8 +1481,9 @@ git commit -m "feat: admission accounting and per-turn step budget"
 ### Task 17: 钩子装配（post-execute / llm-stream / execute / systemPrompt）
 
 **Files:**
-- Create: `src/hooks/post-execute.ts`, `src/hooks/llm-stream.ts`, `test/hooks.test.ts`
+- Create: `src/hooks/post-execute.ts`, `test/hooks.test.ts`
 - Modify: `src/index.ts`, `test/fakes/host.ts`
+- 注意：`src/hooks/llm-stream.ts` 由 **T23c** 创建（本任务只做 `llm/stream` 的第一行 selector 放行占位，直接写在 `post-execute.ts` 的 `registerHooks` 里；T23c 再把钩子体抽到独立文件）
 
 **Interfaces:**
 - Consumes: `canonicalise`（T3）、`projectApply`/`projectShadow`（T5/T6）、`ReceiptStore`（T7）、`ScopeStore`/`resolveVisible`（T9/T10）、`SELECTOR_PURPOSE`（T14）
