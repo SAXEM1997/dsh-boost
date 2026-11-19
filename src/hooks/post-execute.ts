@@ -21,9 +21,12 @@
  *   until Task 23c adds the pending-turn branch.
  * - `tools/execute` looks the session's pending substitution up with `peek`
  *   (never `take`: the entry must survive to this hook), compares the arriving
- *   `callId` itself, then hands name/arguments to `rejectIfTampered`. The
- *   entry is cleared on **both** paths — accepted and rejected — because a
- *   stale entry would falsely reject every later differing call in the session.
+ *   `callId` itself. A **differing** `callId` is not tampering: the host assigns
+ *   call ids and our synthesized turn sets the one we chose, so a call carrying
+ *   a different id is an ordinary call that has nothing to do with the
+ *   substitution — it passes through untouched. Only when the ids are equal does
+ *   `rejectIfTampered` run, and only then is the entry cleared (on accept or
+ *   reject), because the entry has then served its purpose.
  * - the `systemPrompt` section reads the per-agent judgement cache
  *   synchronously. Its `text` must be a function, never a static string: a
  *   static string would inject the protocol into every session unconditionally
@@ -754,9 +757,12 @@ function substitutableSession(deps: HookDeps, sessionId: string, doc: ScopeDoc):
  *
  * `ask-selector` is Task 23c's seam: this hook keeps the plan untouched and
  * performs no selector call (the selector is an LLM request, and this task owns
- * no stream hook). `fallback` clears the session's pending entry and records
- * the decision code; a commit consumes the candidate and, outside shadow
- * mode, parks the substituted call for `tools/execute`.
+ * no stream hook). `fallback` records the decision code and leaves the pending
+ * entry alone: this invocation has enqueued nothing, so any entry it finds
+ * belongs to another call, and clearing it would cancel a live substitution in
+ * a multi-call step. A commit consumes the candidate and, outside shadow mode,
+ * parks the substituted call for `tools/execute`; the entry is dropped at turn
+ * rollover or on a reset.
  */
 async function decideSubstitution(
   deps: HookDeps,

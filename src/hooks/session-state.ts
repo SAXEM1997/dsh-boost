@@ -10,10 +10,10 @@
  *   candidate id). Without the second half a later step's
  *   `{ "$public": { "after": "A" … } }` can never bind, so the plan could only
  *   ever commit its first step.
- * - **In-flight dispatches.** `tools/execute` clears the pending entry on both
- *   paths (a stale entry would falsely reject every later call in the session),
- *   but `tools/post-execute` still needs to know which candidate the arriving
- *   call belonged to. The execute hook records `callId -> candidateId` here
+ * - **In-flight dispatches.** `tools/execute` clears the pending entry once the
+ *   arriving call's id matches it (on accept or reject); a call with a different
+ *   id passes through untouched. `tools/post-execute` still needs to know which
+ *   candidate the arriving call belonged to. The execute hook records `callId -> candidateId` here
  *   before clearing, and the post-execute hook consumes it once.
  *
  * A new host turn drops both maps. Turn detection is lazy: the hooks see no
