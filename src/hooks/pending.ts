@@ -79,8 +79,10 @@ export interface PendingEntry {
  * expiry timer and no session hook here. A session that aborts between
  * `tools/post-execute` and the next `llm/stream` therefore parks its entry for
  * the process lifetime, so the owning hook must `clear` at session end. Failing
- * to clear only costs memory, never a wrong call — a stale entry is compared by
- * `callId` and rejected — but the parked `args` are still a leak.
+ * to clear costs memory and nothing else: the execute hook only intervenes when
+ * the arriving call's `callId` equals the entry's, and a call with any other id
+ * passes through untouched, so a stale entry can neither reject an ordinary call
+ * nor be matched by one. The parked `args` are still a leak.
  */
 export class PendingQueue {
   private readonly bySession = new Map<string, PendingEntry>()

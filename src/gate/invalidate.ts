@@ -135,10 +135,11 @@ export function alreadySpilled(text: string, hasNotice: (t: string) => boolean):
  * `receiptText` must be the **current body of the anchored receipt**. This
  * function cannot establish that identity — it only compares strings. The
  * model-request path (`llm/stream` with `options.messages`) is the caller that
- * can supply it; `post-execute` passes the current call's result, so only its
- * marker branch is meaningful there, and any `compaction-reset` it returns is a
- * conservative false positive that costs a substitution, never a wrong
- * projection.
+ * can supply it. `post-execute` deliberately does **not** call this function:
+ * the text it holds is the current call's result, not the anchored receipt's
+ * body, so an anchor comparison there would fire a false reset after every
+ * substitution and clear the anchors a real detection needs. That path calls
+ * `looksPruned` only.
  *
  * The function is total on malformed input: a null/undefined pending, a
  * missing or non-object `anchors`, a non-string `stepId`, or a non-string
