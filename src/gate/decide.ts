@@ -31,7 +31,10 @@
  *    that does not exist is `unresolvable` inside binding, not a separate
  *    existence check here: `receipts` only ever holds steps that already ran.
  * 4. **Count.** None → `no-candidate`; one → `commit` with the *bound* args;
- *    several → `ask-selector` carrying the surviving candidates in plan order.
+ *    several → `ask-selector` carrying each survivor as a fresh candidate whose
+ *    args are its bound tree. Every decision therefore hands the caller
+ *    executable args — the selector path and the commit path cannot diverge by
+ *    binding twice, and a `$public` template never leaves this module.
  *
  * Shadow mode (`shadow: true`) skips the whitelist. The shadow week records
  * substitution *potential* for every tool family (design §5.2-5: 影子期替换
@@ -39,9 +42,11 @@
  * the read/grep/glob three. Trivial candidates are still dropped in shadow: a
  * trivial guard means there was nothing to verify, so it is not potential.
  *
- * The returned `ask-selector.candidates` is a new array (whose elements are the
- * original candidate objects); `commit.args` is the freshly bound tree from
- * `bindArgs`, so the host never receives a `$public` template.
+ * The returned `ask-selector.candidates` is a new array of fresh candidate
+ * objects (`{ ...candidate, args: boundArgs }`), so the plan's own objects stay
+ * untouched and the args in the decision are ready to execute; `commit.args` is
+ * the same freshly bound tree. A `$public` template never survives into a
+ * decision.
  *
  * @module dsh-boost/gate/decide
  */
@@ -134,12 +139,21 @@ function bindAndVerify(
   return survivors
 }
 
-/** Turn the survivor list into the decision (rule 5). */
+/**
+ * Turn the survivor list into the decision (rule 5).
+ *
+ * Both outcomes carry the bound args, so the caller never has to bind again:
+ * `commit` returns them directly, `ask-selector` returns a fresh candidate per
+ * survivor (`{ ...candidate, args }`) and leaves the plan's objects untouched.
+ */
 function resolve(survivors: Viable[]): Decision {
   const [only] = survivors
   if (only === undefined) return fallback('no-candidate')
   if (survivors.length > 1) {
-    return { kind: 'ask-selector', candidates: survivors.map((entry) => entry.candidate) }
+    return {
+      kind: 'ask-selector',
+      candidates: survivors.map((entry) => ({ ...entry.candidate, args: entry.args })),
+    }
   }
   return { kind: 'commit', candidateId: only.candidate.id, args: only.args }
 }

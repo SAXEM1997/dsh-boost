@@ -147,6 +147,26 @@ test('两个同内容不同 id 的候选都合格 → ask-selector 含两者且�
   }
 })
 
+test('ask-selector 携带已绑定参数，plan 原件保持模板不变', () => {
+  const template = (field: string) => ({ $public: { after: 'root', field } })
+  const a = { id: 'A', tool: 'read', args: { path: template('path') }, guards: [{ text_contains: 'path:' }] }
+  const b = { id: 'B', tool: 'read', args: { path: template('name') }, guards: [{ text_contains: 'name:' }] }
+  const p = plan([a, b])
+  const d = decide({
+    plan: p, stepId: 'root', whitelist: WL,
+    receipts: new Map([['root', rc('path: "/from-root"\nname: "/other"')]]),
+  })
+  assert.equal(d.kind, 'ask-selector')
+  if (d.kind === 'ask-selector') {
+    // 每个候选带着绑定后的参数，且是新的对象（原件不被改写）。
+    assert.deepEqual(d.candidates.map((c) => c.args), [{ path: '/from-root' }, { path: '/other' }])
+    assert.notEqual(d.candidates[0], a)
+    assert.notEqual(d.candidates[1], b)
+  }
+  assert.deepEqual(a.args, { path: template('path') })
+  assert.deepEqual(b.args, { path: template('name') })
+})
+
 test('守卫只读 stepId 对应回执，不读其它节点', () => {
   const d = decide({
     plan: plan([{ id: 'A', tool: 'read', args: { path: '/a' }, guards: [{ text_contains: 'nope' }] }]),
