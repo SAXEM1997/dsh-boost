@@ -15,8 +15,8 @@
  * included.
  *
  * Skip reasons are stable codes, never prose: `error-receipt` (an error receipt
- * is evidence and is never projected), `empty`, `no-params` (the family has no
- * window), and `not-worth-it` (`truncate`'s own guard said no).
+ * is evidence and is never projected), `empty`, `family-not-configured` (the
+ * family has no window), and `not-worth-it` (`truncate`'s own guard said no).
  *
  * @module dsh-boost/projection/apply
  */
@@ -92,7 +92,7 @@ export async function projectShadow(input: {
   if (text === '') return { kind: 'skipped', reason: 'empty' }
 
   const params: ProjectionParams | undefined = cfg.projection[family]
-  if (!params) return { kind: 'skipped', reason: 'no-params' }
+  if (!params) return { kind: 'skipped', reason: 'family-not-configured' }
 
   const truncation = truncate(text, params)
   if (truncation === null) return { kind: 'skipped', reason: 'not-worth-it' }

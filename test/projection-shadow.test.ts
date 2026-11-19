@@ -41,7 +41,7 @@ test('after 按“头行 + head + 省略说明 + tail”估计，不是 t.after�
   assert.equal(o.saved, o.before! - o.after!)
 })
 
-test('未配置的工具族跳过（no-params），不抛错', async () => {
+test('未配置的工具族跳过（family-not-configured），不抛错', async () => {
   const o = await projectShadow({
     text: 'x'.repeat(9999),
     isError: false,
@@ -49,7 +49,7 @@ test('未配置的工具族跳过（no-params），不抛错', async () => {
     cfg: DEFAULT_CONFIG,
     estimate,
   })
-  assert.deepEqual(o, { kind: 'skipped', reason: 'no-params' })
+  assert.deepEqual(o, { kind: 'skipped', reason: 'family-not-configured' })
 })
 
 test('错误回执永远跳过（error-receipt），超大正文也不例外', async () => {
