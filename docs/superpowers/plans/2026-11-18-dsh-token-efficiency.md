@@ -6,7 +6,7 @@
 
 **Architecture:** 一个 cordis 插件，挂 `tools/post-execute`（投影）、`tools/execute`（防篡改）、`llm/stream`（合成替换回合）与 `ctx.systemPrompt.section`（协议段）。纯函数层（截断、守卫、绑定、计划解析、准入）与宿主适配层（钩子、spill、scope 解析）分离，前者用 `node --test` 表驱动，后者用假宿主集成测试。
 
-**Task Map:** 共 26 个任务——T1–T22 是单元层（每个都能独立 RED→GREEN），T23–T26 是装配层与验收层（接线、端到端、降级、发布门）。
+**Task Map:** 共 28 个任务——T1–T22 是单元层（每个都能独立 RED→GREEN），T23a/b/c 是装配层（协议层 / post-execute / llm-stream 三段，拆开是为了让每段能独立 RED→GREEN），T24–T26 是集成、降级与发布门。
 
 **Tech Stack:** TypeScript 5.6 / ESM / Node ≥ 22.18 / `node --test` + `tsx` / cordis 插件 API（`@deepseek-ai/dsh-tools`、`dsh-llm`、`dsh-system-prompt`）。
 
@@ -1578,7 +1578,7 @@ git commit -m "feat: wire the four hook mount points"
 - Modify: `src/hooks/post-execute.ts`（把 T17 的 `tools/execute` 直通占位换成 `rejectIfTampered`）
 
 **Interfaces:**
-- Consumes: 无跨任务符号；pending 只按结构类型 `{ name: string; args: Record<string, unknown> }` 读取（与 T23 的 `PendingEntry` 结构兼容，但不 import，避免前向引用）
+- Consumes: 无跨任务符号；pending 只按结构类型 `{ name: string; args: Record<string, unknown> }` 读取（与 T23a 的 `PendingEntry` 结构兼容，但不 import，避免前向引用）
 - Produces: `export function sameLiteral(a: unknown, b: unknown): boolean`；`export function rejectIfTampered(exec: { name: string; arguments: unknown }, pending: { name: string; args: Record<string, unknown> } | undefined): { reject: true; code: 'dispatch-rejected' } | { reject: false }`
 
 - [ ] **Step 1: 写失败测试**
@@ -1907,7 +1907,7 @@ git commit -m "feat: usage pairing and savings fields"
 - Modify: `src/hooks/post-execute.ts`（调用失效检测与 `hasSpillNotice`）
 
 **Interfaces:**
-- Produces: `export interface ReceiptAnchors { stepId: string; anchors: Record<string, string> }`（`anchors` = 候选引用的回执 id → 到达时的规范化原文；这是**锚点记录**，不是派发队列——`PendingQueue` 只存 T23 的 `PendingEntry`，两者由同一个 `post-execute` 决策分别写入）
+- Produces: `export interface ReceiptAnchors { stepId: string; anchors: Record<string, string> }`（`anchors` = 候选引用的回执 id → 到达时的规范化原文；这是**锚点记录**，不是派发队列——`PendingQueue` 只存 T23a 的 `PendingEntry`，两者由同一个 `post-execute` 决策分别写入）
 - Produces: `export const PRUNE_MARKER = '\n\n[... tool result middle pruned ...]\n\n'`（宿主 `dsh-compaction-tool-result-pruner` 的真实串；用 `includes` 判定，不做前缀匹配）
 - Produces: `export function looksPruned(text: string): boolean`
 - Produces: `export function alreadySpilled(text: string, hasNotice: (t: string) => boolean): boolean`
@@ -1984,217 +1984,384 @@ git push origin main   # remote 由 T1 布置（内网镜像）；GitHub 作为�
 
 ---
 
-### Task 23: 触发装配（`PendingEntry` 与合成回合）
+### Task 23a: 待办队列与合成回合（纯协议层）
 
 **Files:**
-- Create: `src/hooks/pending.ts`, `src/hooks/synthesize.ts`
-- Modify: `src/hooks/post-execute.ts`, `src/hooks/llm-stream.ts`, `test/fakes/host.ts`, `test/hooks.test.ts`
+- Create: `src/hooks/pending.ts`, `src/hooks/synthesize.ts`, `test/hooks-pending.test.ts`
 
 **Interfaces:**
-- Consumes: `decide`（T15）、`choose`（T14）、`worthSubstituting`/`remainingSteps`/`StepBudget`（T16）、`UsageLedger`（T21）、`TurnClock`（T20）、`rejectIfTampered`（T18）、`isVisible`/`ScopeStore`（T8/T9）、`ReceiptAnchors`（T22）
-- Produces: `export interface PendingEntry { callId: string; candidateId: string; name: string; args: Record<string, unknown>; createdAt: number }`
-- Produces: `export class PendingQueue { set(sessionId: string, e: PendingEntry): void; take(sessionId: string): PendingEntry | undefined; peek(sessionId: string): PendingEntry | undefined; clear(sessionId: string): void }`——**按 sessionId 隔离**，`llm/stream` 只有 sessionId，跨会话串号会把 A 的待办合成给 B
-- Produces: `export function callIdFor(sessionId: string, turn: string | number, candidateId: string): string`——`sha256(sessionId + '/' + turn + '/' + candidateId).slice(0, 16)`，确定性、可重放；**必须带 turn**，否则同一会话重复候选会撞 id，宿主按 callId 关联 tool 结果
-- Produces: `export async function* synthesizeTurn(e: PendingEntry, usage?: TokenUsage): AsyncIterable<StreamChunk>`——**必须逐个 yield 宿主 chunk，不是返回一个对象**
-- Produces: `export interface HookDeps { config: BoostConfig; scope: ScopeStore; receipts: ReceiptStore; queue?: PendingQueue; budget?: StepBudget; usage?: UsageLedger; clock?: TurnClock; plans?: Map<string, Plan>; spill?: SpillLike; formatFooter?: (o: { kind: 'exact'; count: number }, ref: SpillHandle) => string; estimateText?: (t: string) => number; projection?: (text: string, family: ToolFamily) => { content: string; outcome: ProjectionOutcome }; resolveSession: (sessionId: string) => string | undefined }`
-- Produces: `export function registerHooks(ctx: PluginContext, deps: HookDeps): void`
+- Consumes: `ToolCallId`/`StreamChunk`/`TokenUsage` 类型（`@deepseek-ai/dsh-llm/types`）；`AgentLike`（T1）
+- Produces: `export interface PendingEntry { callId: string; candidateId: string; name: string; args: Record<string, unknown>; turn: number | string; createdAt: number }`
+- Produces: `export class PendingQueue { set(sessionId: string, e: PendingEntry): void; take(sessionId: string): PendingEntry | undefined; peek(sessionId: string): PendingEntry | undefined; clear(sessionId: string): void; size(): number }`——**键是 sessionId**，跨会话串号会把 A 的待办合成给 B
+- Produces: `export function callIdFor(sessionId: string, turn: string | number, candidateId: string): string`——`sha256(sessionId + '/' + turn + '/' + candidateId).slice(0, 16)`；**必须带 turn**，否则同会话重复候选撞 id，宿主按 callId 关联 tool 结果
+- Produces: `export async function* synthesizeTurn(e: PendingEntry, usage?: TokenUsage): AsyncIterable<StreamChunk>`
 
-**合成的 chunk 序列（照参照实现 `ref-harnessmm/dsh-plugin/harnessmm-desktop/lib/index.js:669-721`，不是自创）**
-
-```
-block-start(reasoning, i=0) → reasoning-delta → block-end(reasoning)
-block-start(tool-call, i=1) → tool-call-delta(id, name, argumentsDelta=JSON.stringify(args))
-                            → block-end({type:'tool-call', id, name, arguments: <raw JSON string>})
-usage(usage) → finish({kind:'tool-calls'})
-```
-
-- `ToolCallBlock.arguments` 是**原始 JSON 字符串**，不是对象；`id` 必填，用 `callIdFor`。
-- 那个兄弟 `reasoning` 块不是装饰：DeepSeek 的 thinking 模式会拒绝没有 sibling thinking 的 assistant `tool_use`（"The content[].thinking in the thinking mode must be passed back to the API"），缺了它第一次替换后的下一次请求就 400。参照实现为此专门发一块无签名 reasoning，这里照做。
-
-- [ ] **Step 1: 写失败的装配测试**
+- [ ] **Step 1: 写失败测试**
 
 ```ts
-// test/hooks.test.ts
+// test/hooks-pending.test.ts
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { fakeHost } from './fakes/host.ts'
-import { registerHooks } from '../src/hooks/post-execute.ts'
-import { PendingQueue, callIdFor, synthesizeTurn } from '../src/hooks/pending.ts'
-import { StepBudget } from '../src/admission/ledger.ts'
-import { UsageLedger } from '../src/admission/usage.ts'
-import { TurnClock } from '../src/hooks/clock.ts'
-import { DEFAULT_CONFIG } from '../src/config.ts'
-import { DEFAULT_SCOPE } from '../src/scope/doc.ts'
-import { SELECTOR_PURPOSE } from '../src/selector/jev.ts'
+import { PendingQueue, callIdFor, type PendingEntry } from '../src/hooks/pending.ts'
+import { synthesizeTurn } from '../src/hooks/synthesize.ts'
 
-const setup = (over: any = {}) => {
-  const host = fakeHost()
-  const queue = new PendingQueue()
-  const deps = {
-    config: DEFAULT_CONFIG,
-    scope: over.scope ?? { read: async () => ({ doc: { ...DEFAULT_SCOPE, mode: 'global' } }), judgement: () => true },
-    receipts: over.receipts ?? { append: async (r: any) => { host.receipts.push(r) } },
-    queue,
-    budget: over.budget ?? new StepBudget(DEFAULT_CONFIG.stepsPerTurn),
-    usage: new UsageLedger(),
-    clock: new TurnClock(),
-    resolveSession: over.resolveSession ?? (() => 'ws-1'),
-  }
-  registerHooks(host, deps as any)
-  return { host, queue, deps }
-}
+const entry = (id: string): PendingEntry => ({ callId: 'c1', candidateId: id, name: 'read', args: { path: '/a' }, turn: 1, createdAt: 0 })
 
-test('合成回合按宿主 chunk 协议逐个产出', async () => {
-  const chunks: any[] = []
-  for await (const c of synthesizeTurn({ callId: 'id1', candidateId: 'A', name: 'read', args: { path: '/a' }, createdAt: 0 })) chunks.push(c)
-  assert.deepEqual(chunks.map(c => c.type), ['block-start', 'reasoning-delta', 'block-end', 'block-start', 'tool-call-delta', 'block-end', 'usage', 'finish'])
-  const delta = chunks.find(c => c.type === 'tool-call-delta')
-  assert.equal(delta.id, 'id1')
-  assert.equal(delta.argumentsDelta, JSON.stringify({ path: '/a' }))
-  const end = chunks.filter(c => c.type === 'block-end')[1]
-  assert.equal(end.block.type, 'tool-call')
-  assert.equal(typeof end.block.arguments, 'string')   // 原始 JSON 字符串，不是对象
-  assert.deepEqual(chunks.at(-1).reason, { kind: 'tool-calls' })
-})
-
-test('callId 确定性可重放', () => {
-  assert.equal(callIdFor('s1', 'A'), callIdFor('s1', 'A'))
-  assert.notEqual(callIdFor('s1', 'A'), callIdFor('s2', 'A'))
-})
-
-test('pending 按 sessionId 隔离', () => {
+test('队列按 sessionId 隔离', () => {
   const q = new PendingQueue()
-  q.set('s1', { callId: 'x', candidateId: 'A', name: 'read', args: {}, createdAt: 0 })
+  q.set('s1', entry('A'))
   assert.equal(q.peek('s2'), undefined)
   assert.equal(q.peek('s1')?.candidateId, 'A')
 })
 
-test('selector 内部调用直接放行', async () => {
-  const { host } = setup()
-  const out = await host.callHook('llm/stream', [{ purpose: SELECTOR_PURPOSE }], async () => 'PASS')
-  assert.equal(host.nextCalls, 1)
-  assert.equal(out, 'PASS')
+test('callIdFor 对同一候选在不同 turn 产生不同 id', () => {
+  assert.notEqual(callIdFor('s1', 1, 'A'), callIdFor('s1', 2, 'A'))
+  assert.equal(callIdFor('s1', 1, 'A'), callIdFor('s1', 1, 'A'))
 })
 
-test('shadow 为真：post-execute 写 shadow 收据且不入队，llm/stream 照常放行', async () => {
-  const { host, queue } = setup({ scope: { read: async () => ({ doc: { ...DEFAULT_SCOPE, mode: 'global', shadow: true } }), judgement: () => true } })
-  // ① post-execute 收到一个 commit 决策：影子期只记收据、不 queue.set
-  await host.callHook('tools/post-execute', [execWithAgent('s1'), { ok: true }], async () => ({ kind: 'accept' }))
-  assert.equal(queue.peek('s1'), undefined)
-  const shadow = host.receipts.find((r: any) => r.kind === 'shadow')
-  assert.ok(shadow && shadow.candidateId && 'admitted' in shadow)
-  // ② llm/stream 看不到 pending ⇒ 必然放行（nextCalls 必须是 1，不是 0）
-  const out: any[] = []
-  for await (const c of host.stream('s1')) out.push(c)
-  assert.equal(host.nextCalls, 1)
-  assert.equal(out.filter((c: any) => c.type === 'tool-call-delta').length, 0)
+test('合成回合按宿主 chunk 协议逐个产出', async () => {
+  const chunks: any[] = []
+  for await (const c of synthesizeTurn(entry('A'))) chunks.push(c)
+  assert.deepEqual(chunks.map(c => c.type),
+    ['block-start', 'reasoning-delta', 'block-end', 'block-start', 'tool-call-delta', 'block-end', 'finish'])
+  const delta = chunks.find(c => c.type === 'tool-call-delta')
+  assert.equal(delta.name, 'read')
+  assert.equal(typeof delta.argumentsDelta, 'string')
+  const block = chunks[chunks.length - 2].block
+  assert.equal(block.type, 'tool-call')
+  assert.equal(block.arguments, delta.argumentsDelta)
+  assert.ok(block.id)
 })
 
-test('有 pending 时合成且不调 next', async () => {
-  const { host, queue } = setup()
-  queue.set('s1', { callId: 'x', candidateId: 'A', name: 'read', args: { path: '/a' }, createdAt: 0 })
-  let called = false
-  const out = await host.callHook('llm/stream', [{ sessionId: 's1' }], async () => { called = true; return 'NEXT' })
-  assert.equal(called, false)
-  const types = []
-  for await (const c of out) types.push(c.type)
-  assert.equal(types[0], 'block-start')
-  assert.ok(types.includes('tool-call-delta'))
+test('带 reasoning sibling（缺它下一次请求 400）', async () => {
+  const chunks: any[] = []
+  for await (const c of synthesizeTurn(entry('A'))) chunks.push(c)
+  assert.equal(chunks[0].blockType, 'reasoning')
 })
 
-test('scope 不可见时放行并写 skip:no-scope', async () => {
-  const { host } = setup({ scope: { read: async () => ({ doc: DEFAULT_SCOPE }), judgement: () => false } })
-  const out: any[] = []
-  for await (const c of host.stream('s1')) out.push(c)
-  assert.equal(host.nextCalls, 1)
-  assert.ok(host.receipts.some((r: any) => r.code === 'skip:no-scope'))
-})
-
-test('第 9 次替换被预算拦截并写 steps-exhausted', async () => {
-  const budget = new StepBudget(8)
-  for (let i = 0; i < 8; i++) budget.take()
-  const { host, queue } = setup({ budget })
-  queue.set('s1', { callId: 'x', candidateId: 'I', name: 'read', args: {}, createdAt: 0 })
-  const out: any[] = []
-  for await (const c of host.stream('s1')) out.push(c)
-  // §5.2-6：图耗尽即回主模型——next 必须被调用，且流里没有合成出来的 tool-call
-  assert.equal(host.nextCalls, 1)
-  assert.equal(out.filter((c: any) => c.type === 'tool-call-delta').length, 0)
-  assert.ok(host.receipts.some((r: any) => r.code === 'steps-exhausted'))
-})
-
-test('用量从流里的 usage chunk 取值，结束后结算', async () => {
-  const { host, deps } = setup()
-  await host.callHook('llm/stream', [{ sessionId: 's1' }], async function* () {
-    yield { type: 'usage', usage: { inputTokens: 100, cacheReadTokens: 900, outputTokens: 10 } }
-    yield { type: 'finish', reason: { kind: 'stop' } }
-  })
-  assert.equal(deps.usage.last()?.cacheRead, 900)  // 映射自 cacheReadTokens
-})
-
-test('when 逐步判定：scope 改变后下一步可见性翻转', async () => {
-  const host = fakeHost()
-  let mode: 'selected' | 'global' = 'selected'
-  registerHooks(host, {
-    config: DEFAULT_CONFIG,
-    scope: { read: async () => ({ doc: { ...DEFAULT_SCOPE, mode } }), judgement: () => mode === 'global' },
-    receipts: { append: async () => {} }, queue: new PendingQueue(),
-    budget: new StepBudget(8), usage: new UsageLedger(), clock: new TurnClock(),
-    resolveSession: () => 'ws-1',
-  } as any)
-  assert.equal(await host.visible('boost', { session: { header: { cwd: '/w/a' } } }), false)
-  mode = 'global'
-  assert.equal(await host.visible('boost', { session: { header: { cwd: '/w/a' } } }), true)
+test('传了 usage 才发 usage chunk', async () => {
+  const a: any[] = []; for await (const c of synthesizeTurn(entry('A'))) a.push(c)
+  assert.equal(a.filter(c => c.type === 'usage').length, 0)
+  const b: any[] = []
+  for await (const c of synthesizeTurn(entry('A'), { inputTokens: 1, outputTokens: 2 })) b.push(c)
+  assert.equal(b.filter(c => c.type === 'usage').length, 1)
 })
 ```
 
 - [ ] **Step 2: 运行确认失败**
 
-Run: `node --import tsx --test test/hooks.test.ts`
+Run: `node --import tsx --test test/hooks-pending.test.ts`
 Expected: FAIL，`Cannot find module '../src/hooks/pending.ts'`
 
-- [ ] **Step 3: 实现接线**
+- [ ] **Step 3: 实现**
 
-`post-execute`：`next() → canonicalise → invalidate（T22）→ 投影（shadow 或 apply，见下）→ decide → 若 commit 且 `doc.shadow` 为真：写 `{kind:'shadow', decision, candidateId, guards, admitted}` 收据、**不 `queue.set`**；若 commit 且非影子：`worthSubstituting`（准入，`overheadTokens = candidates.length > 1 ? 512 : 0`，`deterministicSingle` 取 `candidates.length === 1`）+ `queue.set(sessionId, { callId: callIdFor(sessionId, turn, candidateId), ... })`；若 fallback：`queue.clear(sessionId)` + 写收据。
-- **计划文本来源**：`llm/stream` 包装里把 `text-delta` 拼成完整 assistant 文本，用 `parsePlan`（T11）解析后按 `sessionId` 存进 `deps.plans`（`HookDeps` 增加 `plans: Map<string, Plan>`）；`post-execute` 按当前步骤序号取 `plan.steps[i]` 传给 `decide`。**没有这一步 `decide` 永远拿不到 plan，替换一次都不会发生。**
-- **投影**：`HookDeps` 增加 `spill` / `formatFooter` / `estimateText` / `projection`；`post-execute` 在 decide 之前调 `projectApply`（apply 模式）或 `projectShadow`（shadow 模式），写 `{kind:'projection', before, after, saved, unit:'raw'}` 收据，并返回 `{kind:'accept', content}`。缺 spill 时只记 `ERR_HOST_NO_SPILL` 不投影。
-`llm/stream` 的钩子**必须同步返回 `AsyncIterable`**（cordis waterfall 是同步的，返回 Promise 会让宿主 `for await` 直接 TypeError、每个请求都失败）。唯一可行形状：
+`PendingQueue` 用 `Map<string, PendingEntry>`，一 session 至多一条。`callIdFor` 用 `node:crypto` 的 `createHash('sha256')`。
 
-```ts
-ctx.on('llm/stream', (options, next) => (async function* () {
-  // 这里可以 await：scope.read / resolveSession / choose
-  for await (const chunk of next()) yield chunk
-})())
+`synthesizeTurn` 逐个 `yield`（对照 `docs/superpowers/plans/2026-11-18-host-contracts.md` §1.1 与参照实现 `ref-harnessmm/dsh-plugin/harnessmm-desktop/lib/index.js:669-721`）：
+
+```
+block-start(index 0, 'reasoning') → reasoning-delta → block-end(reasoning)
+block-start(index 1, 'tool-call') → tool-call-delta(id=callId, name, argumentsDelta=JSON.stringify(args))
+  → block-end({type:'tool-call', id, name, arguments: JSON.stringify(args)})
+[usage?] → finish({kind:'tool-calls'})
 ```
 
-规则按序（**所有检查都在写收据与消费 pending 之前**，否则会留下互相矛盾的收据）：① `purpose === SELECTOR_PURPOSE` → `yield* next()`；② `receipts.stopped()` → `yield* next()`（连续写失败后 fail-closed）；③ `resolveSession` 拿不到或 scope 不可见 → `yield* next()` + `skip:no-scope` 收据；④ 无 pending → `yield* next()`；⑤ `budget.take()` 为假 → `yield* next()` + `steps-exhausted` 收据（**回主模型，不是空回合**，§5.2-6「图耗尽即回主模型」）；⑥ 合成：写 `{kind:'substitute'}`、`queue.take(sessionId)`、`yield* synthesizeTurn(entry, usage)`。
-**影子模式分流点不在 llm/stream 而在 post-execute**：`doc.shadow` 为真时 post-execute 写完 `{kind:'shadow', decision, candidateId, guards, admitted}` 收据就结束，**不 `queue.set`**——于是 llm/stream 第④步永远看到空队列、自然 `yield* next()`，既不用在 llm/stream 里分叉，也不会留下 stale pending（用户把 shadow 关掉的瞬间把它合成出去）。
-多候选时先 `await choose({ llm, candidates, receiptText, maxTokens, route })`；abstain 即回退。
-`usage`：遍历 `next()` 返回的流时，遇到 `{type:'usage'}` 按 **`TokenUsage`** 字段映射后再记账——`usage.request({ input: u.inputTokens, cacheRead: u.cacheReadTokens ?? 0, output: u.outputTokens })`（`TokenUsage` 里没有 `input`/`cacheRead`/`output` 这三个名字，直传会得到三个 `undefined`）；替换提交时 `usage.markSubstituted(candidateId)`；下一次请求结束后 `usage.settle()`，用 `receipt_hash` 关联追加一条 `{kind:'substitute-settled', saved_input_tokens, cache_hit_delta}`（收据 append-only，不能原地改）。
-`rejectIfTampered` 在 `tools/execute` 里取 `const s = exec.agent?.session.header.id`，`const e = deps.queue.peek(s)`，比对 `e?.callId !== exec.callId`（**`peek` 的键是 sessionId，不是 callId**；写成 `peek(callId)` 会恒 `undefined`，防篡改静默失效）。拒绝时返回 `ToolExecutionResult` 的失败分支 `{ isError: true, error: { message: 'ERR_BOOST_DISPATCH_REJECTED', info: { code: 'dispatch-rejected' } }, content: [...] }`，并 `queue.clear(s)`。
-`TurnClock` 由 `agent/request` 的 `{turn, step}` 驱动（**一次 `llm/stream` 不等于一个 turn**）；`StepBudget` 在 turn 变化时 `reset()`（T16 补该方法）。`clock.turn()` 进收据。
-`fakeHost` 增加 `visible(name, agent)`：按注册的 `when` 逐次求值；`callHook` 返回的东西若为 AsyncIterable 就原样返回。
+reasoning 块用候选 id 生成一句固定说明文本；**不能省**——DeepSeek thinking 模式会拒绝没有 sibling `thinking` 的 assistant `tool_use`，下一次请求 400。
 
 - [ ] **Step 4: 运行确认通过**
 
-Run: `node --import tsx --test test/hooks.test.ts && npm test`
-Expected: 全部 PASS
+Run: `node --import tsx --test test/hooks-pending.test.ts`
+Expected: PASS（5 tests）
 
 - [ ] **Step 5: 重构**
 
-`synthesizeTurn` 里的 reasoning 文案抽成 `substitutionThinking(e)`。
+抽 `reasoningText(e)` 与 `toolCallBlock(e)`；两个函数不导出。
 
 - [ ] **Step 6: 全量测试**
 
 Run: `npm test`
 Expected: 全部 PASS
 
-**Step 7: 提交**
+- [ ] **Step 7: 提交**
 
 ```bash
-git add src/hooks/ test/hooks.test.ts test/fakes/host.ts
-git commit -m "feat: wire pending dispatch and synthesized tool-call stream"
+git add src/hooks/pending.ts src/hooks/synthesize.ts test/hooks-pending.test.ts
+git commit -m "feat: pending queue and synthesized tool turn"
 ```
+
+---
+
+### Task 23b: post-execute 装配（决策、准入、投影、影子）
+
+**Files:**
+- Modify: `src/hooks/post-execute.ts`（T17 建立的骨架）
+- Create: `test/hooks-post.test.ts`
+
+**Interfaces:**
+- Consumes: `decide`（T15）、`worthSubstituting`（T16）、`projectApply`/`projectShadow`（T5/T6）、`canonicalise`（T5）、`invalidate`（T22）、`ReceiptStore`（T7）、`ScopeStore`（T9）、`PendingQueue`/`callIdFor`（T23a）、`parsePlan`（T11）
+- Produces: `export interface HookDeps { config: BoostConfig; scope: ScopeStore; receipts: ReceiptStore; queue?: PendingQueue; budget?: StepBudget; usage?: UsageLedger; clock?: TurnClock; plans?: Map<string, Plan>; spill?: SpillLike; formatFooter?: (o: { kind: 'exact'; count: number }, ref: SpillHandle) => string; estimateText?: (t: string) => number; projection?: (text: string, family: ToolFamily) => { content: string; outcome: ProjectionOutcome }; resolveSession?: (sessionId: string) => string | undefined }`——**除前三项外全部可选**，T17 的既有测试无需改
+- Produces: `export function registerHooks(ctx: PluginContext, deps: HookDeps): void`（本任务负责 `tools/post-execute` 与 `tools/execute` 两条）
+
+- [ ] **Step 1: 写失败测试**
+
+```ts
+// test/hooks-post.test.ts
+import test from 'node:test'
+import assert from 'node:assert/strict'
+import { fakeHost } from './fakes/host.ts'
+import { PendingQueue } from '../src/hooks/pending.ts'
+import { registerHooks } from '../src/hooks/post-execute.ts'
+import { DEFAULT_CONFIG, DEFAULT_SCOPE } from '../src/config.ts'
+import { StepBudget } from '../src/admission/budget.ts'
+import { UsageLedger } from '../src/admission/usage.ts'
+import { TurnClock } from '../src/hooks/clock.ts'
+
+const setup = (doc = { ...DEFAULT_SCOPE, mode: 'global' as const }) => {
+  const host = fakeHost()
+  const queue = new PendingQueue()
+  const receipts: any[] = []
+  const deps = {
+    config: DEFAULT_CONFIG,
+    scope: { read: async () => ({ doc }), judgement: () => true } as any,
+    receipts: { append: async (r: any) => { receipts.push(r) }, stopped: () => false } as any,
+    queue, budget: new StepBudget(8), usage: new UsageLedger(), clock: new TurnClock(), plans: new Map(),
+  }
+  registerHooks(host, deps as any)
+  return { host, queue, receipts }
+}
+const exec = (sessionId: string) => ({ name: 'read', arguments: { path: '/x' }, agent: { session: { header: { id: sessionId, cwd: '/w/a' } } } })
+
+test('影子期 commit：写 shadow 收据且不入队', async () => {
+  const { host, queue, receipts } = setup({ ...DEFAULT_SCOPE, mode: 'global', shadow: true })
+  await host.callHook('tools/post-execute', [exec('s1'), { ok: true }], async () => ({ kind: 'accept' }))
+  assert.equal(queue.peek('s1'), undefined)
+  assert.ok(receipts.some(r => r.kind === 'shadow'))
+})
+
+test('非影子 commit：入队且 callId 可复算', async () => {
+  const { host, queue } = setup()
+  await host.callHook('tools/post-execute', [exec('s1'), { ok: true }], async () => ({ kind: 'accept' }))
+  const e = queue.peek('s1')
+  assert.ok(e && e.callId && e.candidateId)
+})
+
+test('无 agent：直接 next 并写 skip:no-scope', async () => {
+  const { host, receipts } = setup()
+  let called = 0
+  await host.callHook('tools/post-execute', [{ name: 'read', arguments: {} }, { ok: true }], async () => { called++; return { kind: 'accept' } })
+  assert.equal(called, 1)
+  assert.ok(receipts.some(r => r.code === 'skip:no-scope'))
+})
+
+test('投影收据带 unit:"raw"', async () => {
+  const { host, receipts } = setup()
+  await host.callHook('tools/post-execute', [exec('s1'), { ok: true }], async () => ({ kind: 'accept', content: 'x' }))
+  const p = receipts.find(r => r.kind === 'projection')
+  assert.ok(p && p.unit === 'raw' && typeof p.before === 'number' && typeof p.after === 'number')
+})
+
+test('防篡改：callId 不匹配时拒绝并清队列', async () => {
+  const { host, queue } = setup()
+  queue.set('s1', { callId: 'expected', candidateId: 'A', name: 'read', args: { path: '/a' }, turn: 1, createdAt: 0 })
+  const res = await host.callHook('tools/execute', [{ callId: 'other', name: 'read', arguments: {}, agent: { session: { header: { id: 's1', cwd: '/w/a' } } } }], async () => ({ ok: true }))
+  assert.equal(res.isError, true)
+  assert.equal(queue.peek('s1'), undefined)
+})
+```
+
+- [ ] **Step 2: 运行确认失败**
+
+Run: `node --import tsx --test test/hooks-post.test.ts`
+Expected: FAIL
+
+- [ ] **Step 3: 实现接线**
+
+`tools/post-execute` 顺序固定：`next() → canonicalise → invalidate（T22）→ 投影（shadow/apply）→ decide`。
+
+- 无 `exec.agent` → `next()` + `skip:no-scope`。
+- commit 且 `doc.shadow` → 写 `{kind:'shadow', decision, candidateId, guards, admitted}`，**不 `queue.set`**。
+- commit 且非影子 → `worthSubstituting({ overheadTokens: candidates.length > 1 ? 512 : 0, deterministicSingle: candidates.length === 1, ... })`，通过才 `queue.set(sessionId, { callId: callIdFor(sessionId, turn, candidateId), ... })`。
+- fallback → `queue.clear(sessionId)` + 收据。
+- 投影：`projectApply`/`projectShadow` 存在且有 spill 时执行，写 `{kind:'projection', before, after, saved, unit:'raw'}`；无 spill 只记 `ERR_HOST_NO_SPILL`。返回 `{kind:'accept', content}`。
+
+`tools/execute`：`const sid = exec.agent?.session.header.id`；`const e = deps.queue?.peek(sid)`；`e && e.callId !== exec.callId` → 返回失败分支 `{ isError: true, error: { message: 'ERR_BOOST_DISPATCH_REJECTED', info: { code: 'dispatch-rejected' } }, content: [...] }` 并 `queue.clear(sid)`；否则 `next()`。
+
+**计划文本**：`post-execute` 从 `deps.plans?.get(sid)` 取当前 plan，按 `plan.steps[i]` 调 `decide`；`plans` 由 T23c 在 `llm/stream` 里填充。
+
+- [ ] **Step 4: 运行确认通过**
+
+Run: `node --import tsx --test test/hooks-post.test.ts`
+Expected: PASS（5 tests）
+
+- [ ] **Step 5: 重构**
+
+把"影子/非影子/回退"三条分支抽成 `applyDecision(deps, decideResult, ctx)`；`registerHooks` 只做注册。
+
+- [ ] **Step 6: 全量测试**
+
+Run: `npm test`
+Expected: 全部 PASS
+
+- [ ] **Step 7: 提交**
+
+```bash
+git add src/hooks/post-execute.ts test/hooks-post.test.ts
+git commit -m "feat: wire post-execute decisions, admission, projection and tamper guard"
+```
+
+---
+
+### Task 23c: llm/stream 包装（规则、影子、预算、用量）
+
+**Files:**
+- Create: `src/hooks/llm-stream.ts`
+- Modify: `src/hooks/post-execute.ts`（`registerHooks` 里加第三条钩子）
+- Create: `test/hooks-stream.test.ts`
+
+**Interfaces:**
+- Consumes: `PendingQueue`/`synthesizeTurn`（T23a）、`HookDeps`/`registerHooks`（T23b）、`parsePlan`（T11）、`SELECTOR_PURPOSE`/`choose`（T14）、`StepBudget`（T16）、`UsageLedger`（T21）、`TurnClock`（T20）、`ScopeStore.judgement`（T9）
+- Produces: `export function streamHook(deps: HookDeps): (options: GenerateOptions, next: () => AsyncIterable<StreamChunk>) => AsyncIterable<StreamChunk>`——**同步返回 `AsyncIterable`**（cordis waterfall 是同步的；返回 Promise 会让宿主 `for await` 抛 TypeError、每个请求都失败）
+
+- [ ] **Step 1: 写失败测试**
+
+```ts
+// test/hooks-stream.test.ts
+import test from 'node:test'
+import assert from 'node:assert/strict'
+import { fakeHost } from './fakes/host.ts'
+import { PendingQueue } from '../src/hooks/pending.ts'
+import { registerHooks } from '../src/hooks/post-execute.ts'
+import { SELECTOR_PURPOSE } from '../src/selector/jev.ts'
+import { DEFAULT_CONFIG, DEFAULT_SCOPE } from '../src/config.ts'
+import { StepBudget } from '../src/admission/budget.ts'
+import { UsageLedger } from '../src/admission/usage.ts'
+import { TurnClock } from '../src/hooks/clock.ts'
+
+const setup = (over: any = {}) => {
+  const host = fakeHost()
+  const queue = new PendingQueue()
+  const receipts: any[] = []
+  const usage = new UsageLedger()
+  const deps = {
+    config: DEFAULT_CONFIG,
+    scope: over.scope ?? { read: async () => ({ doc: { ...DEFAULT_SCOPE, mode: 'global' } }), judgement: () => true },
+    receipts: { append: async (r: any) => { receipts.push(r) }, stopped: () => over.stopped ?? false },
+    queue, budget: over.budget ?? new StepBudget(8), usage, clock: new TurnClock(), plans: new Map(),
+  }
+  registerHooks(host, deps as any)
+  return { host, queue, receipts, usage }
+}
+const pending = { callId: 'c1', candidateId: 'A', name: 'read', args: { path: '/a' }, turn: 1, createdAt: 0 }
+
+test('selector 自身调用直接放行', async () => {
+  const { host } = setup()
+  await host.stream('s1', { purpose: SELECTOR_PURPOSE })
+  assert.equal(host.nextCalls, 1)
+})
+
+test('无 pending 放行', async () => {
+  const { host } = setup()
+  const out: any[] = []
+  for await (const c of host.stream('s1')) out.push(c)
+  assert.equal(host.nextCalls, 1)
+})
+
+test('scope 不可见放行并写 skip:no-scope', async () => {
+  const { host, receipts } = setup({ scope: { read: async () => ({ doc: DEFAULT_SCOPE }), judgement: () => false } })
+  for await (const _ of host.stream('s1')) void _
+  assert.equal(host.nextCalls, 1)
+  assert.ok(receipts.some(r => r.code === 'skip:no-scope'))
+})
+
+test('收据停写时 fail-closed，放行', async () => {
+  const { host, queue } = setup({ stopped: true })
+  queue.set('s1', pending)
+  for await (const _ of host.stream('s1')) void _
+  assert.equal(host.nextCalls, 1)
+})
+
+test('预算耗尽回主模型，不产出空回合', async () => {
+  const budget = new StepBudget(8)
+  for (let i = 0; i < 8; i++) budget.take()
+  const { host, queue, receipts } = setup({ budget })
+  queue.set('s1', pending)
+  const out: any[] = []
+  for await (const c of host.stream('s1')) out.push(c)
+  assert.equal(host.nextCalls, 1)
+  assert.equal(out.filter((c: any) => c.type === 'tool-call-delta').length, 0)
+  assert.ok(receipts.some(r => r.code === 'steps-exhausted'))
+})
+
+test('有 pending 时合成，不调 next', async () => {
+  const { host, queue, receipts } = setup()
+  queue.set('s1', pending)
+  const out: any[] = []
+  for await (const c of host.stream('s1')) out.push(c)
+  assert.equal(host.nextCalls, 0)
+  assert.ok(out.some((c: any) => c.type === 'tool-call-delta'))
+  assert.ok(receipts.some(r => r.kind === 'substitute'))
+})
+
+test('usage 从 TokenUsage 映射后记账', async () => {
+  const { host, usage } = setup()
+  const sink = host.stream('s1', { withUsage: { inputTokens: 100, cacheReadTokens: 900, outputTokens: 10 } })
+  for await (const _ of sink) void _
+  assert.equal(usage.last()?.cacheRead, 900)
+  assert.equal(usage.last()?.input, 100)
+})
+```
+
+- [ ] **Step 2: 运行确认失败**
+
+Run: `node --import tsx --test test/hooks-stream.test.ts`
+Expected: FAIL
+
+- [ ] **Step 3: 实现**
+
+```ts
+export function streamHook(deps: HookDeps) {
+  return (options, next) => (async function* () {
+    if (options?.purpose === SELECTOR_PURPOSE) { yield* next(); return }
+    const sid = String(options?.sessionId ?? '')
+    if (deps.receipts.stopped()) { yield* next(); return }
+    const doc = (await deps.scope.read()).doc
+    if (!sid || deps.resolveSession?.(sid) === undefined) { await record(deps, {code:'skip:no-scope', sessionId: sid}); yield* next(); return }
+    const q = deps.queue
+    if (!q || q.peek(sid) === undefined) { yield* next(); return }
+    if (deps.budget && !deps.budget.take()) { await record(deps, {code:'steps-exhausted', sessionId: sid}); yield* next(); return }
+    const e = q.take(sid)!
+    await record(deps, {kind:'substitute', sessionId: sid, candidateId: e.candidateId})
+    for await (const c of next()) { if (c.type === 'usage') deps.usage?.request({input: c.usage.inputTokens, cacheRead: c.usage.cacheReadTokens ?? 0, output: c.usage.outputTokens}); yield c }
+  })()
+}
+```
+
+合成分支改为 `yield* synthesizeTurn(e)`（单候选无模型调用，不带 usage）。`plans` 的填充：在包装里把 `text-delta` 拼成文本，流结束后 `parsePlan(text)` 存进 `deps.plans.set(sid, plan)`。
+
+**规则顺序不可颠倒**：stopped → 可见性 → 无 pending → 预算 → 合成；检查全部在写收据与 `queue.take` 之前。
+
+- [ ] **Step 4: 运行确认通过**
+
+Run: `node --import tsx --test test/hooks-stream.test.ts`
+Expected: PASS（7 tests）
+
+- [ ] **Step 5: 重构**
+
+把七条判断收进 `resolveStreamPlan(deps, options): { action: 'pass' } | { action: 'substitute', entry }`，钩子只负责执行。
+
+- [ ] **Step 6: 全量测试**
+
+Run: `npm test`
+Expected: 全部 PASS
+
+- [ ] **Step 7: 提交**
+
+```bash
+git add src/hooks/llm-stream.ts src/hooks/post-execute.ts test/hooks-stream.test.ts
+git commit -m "feat: wrap llm/stream with substitution rules and usage accounting"
+```
+
+---
 
 ### Task 24: 端到端替换集成
 
@@ -2203,7 +2370,7 @@ git commit -m "feat: wire pending dispatch and synthesized tool-call stream"
 - Modify: `test/fakes/host.ts`（如需）
 
 **Interfaces:**
-- Consumes: T11 `parsePlan`、T12 `bindArgs`、T13 `evaluateAll`、T15 `decide`、T14 `choose`、T16 `worthSubstituting`、T23 `registerHooks`/`PendingQueue`
+- Consumes: T11 `parsePlan`、T12 `bindArgs`、T13 `evaluateAll`、T15 `decide`、T14 `choose`、T16 `worthSubstituting`、T23a `PendingQueue`/`synthesizeTurn`、T23b `registerHooks`/`HookDeps`、T23c `streamHook`
 
 - [ ] **Step 1: 写五条路径的失败测试**
 
@@ -2264,7 +2431,7 @@ Expected: FAIL，文件不存在
 - [ ] **Step 4: 运行确认通过**
 
 Run: `node --import tsx --test test/integration/substitute.test.ts && npm test`
-Expected: 全部 PASS（含前序 23 个任务 T1–T23 的测试）
+Expected: 全部 PASS（含前序 25 个任务 T1–T22、T23a–T23c 的测试）
 
 - [ ] **Step 5: 重构**
 
