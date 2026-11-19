@@ -231,7 +231,7 @@
 | `ssh`（`mcp__ssh__execute-command`） | 2,000 | 1,200 + 300 | 1,610 | 同上 |
 
 - **净收益 > 0 的最小长度 = 头 + 尾 + 页脚（约 110B，按 ASCII 保守计）**；低于它的回执裁了反而更贵。
-- **不变量：触发阈值 ≥ 窗口 + 页脚 + 1**（即 ≥ 表中"最小长度" + 1）。表中四项都满足：3,000 ≥ 2,611、700 ≥ 611、4,000 ≥ 2,611、2,000 ≥ 1,611。窗口不得大于等于触发阈值，否则会出现"触发了却裁不动"的净亏区间（旧 read 参数 2,000 触发 / 2,500 窗口时，(2,000, 2,500] 区间内就有 200 条回执净亏）。
+- **不变量：触发阈值 ≥ 窗口 + 页脚 + 头行 + 1**（头行 `[output N chars; showing first A and last B]` 加两个换行约 55–60 字符；漏掉它会让「投影后反而变长」在触发阈值附近发生——grep/glob 的 700 只有约 7 字符余量。**装配完页脚后必须复核 `assembled.length < original.length`，否则回退原文**）。表中四项都满足：3,000 ≥ 2,611、700 ≥ 611、4,000 ≥ 2,611、2,000 ≥ 1,611。窗口不得大于等于触发阈值，否则会出现"触发了却裁不动"的净亏区间（旧 read 参数 2,000 触发 / 2,500 窗口时，(2,000, 2,500] 区间内就有 200 条回执净亏）。
 - **其余未配置族一律不投影**：没有窗口参数的工具（含 `web_fetch`、`edit`、未来新增工具）直接原样进历史，不设"默认裁剪"。
 
 **其余默认值**：
@@ -305,7 +305,7 @@ config:
 - 页脚格式必须复用宿主的 `formatSpillNotice`，不要手拼 `Full formatted result stored at:` 字符串。
 - `owner` 取 `exec.agent.session.header.id`：先判 `exec.agent` 是否为 `undefined`；为 `undefined` 时不投影（PTC 子派发等场景）。`Agent.session` 与 `Session.header` 都是非可选字段，不要再套可选的冗余链。缺 session id 时同样不投影（`projection-skipped:no-owner`）。
 - 顺序无关的代价是**多一次落盘**：只对确实要投影的回执落盘，未触发阈值的不落。
-- **大回执直接不投影**：`text.length > 256 KB` 跳过。先比 `text.length`，只有确定要裁时才 `Array.from` 转 code point 数组（实测 1 MB 字符串做这一步 17.7 ms、约 9 MB 堆）。
+- **大回执直接不投影**：`Buffer.byteLength(text, 'utf8') > 256 * 1024` 跳过（**按 UTF-8 字节计，不按 `text.length` 的 UTF-16 单元**——同一段 CJK 的字节数是单元数的 3 倍，用错口径会让上限浮动 2–4 倍）。先比 `text.length` 做粗筛（它是 code point 数的上界），只有确定要裁时才 `Array.from` 转 code point 数组（实测 1 MB 字符串做这一步 17.7 ms、约 9 MB 堆）。
 - **`projection: 'shadow'` 不依赖 `spillStore`**：影子模式不改 content、不调 `saveText`、不落盘，只用 `estimateContent`（从 `@deepseek-ai/dsh-token-meter/estimate` **动态导入**，包 try/catch）对原/裁剪文本做对比记账；`projection-skipped:no-spill` 只在 `projection: 'on'` 且确实要落盘时触发。否则宿主没装 spill 包时影子期拿不到账。
 
 可见性三条：
