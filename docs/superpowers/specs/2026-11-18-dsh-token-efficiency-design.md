@@ -382,13 +382,16 @@ workspace 归属由 agent 的 cwd 映射到 workspace id。每个挂载点各有
 
 **单一事实来源**：scope 只在 `scope.json`；patch config 不含 scope 字段。`boost scope set` 带 base revision 校验，冲突返回下面的稳定码——**不是 HTTP 409**：工具失败没有状态码，"409" 只是 revision 冲突的语义类比。
 
-**拒绝码（枚举）**：`ERR_SCOPE_UNKNOWN_VERSION` / `ERR_SCOPE_PARSE_FAILED` / `ERR_SCOPE_READ_FAILED` / `ERR_SCOPE_REVISION_CONFLICT` / `ERR_SCOPE_LOCKED`。
+**拒绝码（枚举）**：`ERR_SCOPE_UNKNOWN_VERSION` / `ERR_SCOPE_FUTURE_VERSION` / `ERR_SCOPE_PARSE_FAILED` / `ERR_SCOPE_READ_FAILED` / `ERR_SCOPE_REVISION_CONFLICT` / `ERR_SCOPE_LOCKED`。
+
+`ERR_SCOPE_UNKNOWN_VERSION` 只用于 **v1**（可升级）与缺失/非数值 version；`ERR_SCOPE_FUTURE_VERSION` 用于**数值 version > 2**，此时文件只读、任何写操作都必须拒绝——否则一个更新版本的插件写的文档会被旧插件按 v1 升级路径重写成 v2，静默丢掉它不认识的字段与工作区列表。（T9 最初只区分「可读 / 不可读」，CAS 也不保护这种情形，因为降级读出的 revision 是 0。）
 
 **两条错误通道不许混**：
 
 | `boost` 工具失败码（`ToolErrorInfo.code`） | 判定路径的收据字段 | 触发 |
 |---|---|---|
-| `ERR_SCOPE_UNKNOWN_VERSION` | `scope-degraded` | `scope.json` 的 version 不是 2 |
+| `ERR_SCOPE_UNKNOWN_VERSION` | `scope-degraded` | `scope.json` 的 version 是 v1、缺失或非数值（v1 可升级） |
+| `ERR_SCOPE_FUTURE_VERSION` | `scope-degraded` | `scope.json` 的 version 是数值且 > 2；只读，写操作一律拒绝 |
 | `ERR_SCOPE_PARSE_FAILED` | `scope-degraded` | JSON 坏 |
 | `ERR_SCOPE_READ_FAILED` | `scope-degraded` | 文件缺失 / 无权限 |
 | `ERR_SCOPE_REVISION_CONFLICT` | 不写收据，工具直接失败 | base revision 不匹配 |

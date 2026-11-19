@@ -702,8 +702,8 @@ git commit -m "feat: sharded receipt store with circuit breaker"
 
 **Interfaces:**
 - Consumes: `ProjectionMode`（T5）
-- Produces: `export type ScopeCode = 'ERR_SCOPE_UNKNOWN_VERSION' | 'ERR_SCOPE_PARSE_FAILED' | 'ERR_SCOPE_READ_FAILED' | 'ERR_SCOPE_REVISION_CONFLICT' | 'ERR_SCOPE_LOCKED'`
-- Produces: 五个 `export const ERR_SCOPE_UNKNOWN_VERSION` / `ERR_SCOPE_PARSE_FAILED` / `ERR_SCOPE_READ_FAILED` / `ERR_SCOPE_REVISION_CONFLICT` / `ERR_SCOPE_LOCKED` 常量（值等于上面的字符串，T9 用）
+- Produces: `export type ScopeCode = 'ERR_SCOPE_UNKNOWN_VERSION' | 'ERR_SCOPE_FUTURE_VERSION' | 'ERR_SCOPE_PARSE_FAILED' | 'ERR_SCOPE_READ_FAILED' | 'ERR_SCOPE_REVISION_CONFLICT' | 'ERR_SCOPE_LOCKED'`
+- Produces: 六个 `export const ERR_SCOPE_UNKNOWN_VERSION` / `ERR_SCOPE_FUTURE_VERSION` / `ERR_SCOPE_PARSE_FAILED` / `ERR_SCOPE_READ_FAILED` / `ERR_SCOPE_REVISION_CONFLICT` / `ERR_SCOPE_LOCKED` 常量（值等于上面的字符串，T9 用）
 - Produces: `export interface ScopeDoc { version: 2; revision: number; updatedAt?: string; mode: 'selected' | 'global'; workspaceIds: string[]; shadow: boolean; projection: ProjectionMode }`
 - Produces: `export const DEFAULT_SCOPE: ScopeDoc`（`selected + []`，`shadow: true`，`projection: 'shadow'`）
 - Produces: `export function parseScope(raw: unknown): { doc: ScopeDoc; code?: 'ERR_SCOPE_UNKNOWN_VERSION' | 'ERR_SCOPE_PARSE_FAILED' }`
@@ -732,7 +732,8 @@ test('非对象 / 数组 / null 判 parse-failed；对象但 version≠2 判 unk
   for (const raw of ['not an object', null, [], 42]) {
     assert.equal(parseScope(raw).code, 'ERR_SCOPE_PARSE_FAILED')
   }
-  assert.equal(parseScope({ version: 2.1 }).code, 'ERR_SCOPE_UNKNOWN_VERSION')
+  assert.equal(parseScope({ version: 2.1 }).code, 'ERR_SCOPE_FUTURE_VERSION')
+  assert.equal(parseScope({ version: '3' }).code, 'ERR_SCOPE_UNKNOWN_VERSION')
   assert.equal(parseScope({ mode: 'global' }).code, 'ERR_SCOPE_UNKNOWN_VERSION')
 })
 
