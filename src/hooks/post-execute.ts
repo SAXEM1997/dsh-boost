@@ -13,8 +13,10 @@
  * - `llm/stream` lets the plugin's own selector request through before any
  *   synthesis exists; a boundary request is likewise delegated to `next()`
  *   until Task 23c adds the pending-turn branch.
- * - `tools/execute` is a pass-through placeholder (Task 18 installs the
- *   tamper check).
+ * - `tools/execute` compares the arriving dispatch with the pending
+ *   substitution and refuses a mismatch with the host's failure result. The
+ *   pending lookup is a seam that returns nothing today; Task 23b supplies the
+ *   queue-backed one, so with no pending entry the mount stays a pass-through.
  * - the `systemPrompt` section reads the per-agent judgement cache
  *   synchronously. Its `text` must be a function, never a static string: a
  *   static string would inject the protocol into every session unconditionally
@@ -35,6 +37,7 @@ import type { ReceiptStore } from '../receipts/store.js'
 import type { ScopeStore } from '../scope/store.js'
 import { SELECTOR_PURPOSE } from '../selector/jev.js'
 import type { AgentLike, BoostConfig, PluginContext } from '../types.js'
+import { rejectIfTampered } from './execute.js'
 
 /** Section name the protocol text is registered under (design §5.3). */
 const PROTOCOL_SECTION_NAME = 'dsh-boost'
@@ -73,10 +76,31 @@ type PostExecuteDecision = {
   [key: string]: unknown
 }
 
+/** The dispatch fields the tamper check reads (the host passes a `ToolDispatchExecution`). */
+type DispatchExec = {
+  name: string
+  arguments: unknown
+}
+
+/** The decided substitution a dispatch is checked against. */
+type PendingEntry = {
+  name: string
+  args: Record<string, unknown>
+}
+
 /** The dependencies a post-execute body reads; Task 23b widens this shape. */
 type PostExecuteDeps = {
   config: BoostConfig
   receipts: ReceiptStore
+  /**
+   * The pending-substitution seam.
+   *
+   * Task 23b supplies the queue-backed lookup; nothing provides it today, so
+   * the `tools/execute` mount has no pending entry to defend and passes
+   * through exactly as before. `undefined` means "not substituting this call",
+   * never "reject it".
+   */
+  pendingEntry?: (exec: DispatchExec) => PendingEntry | undefined
 }
 
 /**
@@ -123,13 +147,40 @@ function streamHook(
 }
 
 /**
- * The `tools/execute` hook body.
+ * The `tools/execute` hook body: refuse a tampered substitution.
  *
- * A pass-through placeholder: Task 18 replaces it with the pending-entry
- * tamper check. The mount point exists now so its registration is asserted.
+ * With no pending entry the plugin is not substituting this call, so `next()`
+ * runs untouched. Otherwise the arriving call is compared literally with the
+ * decision, and a mismatch is refused *without* calling `next()` — the entire
+ * point is that the tool must not run. The hook does not clear the pending
+ * entry: it cannot see the queue, so `registerHooks` clears it after receiving
+ * a reject (Task 23b wires the lookup and the clearing).
+ *
+ * The refusal is the host's `ToolExecutionFailure` branch
+ * (`{ isError: true, error: { message, info }, content }`), never a private
+ * envelope: the executor normalises whatever a wrapper returns, so anything
+ * else would be silently ignored. This waterfall documents no dedicated
+ * refusal decision (it promises only `exec.signal` replacement); returning the
+ * failure is the closest legal mechanism and the executor accepts it.
  */
-function executeHook(_exec: unknown, next: () => Promise<unknown>): Promise<unknown> {
-  return next()
+function executeHook(
+  deps: PostExecuteDeps,
+  exec: DispatchExec,
+  next: () => Promise<unknown>,
+): Promise<unknown> {
+  const pending = deps.pendingEntry?.(exec)
+  const verdict = rejectIfTampered(exec, pending)
+  if (!verdict.reject) return next()
+  const message =
+    'dsh-boost refused a substituted call: the dispatched arguments do not match the pending decision'
+  return Promise.resolve({
+    isError: true,
+    error: {
+      message,
+      info: { name: 'DispatchRejectedError', code: verdict.code },
+    },
+    content: [{ type: 'text', text: `Error: ${message}` }],
+  })
 }
 
 /**
@@ -228,8 +279,8 @@ function registerLlmStream(ctx: PluginContext): void {
 }
 
 /** Mount the dispatch waterfall. */
-function registerExecute(ctx: PluginContext): void {
-  ctx.on('tools/execute', (exec, next) => executeHook(exec, next))
+function registerExecute(ctx: PluginContext, deps: PostExecuteDeps): void {
+  ctx.on('tools/execute', (exec, next) => executeHook(deps, exec, next))
 }
 
 /** Mount the protocol section, whose provider stays synchronous and per-agent. */
@@ -254,8 +305,9 @@ function registerProtocolSection(ctx: PluginContext, scope: ScopeStore | undefin
  * `scope` and `receipts` are checked at the point of use, not here: a host
  * wiring the plugin without one of them still gets the four mount points, and
  * every degraded path is fail-closed instead of throwing during registration.
- * Task 23b widens `deps` into `HookDeps`; it adds optional fields only, so this
- * signature keeps its required ones.
+ * The same holds for the `pendingEntry` seam: without it the dispatch mount
+ * simply has nothing to defend. Task 23b widens `deps` into `HookDeps`; it adds
+ * optional fields only, so this signature keeps its required ones.
  */
 export function registerHooks(
   ctx: PluginContext,
@@ -264,5 +316,5 @@ export function registerHooks(
   registerProtocolSection(ctx, deps.scope)
   registerPostExecute(ctx, deps)
   registerLlmStream(ctx)
-  registerExecute(ctx)
+  registerExecute(ctx, deps)
 }
