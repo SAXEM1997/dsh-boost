@@ -5,11 +5,13 @@
  * task fills in, and the registration is split one function per mount so each
  * body can be replaced without rewriting the mount:
  *
- * - `tools/post-execute` canonicalises the result, then leaves a slot for the
- *   substitution decision (Task 23b) and one for projection (Task 23b/T25). A
- *   call with no `exec.agent` is not the plugin's to inspect: the downstream
- *   decision is returned untouched and a `skip:no-scope` receipt keeps the
- *   pass visible (design §5.5).
+ * - `tools/post-execute` canonicalises the result, abandons the decision when
+ *   the host rewrote the receipt under the stored anchors (pruner / compaction,
+ *   design §5.2-7), refuses to project a receipt that already carries the host
+ *   spill footer, and then leaves a slot for the substitution decision (Task
+ *   23b) and one for projection (Task 23b/T25). A call with no `exec.agent` is
+ *   not the plugin's to inspect: the downstream decision is returned untouched
+ *   and a `skip:no-scope` receipt keeps the pass visible (design §5.5).
  * - `llm/stream` lets the plugin's own selector request through before any
  *   synthesis exists; a boundary request is likewise delegated to `next()`
  *   until Task 23c adds the pending-turn branch.
@@ -31,6 +33,8 @@
  * @module dsh-boost/hooks/post-execute
  */
 import type { GenerateOptions, StreamChunk } from '@deepseek-ai/dsh-llm'
+import { alreadySpilled, invalidate } from '../gate/invalidate.js'
+import type { AnchorStore, ReceiptAnchors } from '../gate/invalidate.js'
 import { PROTOCOL_NAME, PROTOCOL_ORDER, PROTOCOL_TEXT } from '../prompt/protocol.js'
 import { canonicalise } from '../projection/canonicalise.js'
 import type { CanonicalReceipt } from '../projection/canonicalise.js'
@@ -79,6 +83,23 @@ type PendingEntry = {
 type PostExecuteDeps = {
   config: BoostConfig
   receipts: ReceiptStore
+  /**
+   * Per-session receipt anchors.
+   *
+   * Task 23b writes them on the decision path; this hook only reads them to
+   * check for an external rewrite and clears them on a hit. Absent means "no
+   * pending substitution", never "fail the call".
+   */
+  anchors?: AnchorStore
+  /**
+   * Whether a receipt already carries the host spill footer.
+   *
+   * Injected so the host spill policy stays an optional peer (Task 23b/T25
+   * supply its dynamically imported `hasSpillNotice`) and so a test can hand
+   * over a throwing predicate without the host package. Absent means "ask the
+   * host package lazily"; a missing package means no notice can exist.
+   */
+  hasSpillNotice?: (text: string) => boolean
   /**
    * The pending-substitution seam.
    *
@@ -209,6 +230,133 @@ function decideSubstitution(_receipt: CanonicalReceipt): PostExecuteDecision | u
   return undefined
 }
 
+/** The session a post-execute call belongs to, or `undefined` when the host supplied none. */
+function sessionIdOf(exec: PostExecuteExec | undefined): string | undefined {
+  const id = exec?.agent?.session?.header?.id
+  return typeof id === 'string' ? id : undefined
+}
+
+/**
+ * Read the session's pending anchors without ever failing the call.
+ *
+ * The store is a plain map in production, but it arrives through an injected
+ * dependency: a foreign implementation that throws must degrade to "no pending
+ * anchors", not replace the tool result with an error.
+ */
+function pendingAnchorsOf(deps: PostExecuteDeps, sessionId: string): ReceiptAnchors | undefined {
+  try {
+    return deps.anchors?.get(sessionId)
+  } catch {
+    return undefined
+  }
+}
+
+/** Ask {@link invalidate} without letting a malformed anchor record escape as a throw. */
+function invalidationOf(
+  pending: ReceiptAnchors,
+  receiptText: string,
+): 'pruned-reset' | 'compaction-reset' | undefined {
+  try {
+    return invalidate(pending, receiptText)
+  } catch {
+    return undefined
+  }
+}
+
+/** Append one invalidation receipt; a receipt failure never breaks the call. */
+async function appendResetReceipt(
+  receipts: ReceiptStore | undefined,
+  exec: PostExecuteExec | undefined,
+  sessionId: string,
+  stepId: string,
+  code: 'pruned-reset' | 'compaction-reset',
+): Promise<void> {
+  if (receipts == null || typeof receipts.append !== 'function') return
+  try {
+    await receipts.append({
+      version: 1,
+      ts: new Date().toISOString(),
+      sessionId,
+      // The mount observes no turn index; 0 is the same honest placeholder
+      // `skip:no-scope` uses, and the receipt's `ts` keeps ordering evidence.
+      turn: 0,
+      stepId,
+      kind: 'reset',
+      code,
+      tool: exec?.name,
+    })
+  } catch {
+    // A receipt is evidence, not a precondition: never break the call for it.
+  }
+}
+
+/**
+ * Abandon the pending decision after an external rewrite.
+ *
+ * Only the plugin's own anchor record is touched — the session log's current
+ * body is never read (design §5.2-7): after a prune the log holds head + marker
+ * + tail, so re-reading it would "confirm" an anchor the model can no longer
+ * see. Clearing happens before the receipt write so a stalled store cannot
+ * leave the stale anchors in place; both steps are contained so the tool result
+ * survives.
+ */
+async function resetInvalidatedPending(
+  deps: PostExecuteDeps,
+  exec: PostExecuteExec | undefined,
+  sessionId: string,
+  pending: ReceiptAnchors,
+  code: 'pruned-reset' | 'compaction-reset',
+): Promise<void> {
+  try {
+    deps.anchors?.clear(sessionId)
+  } catch {
+    // A foreign store must not turn the tool result into an error.
+  }
+  await appendResetReceipt(deps.receipts, exec, sessionId, pending.stepId, code)
+}
+
+/**
+ * The host's spill-notice predicate, resolved at most once per process.
+ *
+ * `@deepseek-ai/dsh-spill-policy` is an optional peer (design §5.4), so its
+ * notice module is imported dynamically: a static import would make the plugin
+ * fail to load on a host without the spill policy, and the degraded path would
+ * be unreachable. A missing package means no receipt can carry its footer, so
+ * the guard simply does not fire. The deps seam wins, which is what keeps the
+ * guard testable without the host.
+ */
+let noticePredicate: Promise<((text: string) => boolean) | undefined> | undefined
+
+function resolveNoticePredicate(
+  deps: PostExecuteDeps,
+): Promise<((text: string) => boolean) | undefined> {
+  if (typeof deps.hasSpillNotice === 'function') return Promise.resolve(deps.hasSpillNotice)
+  noticePredicate ??= import('@deepseek-ai/dsh-spill-policy/notice')
+    .then((module) => (typeof module.hasSpillNotice === 'function' ? module.hasSpillNotice : undefined))
+    .catch(() => undefined)
+  return noticePredicate
+}
+
+/**
+ * Whether projection must be skipped because the host already spilled this
+ * receipt (design §5.4).
+ *
+ * A predicate that throws counts as "already spilled": when the notice cannot
+ * be ruled out, a second projection could hide the original twice, so the safe
+ * direction is to leave the receipt alone. This hook may not throw either way —
+ * the host replaces a throwing listener's result with a tool error
+ * (`dsh-tools/lib/pipeline.js:538-550`), losing the very output the plugin
+ * exists to preserve.
+ */
+async function isAlreadySpilled(deps: PostExecuteDeps, receiptText: string): Promise<boolean> {
+  try {
+    const hasNotice = await resolveNoticePredicate(deps)
+    return hasNotice !== undefined && alreadySpilled(receiptText, hasNotice)
+  } catch {
+    return true
+  }
+}
+
 /**
  * The projection seam.
  *
@@ -230,9 +378,14 @@ function projectDecision(
  * `next()` runs first, exactly like the host's own spill policy: a listener
  * either returns a decision or calls `next()` and returns its result, and
  * bypassing it would silently drop the listeners mounted after this one. The
- * fixed order that follows is `canonicalise → substitution decision →
- * projection → return the decision` (design §5.4-5); Task 23b puts real bodies
- * in the two middle stages.
+ * fixed order that follows is `canonicalise → invalidate → substitution
+ * decision → double-projection guard → projection → return the decision`
+ * (design §5.2-7/§5.4-5); Task 23b puts real bodies in the decision and
+ * projection stages.
+ *
+ * Both Task-22 guards may abandon the decision, and neither may throw: the host
+ * turns a throwing `post-execute` listener into an error result and the real
+ * tool output is lost.
  */
 async function postExecute(
   deps: PostExecuteDeps,
@@ -250,8 +403,29 @@ async function postExecute(
   // Canonicalise the original receiver, not a downstream replacement: guards
   // and the selector read the receipt as it arrived.
   const receipt = canonicalise(result?.content ?? [], result?.isError === true)
+
+  // External invalidation first: a receipt the host rewrote under our anchors
+  // must abandon the decision before any stage reads it (design §5.2-7).
+  const sessionId = sessionIdOf(exec)
+  if (sessionId !== undefined) {
+    const pending = pendingAnchorsOf(deps, sessionId)
+    // `!= null` rather than `!== undefined`: a foreign store can hand back a
+    // null, and dereferencing it would throw out of the hook.
+    if (pending != null) {
+      const reset = invalidationOf(pending, receipt.text)
+      if (reset !== undefined) {
+        await resetInvalidatedPending(deps, exec, sessionId, pending, reset)
+        return decision
+      }
+    }
+  }
+
   const substituted = decideSubstitution(receipt)
   if (substituted !== undefined) return substituted
+
+  // Second-projection guard: a receipt that already carries the host spill
+  // footer must not be projected again (design §5.4).
+  if (await isAlreadySpilled(deps, receipt.text)) return decision
   return projectDecision(deps, receipt, decision)
 }
 
