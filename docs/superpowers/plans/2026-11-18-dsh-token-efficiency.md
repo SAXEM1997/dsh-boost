@@ -343,7 +343,7 @@ Expected: FAIL，模块不存在
 
 - [ ] **Step 3: 实现**
 
-用 `Array.from(text)` 转 code point 数组后再切（`const cp = Array.from(text)`），`head = cp.slice(0, headChars).join('')`、`tail = cp.slice(-tailChars).join('')`。`omittedCodePoints = cp.length - headChars - tailChars`；`omittedBytes = Buffer.byteLength(head + tail, 'utf8')` 之差——正确写法是 `Buffer.byteLength(text,'utf8') - Buffer.byteLength(head,'utf8') - Buffer.byteLength(tail,'utf8')`。`shouldTruncate` 先比 `text.length`（UTF-16，省一次 `Array.from`），`> triggerChars` 才进入细节；**`text.length > 256 * 1024` 直接返回 `false`**（§5.4，大回执不投影）。
+用 `Array.from(text)` 转 code point 数组后再切（`const cp = Array.from(text)`），`head = cp.slice(0, headChars).join('')`、`tail = cp.slice(-tailChars).join('')`。`omittedCodePoints = cp.length - headChars - tailChars`；`omittedBytes = Buffer.byteLength(head + tail, 'utf8')` 之差——正确写法是 `Buffer.byteLength(text,'utf8') - Buffer.byteLength(head,'utf8') - Buffer.byteLength(tail,'utf8')`。`shouldTruncate` 先比 `text.length`（UTF-16，省一次 `Array.from`），`> triggerChars` 才进入细节；**`Buffer.byteLength(text, 'utf8') > 256 * 1024` 直接返回 `false`**（§5.4，大回执不投影；按 UTF-8 字节计，不用 `text.length` 的 UTF-16 单元数——否则 CJK/emoji 的阈值会差一倍以上），并加一条 emoji 边界测试。
 
 - [ ] **Step 4: 运行确认通过**
 
@@ -772,7 +772,7 @@ git commit -m "feat: scope document model and strict ordering"
 
 **Interfaces:**
 - Consumes: `ScopeDoc`、`parseScope`、`ERR_SCOPE_*`（T8）
-- Produces: `export class ScopeStore { constructor(dir: string); read(): Promise<{ doc: ScopeDoc; degraded?: 'scope-degraded'; code?: ScopeCode }>; write(mutate: (d: ScopeDoc) => ScopeDoc, baseRevision: number): Promise<ScopeDoc> }`
+- Produces: `export class ScopeStore { constructor(dir: string); read(): Promise<{ doc: ScopeDoc; degraded?: 'scope-degraded'; code?: ScopeCode }>; write(mutate: (d: ScopeDoc) => ScopeDoc, baseRevision: number): Promise<ScopeDoc>; judgement(fallback?: boolean): boolean }`
 - Produces: 写入失败抛出的 `Error` 带 `code` 属性（`ERR_SCOPE_LOCKED` / `ERR_SCOPE_REVISION_CONFLICT` / `ERR_SCOPE_READ_FAILED`），消息里带同一个码
 
 - [ ] **Step 1: 写失败测试**
@@ -832,7 +832,7 @@ Expected: FAIL，模块不存在
 
 - [ ] **Step 3: 实现**
 
-`read`：`stat` 取 mtime + 读文件 → `parseScope`；缓存命中条件 = `mtime` 与 `revision` 都未变。任何读取 / 解析失败都返回 `{ doc: DEFAULT_SCOPE 的深拷贝, degraded: 'scope-degraded', code }`，**不抛错、不覆盖原文件**；`code` 取 `parseScope` 给的码，读文件失败则 `ERR_SCOPE_READ_FAILED`。`write`：`open(lock,'wx')`（`await` 一次）→ 读 → 校验 `baseRevision` → `mutate` → `revision + 1` → **同步** `writeFileSync` 到临时文件 + `renameSync` → `unlink(lock)`。锁已存在时先判回收（`mtime > 60s` 且 pid 不存活），否则抛 `ERR_SCOPE_LOCKED`。
+`read`：`stat` 取 mtime + 读文件 → `parseScope`；缓存命中条件 = `mtime` 与 `revision` 都未变。`judgement()` 是**同步**访问器：返回最近一次 `read` 得出的可见性（未读过则返回 `fallback ?? false`）——`systemPrompt.section` 的 provider 是同步的，不能 await，这是唯一可用的形状（§5.5「同步读取 `judgement ?? resolveNow`」）。任何读取 / 解析失败都返回 `{ doc: DEFAULT_SCOPE 的深拷贝, degraded: 'scope-degraded', code }`，**不抛错、不覆盖原文件**；`code` 取 `parseScope` 给的码，读文件失败则 `ERR_SCOPE_READ_FAILED`。`write`：`open(lock,'wx')`（`await` 一次）→ 读 → 校验 `baseRevision` → `mutate` → `revision + 1` → **同步** `writeFileSync` 到临时文件 + `renameSync` → `unlink(lock)`。锁已存在时先判回收（`mtime > 60s` 且 pid 不存活），否则抛 `ERR_SCOPE_LOCKED`。
 
 - [ ] **Step 4: 运行确认通过**
 
@@ -865,7 +865,8 @@ git commit -m "feat: atomic scope writes with lock"
 **Interfaces:**
 - Consumes: `isVisible`（T8）、`ScopeStore`（T9）
 - Produces: `export interface WorkspaceRegistry { byPath(p: string): { id: string } | undefined }`
-- Produces: `export function workspaceIdOf(agent: { session?: { header?: { cwd?: string } } } | undefined, registry: WorkspaceRegistry | undefined): string | undefined`（`cwd` 经 `registry.byPath(cwd)?.id` 换成宿主 UUID，**不是路径本身**）
+- Produces: `export interface WorkspaceRegistry { list(): readonly { id: string; path: string }[]; resolveByPath?(path: string): Promise<{ id: string } | undefined> }`——**宿主只有同步 `list()` 与异步 `resolveByPath()`，没有 `byPath`**
+- Produces: `export function workspaceIdOf(agent: { session?: { header?: { cwd?: string } } } | undefined, registry: WorkspaceRegistry | undefined): string | undefined`（`cwd` 经 `registry.list()` 按 `path` 精确匹配换成宿主 UUID；**不是路径本身**，也不 await——`systemPrompt` 装配是同步的。异步 `resolveByPath` 只用于预热缓存）
 - Produces: `export async function resolveVisible(store: ScopeStore, agent: unknown, registry: WorkspaceRegistry | undefined): Promise<boolean>`
 - Produces: `test/fakes/host.ts` 的 `export function fakeHost(overrides?: Record<string, unknown>): any`（可注入 `tools.register/resolve/definitions`、`llm.stream`、`systemPrompt.section`、`tokenMeter`、`spillStore`）
 
@@ -1793,7 +1794,8 @@ git commit -m "feat: plan protocol section and turn clock"
 
 **Interfaces:**
 - Produces: `export interface Usage { input: number; cacheRead: number; output: number }`
-- Produces: `export class UsageLedger { request(u: Usage): void; markSubstituted(candidateId: string): void; settle(): { saved_input_tokens: number | 'unknown'; cache_hit_delta: number | null; output_tokens: number | 'unknown' } }`
+- Produces: `export class UsageLedger { request(u: Usage): void; last(): Usage | undefined; markSubstituted(candidateId: string): void; settle(): { saved_input_tokens: number | 'unknown'; cache_hit_delta: number | null; output_tokens: number | 'unknown' } }`
+- 注意：`Usage` 由 `llm/stream` 的 `{type:'usage'}` chunk 映射（`inputTokens`/`cacheReadTokens`/`outputTokens`），`GenerateOptions` 里没有 usage
 
 - [ ] **Step 1: 写失败测试**
 
@@ -1854,7 +1856,7 @@ Expected: FAIL，模块不存在
 
 - [ ] **Step 3: 实现**
 
-只保留"上一次请求"与"待配对标记"两个槽位（不建全表，YAGNI）。`settle()` 消费并清空。`output` 是**第三类计数**：`output_tokens` 取后一次请求的 `output`，缺失记 `'unknown'`，不并进 input。命中率 = `cacheRead / (input + cacheRead)`，分母为 0 记 `null`。
+只保留"上一次请求"与"待配对标记"两个槽位（不建全表，YAGNI）。**usage 的来源是 `llm/stream` 的 `{type:'usage'}` chunk，不是 `GenerateOptions`**——调用方把 `chunk.usage` 里的 `inputTokens`/`cacheReadTokens`/`outputTokens` 映射成 `Usage` 再 `request()`。`settle()` 消费并清空。`output` 是**第三类计数**：`output_tokens` 取后一次请求的 `output`，缺失记 `'unknown'`，不并进 input。命中率 = `cacheRead / (input + cacheRead)`，分母为 0 记 `null`。
 
 - [ ] **Step 4: 运行确认通过**
 
@@ -1970,24 +1972,38 @@ git push origin main   # remote 由 T1 布置（内网镜像）；GitHub 作为�
 - Modify: `src/hooks/post-execute.ts`, `src/hooks/llm-stream.ts`, `test/fakes/host.ts`, `test/hooks.test.ts`
 
 **Interfaces:**
-- Consumes: `decide`（T15）、`StepBudget`（T16）、`UsageLedger`（T21）、`registerHooks` 的位置（T17）、`isVisible`/`ScopeStore`（T8/T9）
-- Produces: `export interface PendingDispatch { stepId: string; candidateId: string; name: string; args: Record<string, unknown>; createdAt: number }`
-- Produces: `export class PendingQueue { set(p: PendingDispatch): void; take(): PendingDispatch | undefined; peek(): PendingDispatch | undefined; clear(): void }`
-- Produces: `export function synthesizeTurn(p: PendingDispatch): { role: 'assistant'; content: { type: 'tool-call'; name: string; arguments: unknown }[] }`
-- Produces: `export interface HookDeps { config: BoostConfig; scope: ScopeStore; receipts: ReceiptStore; queue: PendingQueue; budget: StepBudget; resolveSession: (sessionId: string) => string | undefined }`
-- Produces: `export function registerHooks(ctx: PluginContext, deps: HookDeps): void`——**四挂载点的真实接线**
-- Produces: `HookDeps.usage: UsageLedger`——每次模型请求 `usage.request({input, cacheRead, output})`；替换提交时 `usage.markSubstituted(candidateId)`；替换后下一次请求 `usage.settle()` 写入收据的 `saved_input_tokens` / `cache_hit_delta`
+- Consumes: `decide`（T15）、`choose`（T14）、`worthSubstituting`/`remainingSteps`/`StepBudget`（T16）、`UsageLedger`（T21）、`TurnClock`（T20）、`rejectIfTampered`（T18）、`isVisible`/`ScopeStore`（T8/T9）、`ReceiptAnchors`（T22）
+- Produces: `export interface PendingEntry { callId: string; candidateId: string; name: string; args: Record<string, unknown>; createdAt: number }`
+- Produces: `export class PendingQueue { set(sessionId: string, e: PendingEntry): void; take(sessionId: string): PendingEntry | undefined; peek(sessionId: string): PendingEntry | undefined; clear(sessionId: string): void }`——**按 sessionId 隔离**，`llm/stream` 只有 sessionId，跨会话串号会把 A 的待办合成给 B
+- Produces: `export function callIdFor(sessionId: string, candidateId: string): string`——`sha256(sessionId + '/' + candidateId).slice(0, 16)`，确定性、可重放
+- Produces: `export async function* synthesizeTurn(e: PendingEntry): AsyncIterable<StreamChunk>`——**必须逐个 yield 宿主 chunk，不是返回一个对象**
+- Produces: `export interface HookDeps { config: BoostConfig; scope: ScopeStore; receipts: ReceiptStore; queue: PendingQueue; budget: StepBudget; usage: UsageLedger; clock: TurnClock; resolveSession: (sessionId: string) => string | undefined }`
+- Produces: `export function registerHooks(ctx: PluginContext, deps: HookDeps): void`
+
+**合成的 chunk 序列（照参照实现 `ref-harnessmm/dsh-plugin/harnessmm-desktop/lib/index.js:669-721`，不是自创）**
+
+```
+block-start(reasoning, i=0) → reasoning-delta → block-end(reasoning)
+block-start(tool-call, i=1) → tool-call-delta(id, name, argumentsDelta=JSON.stringify(args))
+                            → block-end({type:'tool-call', id, name, arguments: <raw JSON string>})
+usage(usage) → finish({kind:'tool-calls'})
+```
+
+- `ToolCallBlock.arguments` 是**原始 JSON 字符串**，不是对象；`id` 必填，用 `callIdFor`。
+- 那个兄弟 `reasoning` 块不是装饰：DeepSeek 的 thinking 模式会拒绝没有 sibling thinking 的 assistant `tool_use`（"The content[].thinking in the thinking mode must be passed back to the API"），缺了它第一次替换后的下一次请求就 400。参照实现为此专门发一块无签名 reasoning，这里照做。
 
 - [ ] **Step 1: 写失败的装配测试**
 
 ```ts
-// test/hooks.test.ts（替换 T17 的三条边角用例）
+// test/hooks.test.ts
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { fakeHost } from './fakes/host.ts'
 import { registerHooks } from '../src/hooks/post-execute.ts'
-import { PendingQueue } from '../src/hooks/pending.ts'
+import { PendingQueue, callIdFor, synthesizeTurn } from '../src/hooks/pending.ts'
 import { StepBudget } from '../src/admission/ledger.ts'
+import { UsageLedger } from '../src/admission/usage.ts'
+import { TurnClock } from '../src/hooks/clock.ts'
 import { DEFAULT_CONFIG } from '../src/config.ts'
 import { DEFAULT_SCOPE } from '../src/scope/doc.ts'
 import { SELECTOR_PURPOSE } from '../src/selector/jev.ts'
@@ -1997,52 +2013,89 @@ const setup = (over: any = {}) => {
   const queue = new PendingQueue()
   const deps = {
     config: DEFAULT_CONFIG,
-    scope: over.scope ?? { read: async () => ({ doc: { ...DEFAULT_SCOPE, mode: 'global' } }) },
-    receipts: over.receipts ?? { append: async (r: any) => host.receipts.push(r) },
-    queue, budget: new StepBudget(DEFAULT_CONFIG.stepsPerTurn),
+    scope: over.scope ?? { read: async () => ({ doc: { ...DEFAULT_SCOPE, mode: 'global' } }), judgement: () => true },
+    receipts: over.receipts ?? { append: async (r: any) => { host.receipts.push(r) } },
+    queue,
+    budget: over.budget ?? new StepBudget(DEFAULT_CONFIG.stepsPerTurn),
+    usage: new UsageLedger(),
+    clock: new TurnClock(),
     resolveSession: over.resolveSession ?? (() => 'ws-1'),
   }
   registerHooks(host, deps as any)
   return { host, queue, deps }
 }
 
-test('selector 内部调用直接放行', async () => {
-  const { host } = setup()
-  const out = await host.callHook('llm/stream', [{ purpose: SELECTOR_PURPOSE }], async () => 'PASS')
-  assert.equal(out, 'PASS')
+test('合成回合按宿主 chunk 协议逐个产出', async () => {
+  const chunks: any[] = []
+  for await (const c of synthesizeTurn({ callId: 'id1', candidateId: 'A', name: 'read', args: { path: '/a' }, createdAt: 0 })) chunks.push(c)
+  assert.deepEqual(chunks.map(c => c.type), ['block-start', 'reasoning-delta', 'block-end', 'block-start', 'tool-call-delta', 'block-end', 'usage', 'finish'])
+  const delta = chunks.find(c => c.type === 'tool-call-delta')
+  assert.equal(delta.id, 'id1')
+  assert.equal(delta.argumentsDelta, JSON.stringify({ path: '/a' }))
+  const end = chunks.filter(c => c.type === 'block-end')[1]
+  assert.equal(end.block.type, 'tool-call')
+  assert.equal(typeof end.block.arguments, 'string')   // 原始 JSON 字符串，不是对象
+  assert.deepEqual(chunks.at(-1).reason, { kind: 'tool-calls' })
 })
 
-test('shadow 为真时不合成，写 shadow 收据后原样放行', async () => {
-  const { host, queue } = setup({ scope: { read: async () => ({ doc: { ...DEFAULT_SCOPE, mode: 'global', shadow: true } }) } })
-  queue.set({ stepId: 'A', candidateId: 'A', name: 'read', args: { path: '/a' }, createdAt: 0 })
-  const out = await host.callHook('llm/stream', [{ sessionId: 's1' }], async () => 'PASS')
-  assert.equal(out, 'PASS')
+test('callId 确定性可重放', () => {
+  assert.equal(callIdFor('s1', 'A'), callIdFor('s1', 'A'))
+  assert.notEqual(callIdFor('s1', 'A'), callIdFor('s2', 'A'))
+})
+
+test('pending 按 sessionId 隔离', () => {
+  const q = new PendingQueue()
+  q.set('s1', { callId: 'x', candidateId: 'A', name: 'read', args: {}, createdAt: 0 })
+  assert.equal(q.peek('s2'), undefined)
+  assert.equal(q.peek('s1')?.candidateId, 'A')
+})
+
+test('selector 内部调用直接放行', async () => {
+  const { host } = setup()
+  assert.equal(await host.callHook('llm/stream', [{ purpose: SELECTOR_PURPOSE }], async () => 'PASS'), 'PASS')
+})
+
+test('shadow 为真时不合成，写 shadow 收据后放行', async () => {
+  const { host, queue } = setup({ scope: { read: async () => ({ doc: { ...DEFAULT_SCOPE, mode: 'global', shadow: true } }), judgement: () => true } })
+  queue.set('s1', { callId: 'x', candidateId: 'A', name: 'read', args: {}, createdAt: 0 })
+  assert.equal(await host.callHook('llm/stream', [{ sessionId: 's1' }], async () => 'PASS'), 'PASS')
   assert.ok(host.receipts.some((r: any) => r.kind === 'shadow'))
 })
 
-test('有 pending 时合成 tool-call 回合且不调 next', async () => {
+test('有 pending 时合成且不调 next', async () => {
   const { host, queue } = setup()
-  queue.set({ stepId: 'A', candidateId: 'A', name: 'read', args: { path: '/a' }, createdAt: 0 })
+  queue.set('s1', { callId: 'x', candidateId: 'A', name: 'read', args: { path: '/a' }, createdAt: 0 })
   let called = false
   const out = await host.callHook('llm/stream', [{ sessionId: 's1' }], async () => { called = true; return 'NEXT' })
   assert.equal(called, false)
-  assert.equal(out.chunks[0].content[0].type, 'tool-call')
+  const types = []
+  for await (const c of out) types.push(c.type)
+  assert.equal(types[0], 'block-start')
+  assert.ok(types.includes('tool-call-delta'))
 })
 
 test('scope 不可见时放行并写 skip:no-scope', async () => {
-  const { host } = setup({ scope: { read: async () => ({ doc: DEFAULT_SCOPE }) } })
-  const out = await host.callHook('llm/stream', [{ sessionId: 's1' }], async () => 'PASS')
-  assert.equal(out, 'PASS')
+  const { host } = setup({ scope: { read: async () => ({ doc: DEFAULT_SCOPE }), judgement: () => false } })
+  assert.equal(await host.callHook('llm/stream', [{ sessionId: 's1' }], async () => 'PASS'), 'PASS')
   assert.ok(host.receipts.some((r: any) => r.code === 'skip:no-scope'))
 })
 
 test('第 9 次替换被预算拦截并写 steps-exhausted', async () => {
-  const { host, queue, deps } = setup()
-  for (let i = 0; i < 8; i++) deps.budget.take()
-  queue.set({ stepId: 'I', candidateId: 'I', name: 'read', args: {}, createdAt: 0 })
-  const out = await host.callHook('llm/stream', [{ sessionId: 's1' }], async () => 'PASS')
-  assert.equal(out, 'PASS')
+  const budget = new StepBudget(8)
+  for (let i = 0; i < 8; i++) budget.take()
+  const { host, queue } = setup({ budget })
+  queue.set('s1', { callId: 'x', candidateId: 'I', name: 'read', args: {}, createdAt: 0 })
+  assert.equal(await host.callHook('llm/stream', [{ sessionId: 's1' }], async () => 'PASS'), 'PASS')
   assert.ok(host.receipts.some((r: any) => r.code === 'steps-exhausted'))
+})
+
+test('用量从流里的 usage chunk 取值，结束后结算', async () => {
+  const { host, deps } = setup()
+  await host.callHook('llm/stream', [{ sessionId: 's1' }], async function* () {
+    yield { type: 'usage', usage: { input: 100, cacheRead: 900, output: 10 } }
+    yield { type: 'finish', reason: { kind: 'stop' } }
+  })
+  assert.equal(deps.usage.last()?.cacheRead, 900)
 })
 
 test('when 逐步判定：scope 改变后下一步可见性翻转', async () => {
@@ -2050,9 +2103,10 @@ test('when 逐步判定：scope 改变后下一步可见性翻转', async () => 
   let mode: 'selected' | 'global' = 'selected'
   registerHooks(host, {
     config: DEFAULT_CONFIG,
-    scope: { read: async () => ({ doc: { ...DEFAULT_SCOPE, mode } }) },
-    receipts: { append: async () => {} },
-    queue: new PendingQueue(), budget: new StepBudget(8), resolveSession: () => 'ws-1',
+    scope: { read: async () => ({ doc: { ...DEFAULT_SCOPE, mode } }), judgement: () => mode === 'global' },
+    receipts: { append: async () => {} }, queue: new PendingQueue(),
+    budget: new StepBudget(8), usage: new UsageLedger(), clock: new TurnClock(),
+    resolveSession: () => 'ws-1',
   } as any)
   assert.equal(await host.visible('boost', { session: { header: { cwd: '/w/a' } } }), false)
   mode = 'global'
@@ -2067,13 +2121,12 @@ Expected: FAIL，`Cannot find module '../src/hooks/pending.ts'`
 
 - [ ] **Step 3: 实现接线**
 
-`post-execute` 在 `decide` 返回 `commit` 时 `queue.set(...)`、`fallback` 时 `queue.clear()`。
-`llm/stream` 的四条规则按此顺序：① `purpose === SELECTOR_PURPOSE` → `next()`；② `scope.shadow` → 写 `{kind:'shadow'}` 收据后 `next()`；③ `budget.take() === false` → 写 `{code:'steps-exhausted'}` 后 `next()`；④ 有 pending → 记 `{kind:'substitute'}` 收据、`queue.take()`、返回 `{ chunks: [synthesizeTurn(p)] }`，**不调 `next()`**。scope 不可见时 `next()` 并写 `skip:no-scope`（在 ②之前判）。
-`fakeHost` 增加 `visible(name, agent)`：按注册时的 `when` 逐次求值。
-
-**用量配对（R21 的消费端）**：`llm/stream` 拿到 `options` 后先 `usage.request(...)`；`post-execute` 提交替换时 `usage.markSubstituted(...)`；下一次 `llm/stream` 后 `usage.settle()` 的结果写进替换收据——不接这一步，`saved_input_tokens` 永远是 `unknown`。
-
-**协议段的 scope 门控（R36）**：`ctx.systemPrompt.section` 注册的文本由 `isVisible(doc, workspaceIdOf(agent))` 决定——不可见时不注入该段，并只在内存累加 `skip:no-scope` 计数（不逐条写收据，§5.5 表）。`boost` 工具的**可见性**豁免 scope，但它的协议段不豁免。
+`post-execute`：`canonicalise → invalidate（T22）→ decide → 若 commit：`worthSubstituting`（准入）+ `queue.set(sessionId, { callId: callIdFor(...), ... })`；若 fallback：`queue.clear(sessionId)` + 写收据。
+`llm/stream` 五条规则按序：① `purpose === SELECTOR_PURPOSE` → `next()`；② `resolveSession` 拿不到或 scope 不可见 → `next()` + `skip:no-scope`；③ `scope.shadow` → 写 `{kind:'shadow'}` 后 `next()`；④ `budget.take() === false` → 写 `{code:'steps-exhausted'}` 后 `next()`；⑤ 有 pending → 写 `{kind:'substitute'}`、`queue.take(sessionId)`、**return `synthesizeTurn(entry)`**（异步生成器，直接作为流的返回值）。
+多候选时先 `await choose({ llm, candidates, receiptText, maxTokens, route })`；abstain 即回退。
+`usage`：遍历 `next()` 返回的流时，遇到 `{type:'usage'}` 就 `usage.request(chunk.usage)`；替换提交时 `usage.markSubstituted(candidateId)`；下一次请求结束后 `usage.settle()` 写进替换收据。
+`rejectIfTampered` 在 `tools/execute` 里用 `queue.peek(callId)` 比对。`TurnClock.onModelRequest()` 在 `llm/stream` 每次进入时调用（切回合）；`clock.turn()` 进收据。
+`fakeHost` 增加 `visible(name, agent)`：按注册的 `when` 逐次求值；`callHook` 返回的东西若为 AsyncIterable 就原样返回。
 
 - [ ] **Step 4: 运行确认通过**
 
@@ -2082,16 +2135,14 @@ Expected: 全部 PASS
 
 - [ ] **Step 5: 重构**
 
-无重构则写明「无需重构」；否则抽出重复的收据构造。
+`synthesizeTurn` 里的 reasoning 文案抽成 `substitutionThinking(e)`。
 
 - [ ] **Step 6: 提交**
 
 ```bash
 git add src/hooks/ test/hooks.test.ts test/fakes/host.ts
-git commit -m "feat: wire pending dispatch and synthesized turns"
+git commit -m "feat: wire pending dispatch and synthesized tool-call stream"
 ```
-
----
 
 ### Task 24: 端到端替换集成
 
@@ -2109,11 +2160,32 @@ git commit -m "feat: wire pending dispatch and synthesized turns"
 import test from 'node:test'
 import assert from 'node:assert/strict'
 // 五条：成功替换 / 守卫失败回退 / 多候选选择 / 准入不过 / 预算耗尽
-test('成功替换：合成回合 + 收据字段齐全', async () => { /* 断言 substitute 收据含 saved_input_tokens */ })
-test('守卫失败：回退主模型，pending 清空', async () => { /* ... */ })
-test('多候选：selector 选 B 后合成 B 的调用', async () => { /* ... */ })
-test('准入不过：worthSubstituting 为假 → 回退', async () => { /* ... */ })
-test('第 9 次：steps-exhausted 且不发合成', async () => { /* ... */ })
+test('成功替换：合成回合出现 tool-call，收据含 saved_input_tokens', async () => {
+  const { host, receipts } = await runPath({ path: 'happy' })
+  const chunks = collect(await host.lastStream())
+  assert.ok(chunks.some(c => c.type === 'tool-call-delta'))
+  assert.ok(receipts.some(r => r.kind === 'substitute' && r.saved_input_tokens !== undefined))
+})
+test('守卫失败：不合成，pending 清空，记 fallback 收据', async () => {
+  const { host, queue, receipts } = await runPath({ guardFails: true })
+  assert.equal(queue.peek('s1'), undefined)
+  assert.ok(receipts.some(r => r.code === 'no-candidate'))
+})
+test('多候选：selector 返回 B 后合成的是 B 的调用', async () => {
+  const { host } = await runPath({ candidates: ['A', 'B'], selectorChoice: 'B' })
+  const delta = collect(await host.lastStream()).find(c => c.type === 'tool-call-delta')
+  assert.equal(delta.name, 'read')
+  assert.match(delta.argumentsDelta, '/b')
+})
+test('准入不过：worthSubstituting 为假 → 不合成', async () => {
+  const { host } = await runPath({ threshold: 10 ** 6 })
+  assert.equal(host.synthesized, 0)
+})
+test('第 9 次：steps-exhausted 且不发合成', async () => {
+  const { host, receipts } = await runPath({ prefillBudget: 8 })
+  assert.equal(host.synthesized, 0)
+  assert.ok(receipts.some(r => r.code === 'steps-exhausted'))
+})
 ```
 
 - [ ] **Step 2: 运行确认失败**
@@ -2161,6 +2233,20 @@ git commit -m "test: end-to-end substitution paths"
 - [ ] **Step 1: 写失败测试**
 
 ```ts
+import { isPosixOnly } from '../src/host/platform.ts'
+
+test('Windows 上禁替换但投影仍可用', () => {
+  const saved = process.platform
+  Object.defineProperty(process, 'platform', { value: 'win32', configurable: true })
+  try {
+    assert.equal(isPosixOnly(), false)
+    // 禁用替换的判定由 boost status 的 degraded 暴露，断言稳定码
+    assert.ok(degradedCodes().includes('ERR_HOST_PLATFORM_UNSUPPORTED'))
+  } finally {
+    Object.defineProperty(process, 'platform', { value: saved, configurable: true })
+  }
+})
+
 test('familyOf 映射 ssh 的宿主工具名', () => {
   assert.equal(familyOf('read'), 'read')
   assert.equal(familyOf('mcp__ssh__execute-command'), 'ssh')
@@ -2206,7 +2292,7 @@ Expected: 全部 PASS
 - [ ] **Step 6: 提交**
 
 ```bash
-git add src/host/ src/tools/family.ts src/admission/fixed-cost.ts src/admission/retrieval.ts src/tools/boost.ts test/host.test.ts test/family.test.ts
+git add src/host/ src/tools/family.ts src/admission/fixed-cost.ts src/admission/retrieval.ts src/tools/boost.ts src/hooks/post-execute.ts test/host.test.ts test/family.test.ts
 git commit -m "feat: host capability probes, family mapping, fixed-cost measurement"
 ```
 
@@ -2224,8 +2310,15 @@ git commit -m "feat: host capability probes, family mapping, fixed-cost measurem
 
 ```js
 // scripts/shadow-report.test.mjs（或 test/scripts.test.ts）
-test('shadow-report 对空收据目录输出四项零值，不抛错', async () => { /* ... */ })
-test('session-stats 对固定 snapshot 复算出 54,123 步 / 62,621 调用', async () => { /* ... */ })
+test('shadow-report 对空收据目录输出四项零值，不抛错', async () => {
+  const out = JSON.parse(await run('scripts/shadow-report.mjs', ['--dir', emptyDir]))
+  assert.deepEqual(out, { saveableRatio: 0, byFamily: {}, candidateRecall: 0, retrievalUpperBound: 0 })
+})
+test('session-stats 对固定 snapshot 复算出 54,123 步 / 62,621 调用', async () => {
+  const out = JSON.parse(await run('scripts/session-stats.mjs', ['--snapshot', 'scripts/session-snapshot.json']))
+  assert.equal(out.steps, 54123)
+  assert.equal(out.toolCalls, 62621)
+})
 ```
 
 - [ ] **Step 2: 运行确认失败**
