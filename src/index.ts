@@ -17,6 +17,7 @@ import { homedir } from 'node:os'
 import { join } from 'node:path'
 import type { ToolDefinition } from '@deepseek-ai/dsh-tools'
 import { resolveConfig } from './config.js'
+import { AnchorStore } from './gate/invalidate.js'
 import { registerHooks } from './hooks/post-execute.js'
 import { ReceiptStore } from './receipts/store.js'
 import { supportsStepWhen } from './scope/resolve.js'
@@ -101,7 +102,17 @@ export function apply(ctx: PluginContext, config: unknown): void {
     const root = boostRoot()
     const scope = new ScopeStore(root)
     const receipts = new ReceiptStore(root)
-    registerHooks(ctx, { config: cfg, scope, receipts })
+    // `anchors` and `resolveSession` are required by the hook contract. The
+    // session-table lookup belongs to Task 23c's production assembly; until it
+    // lands, an unresolved session is fail-closed (no substitution), never an
+    // error, and projection keeps working from the judgement cache.
+    registerHooks(ctx, {
+      config: cfg,
+      scope,
+      receipts,
+      anchors: new AnchorStore(),
+      resolveSession: () => undefined,
+    })
     hooksMounted = true
     // After the hooks: `registerHooks` mounts the prompt section first and
     // throws on a duplicate, so a second `apply` aborts above before it can

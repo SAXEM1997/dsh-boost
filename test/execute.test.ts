@@ -1,6 +1,8 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { sameLiteral, rejectIfTampered } from '../src/hooks/execute.ts'
+import { AnchorStore } from '../src/gate/invalidate.ts'
+import { PendingQueue } from '../src/hooks/pending.ts'
 import { registerHooks } from '../src/hooks/post-execute.ts'
 import { DEFAULT_CONFIG } from '../src/config.ts'
 import { fakeHost } from './fakes/host.ts'
@@ -118,29 +120,48 @@ test('判定不清 pending：拒绝后条目原样保留', () => {
 
 // --- rule 6: the post-execute tools/execute wiring -------------------------
 
-/** Mount registerHooks with only the T18 seam under test. */
-function mount(pendingEntry?: (exec: { name: string; arguments: unknown }) => unknown): any {
+const AGENT = { session: { header: { id: 's1', cwd: '/w' } } }
+
+/** Mount registerHooks over a real PendingQueue holding at most one entry. */
+function mount(pending?: { name: string; args: Record<string, unknown> }): any {
   const host = fakeHost()
-  registerHooks(host, { config: DEFAULT_CONFIG, pendingEntry } as any)
+  const queue = new PendingQueue()
+  if (pending !== undefined) {
+    queue.set('s1', {
+      callId: 'call-1',
+      candidateId: 'A',
+      name: pending.name,
+      args: pending.args,
+      turn: 1,
+      step: 0,
+      createdAt: 0,
+    })
+  }
+  registerHooks(host, {
+    config: DEFAULT_CONFIG,
+    anchors: new AnchorStore(),
+    resolveSession: () => 'w1',
+    queue,
+  } as any)
   return host
 }
 
-test('tools/execute 在 seam 返回 undefined 时仍然直通', async () => {
-  const host = mount(() => undefined)
+test('tools/execute 在队列为空时仍然直通', async () => {
+  const host = mount()
   const out = await host.callHook(
     'tools/execute',
-    [{ name: 'read', arguments: { path: '/a' } }],
+    [{ name: 'read', callId: 'call-1', arguments: { path: '/a' }, agent: AGENT }],
     async () => 'DISPATCHED',
   )
   assert.equal(out, 'DISPATCHED')
   assert.equal(host.nextCalls, 1)
 })
 
-test('tools/execute 在 seam 返回等值 pending 时放行到派发', async () => {
-  const host = mount(() => ({ name: 'read', args: { path: '/a' } }))
+test('tools/execute 在等值 pending 时放行到派发', async () => {
+  const host = mount({ name: 'read', args: { path: '/a' } })
   const out = await host.callHook(
     'tools/execute',
-    [{ name: 'read', arguments: { path: '/a' } }],
+    [{ name: 'read', callId: 'call-1', arguments: { path: '/a' }, agent: AGENT }],
     async () => 'DISPATCHED',
   )
   assert.equal(out, 'DISPATCHED')
@@ -148,11 +169,11 @@ test('tools/execute 在 seam 返回等值 pending 时放行到派发', async () 
 })
 
 test('tools/execute 在实参不符时返回宿主 failure 且不派发', async () => {
-  const host = mount(() => ({ name: 'read', args: { path: '/a' } }))
+  const host = mount({ name: 'read', args: { path: '/a' } })
   let dispatched = 0
   const out: any = await host.callHook(
     'tools/execute',
-    [{ name: 'read', arguments: { path: '/b' } }],
+    [{ name: 'read', callId: 'call-1', arguments: { path: '/b' }, agent: AGENT }],
     async () => {
       dispatched += 1
       return 'DISPATCHED'
