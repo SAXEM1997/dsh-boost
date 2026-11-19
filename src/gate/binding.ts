@@ -128,9 +128,14 @@ function escapedClosingQuote(value: string): boolean {
  * anchored `\s*` can only consume horizontal whitespace and cannot re-consume
  * the rest of the receipt at each line start. That keeps the scan linear on a
  * whitespace-heavy receipt, where one cross-line global regex is quadratic.
+ *
+ * The value must be non-empty (`+`): an empty projected value is never a useful
+ * argument — it would reach a tool as `path: ""` and fail there, after the plan
+ * has already committed — so `name: ""` abstains and the plan falls back before
+ * anything runs.
  */
 function identifierPattern(field: string): RegExp {
-  return new RegExp('^\\s*' + escapeRegExp(field) + '\\s*[:=]\\s*"([^"]*)"')
+  return new RegExp('^\\s*' + escapeRegExp(field) + '\\s*[:=]\\s*"([^"]+)"')
 }
 
 /**

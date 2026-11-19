@@ -120,9 +120,9 @@ test('$single 结束引号被转义时判歧义', () => {
   assert.equal(extractField("['a\\\\']", '$single'), 'a\\\\')
 })
 
-test('标识符右侧必须是双引号、值不能跨行；空值原样绑定', () => {
+test('标识符右侧必须是双引号、值不能为空也不能跨行', () => {
   assert.equal(extractField("name: ''", 'name'), undefined)
-  assert.equal(extractField('name: ""', 'name'), '')
+  assert.equal(extractField('name: ""', 'name'), undefined)
   assert.equal(extractField('name: "a\nb"', 'name'), undefined)
   assert.equal(extractField('  name = "v"  ', 'name'), 'v')
 })
