@@ -142,7 +142,16 @@ export function fakeHost(overrides: Record<string, unknown> = {}): any {
           host.nextCalls += 1
           return next()
         }
-        return handler(...args, () => run(index + 1))
+        // The real waterfall throws when a listener resumes the chain twice
+        // (cordis' "next() called multiple times"), so this fake does too: a
+        // double-next regression must not pass the suite.
+        let resumed = false
+        const resume = (): unknown => {
+          if (resumed) throw new Error(`fakeHost: next() called multiple times for ${name}`)
+          resumed = true
+          return run(index + 1)
+        }
+        return handler(...args, resume)
       }
       return run(0)
     },
@@ -150,6 +159,9 @@ export function fakeHost(overrides: Record<string, unknown> = {}): any {
       const names = [...hooks.keys()]
       if (sections.size > 0) names.push('systemPrompt')
       return names
+    },
+    hookCount(name: string): number {
+      return (hooks.get(name) ?? []).length
     },
     section(name?: string): Section | undefined {
       return name === undefined ? lastSection : sections.get(name)

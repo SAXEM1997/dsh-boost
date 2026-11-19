@@ -38,3 +38,18 @@ test('不 trim、不改行尾，逐字保留', () => {
   assert.equal(r.text, ' a\r\n\tb ')
   assert.equal(r.empty, false)
 })
+
+test('非对象 block 被跳过而不是解引用（[null]）', () => {
+  const r = canonicalise([null as any, { type: 'text', text: 'x' }], false)
+  assert.equal(r.text, 'x')
+  assert.equal(r.textBlocks, 1)
+})
+
+test('非数组 content 视为空回执，不抛错', () => {
+  for (const malformed of [null, undefined, {}, 'text'] as any[]) {
+    const r = canonicalise(malformed, false)
+    assert.equal(r.text, '')
+    assert.equal(r.empty, true)
+    assert.equal(r.textBlocks, 0)
+  }
+})

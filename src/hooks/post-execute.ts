@@ -22,7 +22,7 @@
  *
  * The provider's `c.scope` is the agent itself at runtime: the host builds the
  * assembly context as `{ agent, scope: agent, signal }`
- * (`@deepseek-ai/dsh-agent/lib/index.js:407`), even though the declared type is
+ * (`@deepseek-ai/dsh-agent/lib/index.js:410`), even though the declared type is
  * the opaque `ScopeKey`. Keying the cache on anything else — or falling back to
  * a no-argument judgement — would leak one session's visibility into another.
  *
@@ -100,7 +100,7 @@ function agentKeyOf(scope: unknown): string | undefined {
  * mean "inject nothing" (fail-closed, design §5.5).
  */
 function protocolText(scope: ScopeStore | undefined, context: { scope?: unknown }): string {
-  if (scope === undefined || typeof scope.judgement !== 'function') return ''
+  if (scope == null || typeof scope.judgement !== 'function') return ''
   const key = agentKeyOf(context?.scope)
   if (key === undefined) return ''
   return scope.judgement(key) ? PLACEHOLDER_TEXT : ''
@@ -144,7 +144,7 @@ async function appendSkipNoScope(
   receipts: ReceiptStore | undefined,
   exec: PostExecuteExec | undefined,
 ): Promise<void> {
-  if (receipts === undefined || typeof receipts.append !== 'function') return
+  if (receipts == null || typeof receipts.append !== 'function') return
   try {
     await receipts.append({
       version: 1,
@@ -245,6 +245,12 @@ function registerProtocolSection(ctx: PluginContext, scope: ScopeStore | undefin
 /**
  * Register the plugin's four host integration points.
  *
+ * The prompt section is registered first on purpose: it is the only mount that
+ * rejects a duplicate name, so a second `apply` aborts here before any event
+ * hook is mounted twice (the host turns a duplicate section into an error, and
+ * `apply` treats that as "already mounted"). Registering it last would leave
+ * three live duplicate listeners behind.
+ *
  * `scope` and `receipts` are checked at the point of use, not here: a host
  * wiring the plugin without one of them still gets the four mount points, and
  * every degraded path is fail-closed instead of throwing during registration.
@@ -255,8 +261,8 @@ export function registerHooks(
   ctx: PluginContext,
   deps: { config: BoostConfig; scope: ScopeStore; receipts: ReceiptStore },
 ): void {
+  registerProtocolSection(ctx, deps.scope)
   registerPostExecute(ctx, deps)
   registerLlmStream(ctx)
   registerExecute(ctx)
-  registerProtocolSection(ctx, deps.scope)
 }

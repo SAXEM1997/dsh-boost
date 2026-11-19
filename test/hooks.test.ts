@@ -118,6 +118,7 @@ test('有 agent 时不写 skip 收据，下游 decision 原样返回', async () 
     async () => decision,
   )
   assert.equal(res, decision)
+  assert.equal(host.nextCalls, 1)
   assert.equal(host.receipts.length, 0)
 })
 
@@ -134,4 +135,19 @@ test('scope/receipts 缺失时 registerHooks 不抛错，四个挂载点仍在�
     async () => ({ kind: 'accept' }),
   )
   assert.equal(res.kind, 'accept')
+  assert.equal(host.nextCalls, 1)
+})
+
+test('scope/receipts 为 null 时代码路径同样 fail-closed', async () => {
+  const host = fakeHost()
+  assert.doesNotThrow(() => registerHooks(host, { config: DEFAULT_CONFIG, scope: null, receipts: null } as any))
+  assert.equal(host.section('dsh-boost').text({ scope: { session: { header: { id: 's1', cwd: '/w' } } } }), '')
+
+  const res = await host.callHook(
+    'tools/post-execute',
+    [{ name: 'read', agent: undefined }, { content: [] }],
+    async () => ({ kind: 'accept' }),
+  )
+  assert.equal(res.kind, 'accept')
+  assert.equal(host.nextCalls, 1)
 })

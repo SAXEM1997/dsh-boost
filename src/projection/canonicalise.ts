@@ -11,6 +11,14 @@
  * blocks without a `text` value contribute nothing and are not counted in
  * `textBlocks`; other block kinds (image, file, …) are skipped entirely.
  *
+ * The block array is untrusted at this boundary even though the host declares
+ * `ContentBlock[]`: the host validates lossless JSON, not block shape, so a
+ * third-party tool's renderer can hand over `null` or a non-object. Such a
+ * block is skipped, never dereferenced, and a content value that is not an
+ * array is an empty receipt. Throwing here would make the host replace the
+ * tool's real output with a tool error — the exact evidence loss this module
+ * exists to prevent.
+ *
  * `empty` means "no text content" — it is true for an empty array and for
  * text blocks whose concatenation is the empty string, and it is independent
  * of `isError`.
@@ -35,8 +43,15 @@ export function canonicalise(
   blocks: ReadonlyArray<{ type: string; text?: string }>,
   isError: boolean,
 ): CanonicalReceipt {
-  const textBlocks = blocks.filter(
-    (block): block is { type: 'text'; text: string } => block.type === 'text' && block.text !== undefined,
+  // A malformed renderer can hand over a non-array; that is an empty receipt,
+  // not a crash on the way into history.
+  const list: ReadonlyArray<unknown> = Array.isArray(blocks) ? blocks : []
+  const textBlocks = list.filter(
+    (block): block is { type: 'text'; text: string } =>
+      typeof block === 'object' &&
+      block !== null &&
+      (block as { type?: unknown }).type === 'text' &&
+      (block as { text?: unknown }).text !== undefined,
   )
   const text = textBlocks.map((block) => block.text).join('')
   return { text, isError, empty: text.length === 0, textBlocks: textBlocks.length }

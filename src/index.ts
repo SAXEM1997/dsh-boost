@@ -8,8 +8,7 @@
  *
  * Wiring failures are contained: a host that lacks the services a mount point
  * lives on must load the plugin with a warning, not die loading it. The data
- * root also falls back to `$DSH_HOME`/`~/.dsh` when the host's path service is
- * absent.
+ * root is `$DSH_HOME/boost`, falling back to `~/.dsh/boost`.
  *
  * @module dsh-boost
  */
@@ -31,18 +30,10 @@ function canRegister(ctx: PluginContext): boolean {
 }
 
 /**
- * The plugin's data root: `<DSH_HOME>/boost`.
- *
- * The host's `dshHomePath` service is the authority when it is mounted; the
- * environment/home fallback keeps a bare ctx (or a host without app-boot) from
- * silently disabling the plugin.
+ * The plugin's data root: `<DSH_HOME>/boost`, with `~/.dsh/boost` as the
+ * default when the environment variable is unset or blank (design §10).
  */
-function boostRoot(ctx: PluginContext): string {
-  const homePath =
-    typeof ctx.get === 'function'
-      ? ctx.get<(...segments: string[]) => string>('dshHomePath')
-      : undefined
-  if (typeof homePath === 'function') return homePath('boost')
+function boostRoot(): string {
   const configured = process.env.DSH_HOME?.trim()
   return join(configured ? configured : join(homedir(), '.dsh'), 'boost')
 }
@@ -50,6 +41,17 @@ function boostRoot(ctx: PluginContext): string {
 /** One-line detail for a contained wiring failure. */
 function messageOf(error: unknown): string {
   return error instanceof Error ? error.message : String(error)
+}
+
+/**
+ * The host exposes no code for a duplicate section name; its message is the
+ * only discriminator (`prompt section "dsh-boost" is already registered …`).
+ */
+const ALREADY_REGISTERED = /already registered/
+
+/** Whether a registration failure means this plugin's mounts already exist. */
+function alreadyMounted(error: unknown): boolean {
+  return ALREADY_REGISTERED.test(messageOf(error))
 }
 
 export function apply(ctx: PluginContext, config: unknown): void {
@@ -64,13 +66,17 @@ export function apply(ctx: PluginContext, config: unknown): void {
   }
 
   try {
-    const root = boostRoot(ctx)
+    const root = boostRoot()
     registerHooks(ctx, {
       config: cfg,
       scope: new ScopeStore(root),
       receipts: new ReceiptStore(root),
     })
   } catch (error) {
+    // A second apply fails on the duplicate prompt section first (registerHooks
+    // mounts it first), which means the plugin is already wired — not that
+    // wiring failed. Returning here leaves the existing mounts untouched.
+    if (alreadyMounted(error)) return
     ctx.logger?.warn?.(`dsh-boost: hook registration skipped: ${messageOf(error)}`)
   }
 }

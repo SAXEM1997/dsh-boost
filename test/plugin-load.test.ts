@@ -44,19 +44,35 @@ test('apply 用假 ctx 调用不抛错，并记录解析后的步数预算（T1 
   )
 })
 
-test('apply 从 ctx 装配四个挂载点（R4）', () => {
-  const host = fakeHost({
-    get: (name: string) =>
-      name === 'dshHomePath'
-        ? (...segments: string[]) => join(tmpdir(), 'dsh-boost-apply', ...segments)
-        : undefined,
-  })
+test('apply 从 $DSH_HOME 装配四个挂载点（R4）', () => {
+  const saved = process.env.DSH_HOME
+  process.env.DSH_HOME = join(tmpdir(), 'dsh-boost-apply')
+  try {
+    const host = fakeHost({
+      get: () => {
+        throw new Error('ctx.get must not be used to resolve the data root')
+      },
+    })
 
-  assert.doesNotThrow(() => plugin.apply(host as unknown as PluginContext, {}))
-  assert.deepEqual(host.hooked().sort(), [
-    'llm/stream',
-    'systemPrompt',
-    'tools/execute',
-    'tools/post-execute',
-  ])
+    assert.doesNotThrow(() => plugin.apply(host as unknown as PluginContext, {}))
+    assert.deepEqual(host.hooked().sort(), [
+      'llm/stream',
+      'systemPrompt',
+      'tools/execute',
+      'tools/post-execute',
+    ])
+  } finally {
+    if (saved === undefined) delete process.env.DSH_HOME
+    else process.env.DSH_HOME = saved
+  }
+})
+
+test('apply 重复调用不重复挂载（重复 section 视为已装配）', () => {
+  const host = fakeHost()
+  plugin.apply(host as unknown as PluginContext, {})
+  plugin.apply(host as unknown as PluginContext, {})
+  assert.equal(host.hookCount('tools/post-execute'), 1)
+  assert.equal(host.hookCount('llm/stream'), 1)
+  assert.equal(host.hookCount('tools/execute'), 1)
+  assert.equal(host.section('dsh-boost')?.name, 'dsh-boost')
 })
