@@ -164,6 +164,16 @@ test('revision / shadow / projection 严格守卫，合法值原样保留', () =
   assert.equal(bad.doc.projection, 'shadow')
 })
 
+test('非有限 revision 降级为 0：NaN 与 ±Infinity，含 JSON 的 1e999', () => {
+  for (const revision of [Number.NaN, Number.POSITIVE_INFINITY, Number.NEGATIVE_INFINITY]) {
+    assert.equal(parseScope({ version: 2, revision }).doc.revision, 0)
+  }
+
+  const decoded: unknown = JSON.parse('{"version":2,"revision":1e999}')
+  assert.deepEqual(decoded, { version: 2, revision: Number.POSITIVE_INFINITY })
+  assert.equal(parseScope(decoded).doc.revision, 0)
+})
+
 test('updatedAt 只做字符串检查：字符串保留，其他类型丢弃', () => {
   const kept = parseScope({ version: 2, updatedAt: '2026-11-19T00:00:00Z' }).doc
   assert.equal(kept.updatedAt, '2026-11-19T00:00:00Z')

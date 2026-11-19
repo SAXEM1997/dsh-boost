@@ -5,21 +5,25 @@
  * §5.5). This module only parses an already-read value; it never touches the
  * filesystem. Task 9's store owns reading, locking and writing.
  *
+ * The input is the JSON-decoded value `JSON.parse` produces for `scope.json`,
+ * not an arbitrary host object: exotic in-memory shapes (throwing getters,
+ * inherited fields) are outside the contract and are not defended against.
+ *
  * Parsing is fail-closed in two ordered stages. **Type delimitation runs
  * before the version check**: a non-object, `null` or an array is a parse
- * failure even when it carries a `version` property, and only a plain object
- * whose `version` is exactly `2` has its remaining fields read. Anything else
- * — a missing version, version 1, a future version — is an unknown version.
+ * failure even when it carries a `version` property, and only an object whose
+ * `version` is exactly `2` has its remaining fields read. Anything else — a
+ * missing version, version 1, a future version — is an unknown version.
  *
- * Neither stage throws, and no failure returns a partial document: every
- * failure comes back as a fresh deep copy of `DEFAULT_SCOPE`, the strictest
- * exposure (`selected + []`), so a malformed or newer-versioned file degrades
- * to "nobody sees it" rather than crashing the agent.
+ * A matching stage rejects immediately, and no failure returns a partial
+ * document: every failure comes back as a fresh deep copy of `DEFAULT_SCOPE`,
+ * the strictest exposure (`selected + []`), so a malformed or newer-versioned
+ * file degrades to "nobody sees it" rather than crashing the agent.
  *
  * Individual fields are guarded on the strict side too: an unknown `mode` is
  * `'selected'`, a non-array `workspaceIds` is `[]`, non-string members are
  * dropped, a non-boolean `shadow` is `true`, an unknown `projection` is
- * `'shadow'`, and a non-number `revision` is `0`. `updatedAt` is never
+ * `'shadow'`, and a non-finite `revision` is `0`. `updatedAt` is never
  * validated beyond being a string.
  *
  * @module dsh-boost/scope/doc
@@ -117,9 +121,9 @@ function parseWorkspaceIds(raw: unknown): string[] {
   return Array.isArray(raw) ? raw.filter((id): id is string => typeof id === 'string') : []
 }
 
-/** Strict side for `revision`: a non-number is the initial revision. */
+/** Strict side for `revision`: anything but a finite number is the initial revision. */
 function parseRevision(raw: unknown): number {
-  return typeof raw === 'number' ? raw : 0
+  return typeof raw === 'number' && Number.isFinite(raw) ? raw : 0
 }
 
 /** Strict side for `shadow`: a non-boolean keeps shadow accounting on. */
@@ -133,12 +137,12 @@ function parseProjection(raw: unknown): ProjectionMode {
 }
 
 /**
- * Read one `scope.json` value.
+ * Read one `scope.json` value, as produced by `JSON.parse`.
  *
  * A value whose type or version is wrong is rejected with a stable code and a
  * deep copy of `DEFAULT_SCOPE`; a version 2 object yields a complete document
  * built from its fields, with every malformed field degraded to its strict
- * value. Never throws.
+ * value.
  */
 export function parseScope(raw: unknown): {
   doc: ScopeDoc
