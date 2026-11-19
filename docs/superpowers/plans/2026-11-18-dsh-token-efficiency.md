@@ -42,7 +42,8 @@
 
 **Interfaces:**
 - Produces: `export const name = 'dsh-boost'`；`export const inject = ['tools', 'llm', 'systemPrompt'] as const`；`export function apply(ctx: PluginContext, config: unknown): void`
-- Produces: `src/types.ts` 的 `export interface PluginContext { logger: { info(msg: string): void; warn(msg: string): void }; on(event: string, handler: (...args: any[]) => unknown): void; tools: { register(def: unknown, opts?: { when?: (c: { agent?: unknown; signal?: unknown }) => boolean }): void }; llm: { stream(opts: unknown): AsyncIterable<{ text?: string }> }; systemPrompt: { section(s: { name: string; order: number; text: string; interpolate: false }): void }; get<T = unknown>(name: string): T | undefined }`
+- Produces: `export interface AgentLike { session: { header: { id: string; cwd: string } } }`（宿主 `Agent` 的最小投影）
+- Produces: `src/types.ts` 的 `export interface PluginContext { logger: { info(msg: string): void; warn(msg: string): void }; on(event: string, handler: (...args: any[]) => unknown): void; tools: { register(def: unknown, opts?: { when?: (c: { agent: AgentLike; signal: AbortSignal }) => boolean | Promise<boolean> }): void; resolve(): readonly unknown[] }; llm: { stream(opts: GenerateOptions): AsyncIterable<StreamChunk> }; systemPrompt: { section(s: { name: string; order: number; text: string | ((c: { scope?: unknown }) => string); interpolate?: boolean }): void }; get<T = unknown>(name: string): T | undefined }`
 - Produces: `src/types.ts` 的 `export type ToolFamily = 'read' | 'grep' | 'glob' | 'bash' | 'ssh'`、`export interface BoostConfig { projection: Record<ToolFamily, ProjectionParams>; admission: { thresholdTokens: number }; selector: { maxTokens: number }; stepsPerTurn: number; horizonSteps: number; historyTurns: number }`、`export interface ProjectionParams { triggerChars: number; headChars: number; tailChars: number }`
 - Produces: `src/types.ts` 的 `declare module '@deepseek-ai/dsh-llm/types' { interface LlmRequestPurposeMap { 'boost-selector': true } }`（T14 的 `purpose` 靠它通过编译）
 
@@ -301,6 +302,14 @@ test('低于触发阈值不裁', () => {
   assert.equal(truncate('x'.repeat(2999), READ), null)
 })
 
+test('阈值按 code point 比较，不按 UTF-16 长度（边界）', () => {
+  // 1600 个 emoji：code point 1600 < 3000，UTF-16 units 3200 > 3000
+  assert.equal(shouldTruncate('😀'.repeat(1600), READ), false)
+  // 若按 text.length 比较会误裁，且头 2000 + 尾 500 会把 1600 个全吃进去，
+  // 产出比原文更长的回执与负数的 omitted 计数
+  assert.equal(truncate('😀'.repeat(1600), READ), null)
+})
+
 test('空回执不裁（Review Focus #1）', () => {
   assert.equal(shouldTruncate('', READ), false)
   assert.equal(truncate('', READ), null)
@@ -343,7 +352,7 @@ Expected: FAIL，模块不存在
 
 - [ ] **Step 3: 实现**
 
-用 `Array.from(text)` 转 code point 数组后再切（`const cp = Array.from(text)`），`head = cp.slice(0, headChars).join('')`、`tail = cp.slice(-tailChars).join('')`。`omittedCodePoints = cp.length - headChars - tailChars`；`omittedBytes = Buffer.byteLength(head + tail, 'utf8')` 之差——正确写法是 `Buffer.byteLength(text,'utf8') - Buffer.byteLength(head,'utf8') - Buffer.byteLength(tail,'utf8')`。`shouldTruncate` 先比 `text.length`（UTF-16，省一次 `Array.from`），`> triggerChars` 才进入细节；**`Buffer.byteLength(text, 'utf8') > 256 * 1024` 直接返回 `false`**（§5.4，大回执不投影；按 UTF-8 字节计，不用 `text.length` 的 UTF-16 单元数——否则 CJK/emoji 的阈值会差一倍以上），并加一条 emoji 边界测试。
+用 `Array.from(text)` 转 code point 数组后再切（`const cp = Array.from(text)`），`head = cp.slice(0, headChars).join('')`、`tail = cp.slice(-tailChars).join('')`。`omittedCodePoints = cp.length - headChars - tailChars`；`omittedBytes = Buffer.byteLength(head + tail, 'utf8')` 之差——正确写法是 `Buffer.byteLength(text,'utf8') - Buffer.byteLength(head,'utf8') - Buffer.byteLength(tail,'utf8')`。`shouldTruncate` 先比 `text.length` 做**粗筛**（UTF-16 长度 ≥ code point 长度，只用来快速排除），粗筛通过后再用 `Array.from(text).length > triggerChars` 精确判定——**绝不能用 `text.length` 直接当阈值**，否则短 emoji 串会被误裁并产出负的 `omitted` 计数；**`Buffer.byteLength(text, 'utf8') > 256 * 1024` 直接返回 `false`**（§5.4，大回执不投影；按 UTF-8 字节计，不用 `text.length` 的 UTF-16 单元数——否则 CJK/emoji 的阈值会差一倍以上），并加一条 emoji 边界测试。
 
 - [ ] **Step 4: 运行确认通过**
 
@@ -620,11 +629,15 @@ test('count 与 scan 可读回，scan(undefined) 跨会话', async () => {
   assert.equal(all.length, 3)
 })
 
-test('连续 3 次写失败后停止替换（fail-closed）', async () => {
+test('连续 连续 3 次写失败后停止替换（成功一次即清零）（fail-closed）', async () => {
   const s = new ReceiptStore('/proc/definitely-not-writable')
   for (let i = 0; i < 3; i++) await s.append(rec('a'))
   assert.equal(s.failures(), 3)
   assert.equal(s.stopped(), true)
+  // 成功一次即清零，不能是"累计 3 次"
+  const ok = new ReceiptStore(await mkdtemp(join(tmpdir(), 'boost-')))
+  await ok.append(rec('a')); await ok.append(rec('a'))
+  assert.equal(ok.failures(), 0)
 })
 
 test('半行在读取时丢弃并从该偏移截断（R51）', async () => {
@@ -642,7 +655,8 @@ test('超限轮转保留当前 + .1 两份（R47）', async () => {
   const root = await mkdtemp(join(tmpdir(), 'boost-'))
   const s = new ReceiptStore(root, { maxBytes: 400, maxLines: 4 })
   for (let i = 0; i < 9; i++) await s.append(rec('a', { turn: i }))
-  assert.equal(await s.count('a'), 9)
+  // 只保留当前 + .1 两份、maxLines=4 ⇒ 最多能读回 8 行；要求 9 行会逼实现违反保留策略
+  assert.ok(await s.count('a') <= 8)
   await stat(join(root, 'receipts', 'a.1.jsonl'))
 })
 ```
@@ -654,7 +668,7 @@ Expected: FAIL，模块不存在
 
 - [ ] **Step 3: 实现**
 
-路径 `<root>/receipts/<sessionId>.jsonl`；`append` 先补齐 `version` / `receipt_hash` / `preview`（`Array.from(s).slice(0, 256).join('')`，**不存全文**）再落一行。`receiptHash` 对 `{ sessionId, turn, stepId, tool }` 的稳定 JSON 求 sha256，取前 16 位十六进制。fsync **不每行做**：每 `fsyncEveryLines`（默认 100）行或显式 `flush()`（**每 turn 结束**由 T17/T23 调用）时 `open(f).sync()`。捕获异常→`failures++`、内存缓冲、返回；不抛给调用方。`stopped()` 当 `failures >= 3`。单文件超 8 MiB 或 20,000 行时轮转：当前文件改名 `<sessionId>.1.jsonl`（已有的 `.1` 覆盖，**只保留当前 + .1 共 2 个**），再新建当前文件。`count` / `scan` 按 `.1` → 当前的顺序读；遇到**不以 `\n` 结尾的尾行**即丢弃并从该偏移截断文件；`scan(sessionId?)` 省略参数时遍历 `receipts/` 下所有分片。
+路径 `<root>/receipts/<sessionId>.jsonl`；`append` 先补齐 `version` / `receipt_hash` / `preview`（`Array.from(s).slice(0, 256).join('')`，**不存全文**）再落一行。`receiptHash` 对 `{ sessionId, turn, stepId, tool, args }`（`args` 用稳定序列化，键排序）求 sha256，取前 16 位十六进制——**漏了 args 会让同一 turn 同名工具的不同调用撞 hash**。fsync **不每行做**：每 `fsyncEveryLines`（默认 100）行或显式 `flush()`（**每 turn 结束**由 T17/T23 调用）时 `open(f).sync()`。捕获异常→`failures++`、内存缓冲、返回；不抛给调用方。`stopped()` 当 `failures >= 3`。单文件超 8 MiB 或 20,000 行时轮转：当前文件改名 `<sessionId>.1.jsonl`（已有的 `.1` 覆盖，**只保留当前 + .1 共 2 个**），再新建当前文件。`count` / `scan` 按 `.1` → 当前的顺序读；遇到**不以 `\n` 结尾的尾行**即丢弃并从该偏移截断文件；`scan(sessionId?)` 省略参数时遍历 `receipts/` 下所有分片。
 
 - [ ] **Step 4: 运行确认通过**
 
@@ -772,7 +786,7 @@ git commit -m "feat: scope document model and strict ordering"
 
 **Interfaces:**
 - Consumes: `ScopeDoc`、`parseScope`、`ERR_SCOPE_*`（T8）
-- Produces: `export class ScopeStore { constructor(dir: string); read(): Promise<{ doc: ScopeDoc; degraded?: 'scope-degraded'; code?: ScopeCode }>; write(mutate: (d: ScopeDoc) => ScopeDoc, baseRevision: number): Promise<ScopeDoc>; judgement(fallback?: boolean): boolean }`
+- Produces: `export class ScopeStore { constructor(dir: string); read(): Promise<{ doc: ScopeDoc; degraded?: 'scope-degraded'; code?: ScopeCode }>; write(mutate: (d: ScopeDoc) => ScopeDoc, baseRevision: number): Promise<ScopeDoc>; remember(key: string, visible: boolean): void; judgement(key: string, fallback?: boolean): boolean }`
 - Produces: 写入失败抛出的 `Error` 带 `code` 属性（`ERR_SCOPE_LOCKED` / `ERR_SCOPE_REVISION_CONFLICT` / `ERR_SCOPE_READ_FAILED`），消息里带同一个码
 
 - [ ] **Step 1: 写失败测试**
@@ -832,7 +846,7 @@ Expected: FAIL，模块不存在
 
 - [ ] **Step 3: 实现**
 
-`read`：`stat` 取 mtime + 读文件 → `parseScope`；缓存命中条件 = `mtime` 与 `revision` 都未变。`judgement()` 是**同步**访问器：返回最近一次 `read` 得出的可见性（未读过则返回 `fallback ?? false`）——`systemPrompt.section` 的 provider 是同步的，不能 await，这是唯一可用的形状（§5.5「同步读取 `judgement ?? resolveNow`」）。任何读取 / 解析失败都返回 `{ doc: DEFAULT_SCOPE 的深拷贝, degraded: 'scope-degraded', code }`，**不抛错、不覆盖原文件**；`code` 取 `parseScope` 给的码，读文件失败则 `ERR_SCOPE_READ_FAILED`。`write`：`open(lock,'wx')`（`await` 一次）→ 读 → 校验 `baseRevision` → `mutate` → `revision + 1` → **同步** `writeFileSync` 到临时文件 + `renameSync` → `unlink(lock)`。锁已存在时先判回收（`mtime > 60s` 且 pid 不存活），否则抛 `ERR_SCOPE_LOCKED`。
+`read`：`stat` 取 mtime + 读文件 → `parseScope`；缓存命中条件 = `mtime` 与 `revision` 都未变。`remember(key, visible)` / `judgement(key, fallback?)` 是**按 agent 键**（取 `agent.session.header.id`）的同步缓存：`resolveVisible`（异步，`when` 里用）算完就把结果 `remember` 进去；`systemPrompt.section` 的 provider 是同步的，只能读 `judgement(key)`，未命中返回 `fallback ?? false`（§5.5「同步读 `judgement ?? resolveNow`」）。**无参的全局 judgement 是错的**——它对所有 agent 返回同一个值。任何读取 / 解析失败都返回 `{ doc: DEFAULT_SCOPE 的深拷贝, degraded: 'scope-degraded', code }`，**不抛错、不覆盖原文件**；`code` 取 `parseScope` 给的码，读文件失败则 `ERR_SCOPE_READ_FAILED`。`write`：`open(lock,'wx')`（`await` 一次）→ 读 → 校验 `baseRevision` → `mutate` → `revision + 1` → **同步** `writeFileSync` 到临时文件 + `renameSync` → `unlink(lock)`。锁已存在时先判回收（`mtime > 60s` 且 pid 不存活），否则抛 `ERR_SCOPE_LOCKED`。
 
 - [ ] **Step 4: 运行确认通过**
 
@@ -864,7 +878,6 @@ git commit -m "feat: atomic scope writes with lock"
 
 **Interfaces:**
 - Consumes: `isVisible`（T8）、`ScopeStore`（T9）
-- Produces: `export interface WorkspaceRegistry { byPath(p: string): { id: string } | undefined }`
 - Produces: `export interface WorkspaceRegistry { list(): readonly { id: string; path: string }[]; resolveByPath?(path: string): Promise<{ id: string } | undefined> }`——**宿主只有同步 `list()` 与异步 `resolveByPath()`，没有 `byPath`**
 - Produces: `export function workspaceIdOf(agent: { session?: { header?: { cwd?: string } } } | undefined, registry: WorkspaceRegistry | undefined): string | undefined`（`cwd` 经 `registry.list()` 按 `path` 精确匹配换成宿主 UUID；**不是路径本身**，也不 await——`systemPrompt` 装配是同步的。异步 `resolveByPath` 只用于预热缓存）
 - Produces: `export async function resolveVisible(store: ScopeStore, agent: unknown, registry: WorkspaceRegistry | undefined): Promise<boolean>`
@@ -882,7 +895,7 @@ import { join } from 'node:path'
 import { ScopeStore } from '../src/scope/store.ts'
 
 test('cwd 经 registry 映射到 workspace UUID，不是路径本身（R10）', () => {
-  const registry = { byPath: (p: string) => (p === '/w/a' ? { id: 'ws-uuid-1' } : undefined) }
+  const registry = { list: () => [{ id: 'ws-uuid-1', path: '/w/a' }] }
   assert.equal(workspaceIdOf({ session: { header: { cwd: '/w/a' } } }, registry), 'ws-uuid-1')
   assert.equal(workspaceIdOf({ session: { header: { cwd: '/w/b' } } }, registry), undefined)
   assert.equal(workspaceIdOf(undefined, registry), undefined)
@@ -891,7 +904,7 @@ test('cwd 经 registry 映射到 workspace UUID，不是路径本身（R10）', 
 
 test('无 agent 一律不可见', async () => {
   const dir = await mkdtemp(join(tmpdir(), 'scope-'))
-  const registry = { byPath: () => ({ id: 'ws-uuid-1' }) }
+  const registry = { list: () => [{ id: 'ws-uuid-1', path: '/w/a' }] }
   assert.equal(await resolveVisible(new ScopeStore(dir), undefined, registry), false)
 })
 
@@ -899,7 +912,7 @@ test('global 模式下能解析出 UUID 即可见', async () => {
   const dir = await mkdtemp(join(tmpdir(), 'scope-'))
   const s = new ScopeStore(dir)
   await s.write(d => ({ ...d, mode: 'global' }), 0)
-  const registry = { byPath: () => ({ id: 'ws-uuid-1' }) }
+  const registry = { list: () => [{ id: 'ws-uuid-1', path: '/w/a' }] }
   assert.equal(await resolveVisible(s, { session: { header: { cwd: '/w/a' } } }, registry), true)
 })
 
@@ -916,7 +929,7 @@ Expected: FAIL，模块不存在
 
 - [ ] **Step 3: 实现**
 
-`workspaceIdOf` 读 `agent?.session?.header?.cwd`（`Session.header` 非可选，不套多余可选链），再 `registry?.byPath(cwd)?.id`；没有 registry 或查不到 → `undefined`（**不可见**）。`resolveVisible` 先取 doc 再 `isVisible(doc, workspaceIdOf(agent, registry))`，任何异常 → `false`。`supportsStepWhen` 只做 `typeof` 判断。`test/fakes/host.ts` 提供一个最小假宿主：记录 `register` 调用（含 `when`）、`resolve()` 返回已注册列表、`llm.stream` 可控返回。
+`workspaceIdOf` 读 `agent?.session?.header?.cwd`（`Session.header` 非可选，不套多余可选链），再 `registry?.list().find(w => w.path === cwd)?.id`；没有 registry 或查不到 → `undefined`（**不可见**）。`resolveVisible` 先取 doc 再 `isVisible(doc, workspaceIdOf(agent, registry))`，任何异常 → `false`。`supportsStepWhen` 只做 `typeof` 判断。`test/fakes/host.ts` 提供一个最小假宿主：记录 `register` 调用（含 `when`）、`resolve()` 返回已注册列表、`llm.stream` 可控返回。
 
 - [ ] **Step 4: 运行确认通过**
 
@@ -1198,10 +1211,10 @@ git commit -m "feat: four guard evaluators"
 - Create: `src/selector/jev.ts`, `test/jev.test.ts`
 
 **Interfaces:**
-- Consumes: 宿主 `llm`（`{ stream(opts): AsyncIterable<{ text?: string }> }`）；`LlmRequestPurposeMap` 的 `'boost-selector'` 声明合并（T1）
-- Produces: `export interface LlmLike { stream(opts: unknown): AsyncIterable<{ text?: string }> }`
+- Consumes: 宿主 `llm`（`stream(opts: GenerateOptions): AsyncIterable<StreamChunk>`）；`LlmRequestPurposeMap` 的 `'boost-selector'` 声明合并（T1）
+- Produces: `export interface LlmLike { stream(opts: GenerateOptions): AsyncIterable<StreamChunk> }`
 - Produces: `export const SELECTOR_PURPOSE = 'boost-selector'`
-- Produces: `export async function choose(input: { llm: LlmLike; route: { provider: string; model: string }; candidates: { id: string; summary: string }[]; receiptText: string; maxTokens: number; timeoutMs?: number }): Promise<{ choice: string } | { abstain: 'timeout' | 'error' | 'no-label' }>`
+- Produces: `export async function choose(input: { llm: LlmLike; provider: string; model: string; reasoningEffort?: string; candidates: { id: string; summary: string }[]; receiptText: string; maxTokens: number; timeoutMs?: number }): Promise<{ choice: string } | { abstain: 'timeout' | 'error' | 'no-label' }>`——**`provider`/`model` 是 `GenerateOptions` 的顶层字段，没有 `route` 嵌套**
 
 - [ ] **Step 1: 写失败测试**
 
@@ -1246,10 +1259,11 @@ test('调用抛错 abstain:error', async () => {
 
 test('stream 收到 purpose 与 route（R17）', async () => {
   let seen: any
-  const llm = { async *stream(opts: any) { seen = opts; yield { text: 'B' } } }
-  await choose({ llm: llm as any, route: ROUTE, candidates: cands, receiptText: 'x', maxTokens: 512 })
+  const llm = { async *stream(opts: any) { seen = opts; yield { type: 'text-delta', index: 0, text: 'B' }; yield { type: 'finish', reason: { kind: 'stop' } } } }
+  await choose({ llm: llm as any, provider: 'p', model: 'm', candidates: cands, receiptText: 'x', maxTokens: 512 })
   assert.equal(seen.purpose, SELECTOR_PURPOSE)
-  assert.deepEqual(seen.route, ROUTE)
+  assert.equal(seen.provider, 'p'); assert.equal(seen.model, 'm')
+  assert.equal(seen.maxTokens, 512)
 })
 ```
 
@@ -1260,7 +1274,7 @@ Expected: FAIL，模块不存在
 
 - [ ] **Step 3: 实现**
 
-调 `llm.stream({ purpose: SELECTOR_PURPOSE, route, maxTokens, messages: [...] })`（`route` 必填，透传边界请求自身的 provider/model），`for await` 收集文本；`Promise.race` 加 20s 默认超时。只接受**恰好等于某个候选 id 的单字符**；`?` 或其它 → `no-label`。系统提示逐字限定"只允许输出一个候选标签或 `?`"。`purpose` 已在 T1 经 `LlmRequestPurposeMap` 声明合并；网关拒绝该字段时回退到 `route` 指定的专用路由（§5.1）。
+调 `llm.stream({ provider, model, reasoningEffort, purpose: SELECTOR_PURPOSE, maxTokens, messages: [...] })`（provider/model 透传边界请求自身的值），`for await` 只累加 `{type:'text-delta'}` 的 `text`；遇到 `{type:'finish', reason:{kind:'error'|'aborted'}}` 记 `error`；`Promise.race` 加 20s 默认超时。只接受**恰好等于某个候选 id 的单字符**；`?` 或其它 → `no-label`。系统提示逐字限定"只允许输出一个候选标签或 `?`"。`purpose` 已在 T1 经 `LlmRequestPurposeMap` 声明合并；网关拒绝 `purpose` 时，用 `config.selector.model` 指定的 provider/model 重试一次（§5.1）。
 
 - [ ] **Step 4: 运行确认通过**
 
@@ -1395,6 +1409,7 @@ git commit -m "feat: substitution decision pipeline"
 **Interfaces:**
 - Consumes: 无跨任务符号；默认值来源见 `BoostConfig`（T1）
 - Produces: `export function remainingSteps(input: { stepsSoFar: number[]; horizonSteps: number; historyTurns: number }): number`
+- Produces: `export class StepBudget { constructor(max: number); take(): boolean; reset(): void; exhausted(): boolean; count(): number }`——**必须有 `reset()`**，否则插件生命周期单例会在 8 次普通请求后永久关闭替换
 - Produces: `export function worthSubstituting(input: { savedTokens: number; overheadTokens: number; thresholdTokens: number; deterministicSingle: boolean }): boolean`
 - Produces: `export class StepBudget { constructor(max: number); take(): boolean; exhausted(): boolean; count(): number }`
 
@@ -1559,7 +1574,7 @@ git commit -m "feat: wire the four hook mount points"
 - Modify: `src/hooks/post-execute.ts`（把 T17 的 `tools/execute` 直通占位换成 `rejectIfTampered`）
 
 **Interfaces:**
-- Consumes: 无跨任务符号；pending 只按结构类型 `{ name: string; args: Record<string, unknown> }` 读取（与 T23 的 `PendingDispatch` 结构兼容，但不 import，避免前向引用）
+- Consumes: 无跨任务符号；pending 只按结构类型 `{ name: string; args: Record<string, unknown> }` 读取（与 T23 的 `PendingEntry` 结构兼容，但不 import，避免前向引用）
 - Produces: `export function sameLiteral(a: unknown, b: unknown): boolean`；`export function rejectIfTampered(exec: { name: string; arguments: unknown }, pending: { name: string; args: Record<string, unknown> } | undefined): { reject: true; code: 'dispatch-rejected' } | { reject: false }`
 
 - [ ] **Step 1: 写失败测试**
@@ -1781,7 +1796,7 @@ Expected: 全部 PASS（含本任务与全部前序任务的测试）
 - [ ] **Step 7: 提交**
 
 ```bash
-git add src/prompt/protocol.ts src/hooks/clock.ts test/protocol.test.ts
+git add src/prompt/protocol.ts src/hooks/clock.ts src/hooks/post-execute.ts test/protocol.test.ts
 git commit -m "feat: plan protocol section and turn clock"
 ```
 
@@ -1888,7 +1903,7 @@ git commit -m "feat: usage pairing and savings fields"
 - Modify: `src/hooks/post-execute.ts`（调用失效检测与 `hasSpillNotice`）
 
 **Interfaces:**
-- Produces: `export interface ReceiptAnchors { stepId: string; anchors: Record<string, string> }`（`anchors` = 候选引用的回执 id → 到达时的规范化原文；这是**锚点记录**，不是派发队列——`PendingQueue` 只存 T23 的 `PendingDispatch`，两者由同一个 `post-execute` 决策分别写入）
+- Produces: `export interface ReceiptAnchors { stepId: string; anchors: Record<string, string> }`（`anchors` = 候选引用的回执 id → 到达时的规范化原文；这是**锚点记录**，不是派发队列——`PendingQueue` 只存 T23 的 `PendingEntry`，两者由同一个 `post-execute` 决策分别写入）
 - Produces: `export const PRUNE_MARKER = '\n\n[... tool result middle pruned ...]\n\n'`（宿主 `dsh-compaction-tool-result-pruner` 的真实串；用 `includes` 判定，不做前缀匹配）
 - Produces: `export function looksPruned(text: string): boolean`
 - Produces: `export function alreadySpilled(text: string, hasNotice: (t: string) => boolean): boolean`
@@ -1965,7 +1980,7 @@ git push origin main   # remote 由 T1 布置（内网镜像）；GitHub 作为�
 
 ---
 
-### Task 23: 触发装配（`PendingDispatch` 与合成回合）
+### Task 23: 触发装配（`PendingEntry` 与合成回合）
 
 **Files:**
 - Create: `src/hooks/pending.ts`, `src/hooks/synthesize.ts`
@@ -1975,9 +1990,9 @@ git push origin main   # remote 由 T1 布置（内网镜像）；GitHub 作为�
 - Consumes: `decide`（T15）、`choose`（T14）、`worthSubstituting`/`remainingSteps`/`StepBudget`（T16）、`UsageLedger`（T21）、`TurnClock`（T20）、`rejectIfTampered`（T18）、`isVisible`/`ScopeStore`（T8/T9）、`ReceiptAnchors`（T22）
 - Produces: `export interface PendingEntry { callId: string; candidateId: string; name: string; args: Record<string, unknown>; createdAt: number }`
 - Produces: `export class PendingQueue { set(sessionId: string, e: PendingEntry): void; take(sessionId: string): PendingEntry | undefined; peek(sessionId: string): PendingEntry | undefined; clear(sessionId: string): void }`——**按 sessionId 隔离**，`llm/stream` 只有 sessionId，跨会话串号会把 A 的待办合成给 B
-- Produces: `export function callIdFor(sessionId: string, candidateId: string): string`——`sha256(sessionId + '/' + candidateId).slice(0, 16)`，确定性、可重放
-- Produces: `export async function* synthesizeTurn(e: PendingEntry): AsyncIterable<StreamChunk>`——**必须逐个 yield 宿主 chunk，不是返回一个对象**
-- Produces: `export interface HookDeps { config: BoostConfig; scope: ScopeStore; receipts: ReceiptStore; queue: PendingQueue; budget: StepBudget; usage: UsageLedger; clock: TurnClock; resolveSession: (sessionId: string) => string | undefined }`
+- Produces: `export function callIdFor(sessionId: string, turn: string | number, candidateId: string): string`——`sha256(sessionId + '/' + turn + '/' + candidateId).slice(0, 16)`，确定性、可重放；**必须带 turn**，否则同一会话重复候选会撞 id，宿主按 callId 关联 tool 结果
+- Produces: `export async function* synthesizeTurn(e: PendingEntry, usage?: TokenUsage): AsyncIterable<StreamChunk>`——**必须逐个 yield 宿主 chunk，不是返回一个对象**
+- Produces: `export interface HookDeps { config: BoostConfig; scope: ScopeStore; receipts: ReceiptStore; queue: PendingQueue; budget: StepBudget; usage: UsageLedger; clock: TurnClock; plans: Map<string, Plan>; spill: SpillLike | undefined; formatFooter: typeof formatSpillNotice; estimateText: (t: string) => number; projection: (text: string, family: ToolFamily) => ProjectionResult; resolveSession: (sessionId: string) => string | undefined }`
 - Produces: `export function registerHooks(ctx: PluginContext, deps: HookDeps): void`
 
 **合成的 chunk 序列（照参照实现 `ref-harnessmm/dsh-plugin/harnessmm-desktop/lib/index.js:669-721`，不是自创）**
@@ -2058,7 +2073,7 @@ test('selector 内部调用直接放行', async () => {
 test('shadow 为真时不合成，写 shadow 收据后放行', async () => {
   const { host, queue } = setup({ scope: { read: async () => ({ doc: { ...DEFAULT_SCOPE, mode: 'global', shadow: true } }), judgement: () => true } })
   queue.set('s1', { callId: 'x', candidateId: 'A', name: 'read', args: {}, createdAt: 0 })
-  assert.equal(await host.callHook('llm/stream', [{ sessionId: 's1' }], async () => 'PASS'), 'PASS')
+  assert.equal(host.nextCalls, 0)
   assert.ok(host.receipts.some((r: any) => r.kind === 'shadow'))
 })
 
@@ -2076,7 +2091,7 @@ test('有 pending 时合成且不调 next', async () => {
 
 test('scope 不可见时放行并写 skip:no-scope', async () => {
   const { host } = setup({ scope: { read: async () => ({ doc: DEFAULT_SCOPE }), judgement: () => false } })
-  assert.equal(await host.callHook('llm/stream', [{ sessionId: 's1' }], async () => 'PASS'), 'PASS')
+  assert.equal(host.nextCalls, 0)
   assert.ok(host.receipts.some((r: any) => r.code === 'skip:no-scope'))
 })
 
@@ -2085,17 +2100,20 @@ test('第 9 次替换被预算拦截并写 steps-exhausted', async () => {
   for (let i = 0; i < 8; i++) budget.take()
   const { host, queue } = setup({ budget })
   queue.set('s1', { callId: 'x', candidateId: 'I', name: 'read', args: {}, createdAt: 0 })
-  assert.equal(await host.callHook('llm/stream', [{ sessionId: 's1' }], async () => 'PASS'), 'PASS')
+  const out: any[] = []
+  for await (const c of host.stream('s1')) out.push(c)
+  assert.equal(host.nextCalls, 0)
+  assert.equal(out.length, 0)
   assert.ok(host.receipts.some((r: any) => r.code === 'steps-exhausted'))
 })
 
 test('用量从流里的 usage chunk 取值，结束后结算', async () => {
   const { host, deps } = setup()
   await host.callHook('llm/stream', [{ sessionId: 's1' }], async function* () {
-    yield { type: 'usage', usage: { input: 100, cacheRead: 900, output: 10 } }
+    yield { type: 'usage', usage: { inputTokens: 100, cacheReadTokens: 900, outputTokens: 10 } }
     yield { type: 'finish', reason: { kind: 'stop' } }
   })
-  assert.equal(deps.usage.last()?.cacheRead, 900)
+  assert.equal(deps.usage.last()?.cacheRead, 900)  // 映射自 cacheReadTokens
 })
 
 test('when 逐步判定：scope 改变后下一步可见性翻转', async () => {
@@ -2121,11 +2139,23 @@ Expected: FAIL，`Cannot find module '../src/hooks/pending.ts'`
 
 - [ ] **Step 3: 实现接线**
 
-`post-execute`：`canonicalise → invalidate（T22）→ decide → 若 commit：`worthSubstituting`（准入）+ `queue.set(sessionId, { callId: callIdFor(...), ... })`；若 fallback：`queue.clear(sessionId)` + 写收据。
-`llm/stream` 五条规则按序：① `purpose === SELECTOR_PURPOSE` → `next()`；② `resolveSession` 拿不到或 scope 不可见 → `next()` + `skip:no-scope`；③ `scope.shadow` → 写 `{kind:'shadow'}` 后 `next()`；④ `budget.take() === false` → 写 `{code:'steps-exhausted'}` 后 `next()`；⑤ 有 pending → 写 `{kind:'substitute'}`、`queue.take(sessionId)`、**return `synthesizeTurn(entry)`**（异步生成器，直接作为流的返回值）。
+`post-execute`：`next() → canonicalise → invalidate（T22）→ 投影（shadow 或 apply，见下）→ decide → 若 commit：`worthSubstituting`（准入，`overheadTokens = candidates.length > 1 ? 512 : 0`）+ `queue.set(sessionId, { callId: callIdFor(sessionId, turn, candidateId), ... })`；若 fallback：`queue.clear(sessionId)` + 写收据。
+- **计划文本来源**：`llm/stream` 包装里把 `text-delta` 拼成完整 assistant 文本，用 `parsePlan`（T11）解析后按 `sessionId` 存进 `deps.plans`（`HookDeps` 增加 `plans: Map<string, Plan>`）；`post-execute` 按当前步骤序号取 `plan.steps[i]` 传给 `decide`。**没有这一步 `decide` 永远拿不到 plan，替换一次都不会发生。**
+- **投影**：`HookDeps` 增加 `spill` / `formatFooter` / `estimateText` / `projection`；`post-execute` 在 decide 之前调 `projectApply`（apply 模式）或 `projectShadow`（shadow 模式），写 `{kind:'projection', before, after, saved, unit:'raw'}` 收据，并返回 `{kind:'accept', content}`。缺 spill 时只记 `ERR_HOST_NO_SPILL` 不投影。
+`llm/stream` 的钩子**必须同步返回 `AsyncIterable`**（cordis waterfall 是同步的，返回 Promise 会让宿主 `for await` 直接 TypeError、每个请求都失败）。唯一可行形状：
+
+```ts
+ctx.on('llm/stream', (options, next) => (async function* () {
+  // 这里可以 await：scope.read / resolveSession / choose
+  for await (const chunk of next()) yield chunk
+})())
+```
+
+规则按序：① `purpose === SELECTOR_PURPOSE` → 直接 `yield* next()`；② `resolveSession` 拿不到或 scope 不可见 → `yield* next()` + 收据 `skip:no-scope`；③ `scope.shadow` → 写带决策字段的 `{kind:'shadow', decision, candidateId, guards, admitted}` 后 `yield* next()`（**影子期不 queue.set**，否则模型自己的工具调用会撞上 stale pending）；④ 有 pending → 写 `{kind:'substitute'}`、`queue.take(sessionId)`、`yield* synthesizeTurn(entry, usage)`；⑤ **只有在确认要合成之后**才 `budget.take()`，为假则回退并写 `steps-exhausted`；⑥ `receipts.stopped()` 为真 → 直接 `yield* next()`（连续写失败后 fail-closed）。
 多候选时先 `await choose({ llm, candidates, receiptText, maxTokens, route })`；abstain 即回退。
-`usage`：遍历 `next()` 返回的流时，遇到 `{type:'usage'}` 就 `usage.request(chunk.usage)`；替换提交时 `usage.markSubstituted(candidateId)`；下一次请求结束后 `usage.settle()` 写进替换收据。
-`rejectIfTampered` 在 `tools/execute` 里用 `queue.peek(callId)` 比对。`TurnClock.onModelRequest()` 在 `llm/stream` 每次进入时调用（切回合）；`clock.turn()` 进收据。
+`usage`：遍历 `next()` 返回的流时，遇到 `{type:'usage'}` 按 **`TokenUsage`** 字段映射后再记账——`usage.request({ input: u.inputTokens, cacheRead: u.cacheReadTokens ?? 0, output: u.outputTokens })`（`TokenUsage` 里没有 `input`/`cacheRead`/`output` 这三个名字，直传会得到三个 `undefined`）；替换提交时 `usage.markSubstituted(candidateId)`；下一次请求结束后 `usage.settle()`，用 `receipt_hash` 关联追加一条 `{kind:'substitute-settled', saved_input_tokens, cache_hit_delta}`（收据 append-only，不能原地改）。
+`rejectIfTampered` 在 `tools/execute` 里取 `const s = exec.agent?.session.header.id`，`const e = deps.queue.peek(s)`，比对 `e?.callId !== exec.callId`（**`peek` 的键是 sessionId，不是 callId**；写成 `peek(callId)` 会恒 `undefined`，防篡改静默失效）。拒绝时返回 `ToolExecutionResult` 的失败分支 `{ isError: true, error: { message: 'ERR_BOOST_DISPATCH_REJECTED', info: { code: 'dispatch-rejected' } }, content: [...] }`，并 `queue.clear(s)`。
+`TurnClock` 由 `agent/request` 的 `{turn, step}` 驱动（**一次 `llm/stream` 不等于一个 turn**）；`StepBudget` 在 turn 变化时 `reset()`（T16 补该方法）。`clock.turn()` 进收据。
 `fakeHost` 增加 `visible(name, agent)`：按注册的 `when` 逐次求值；`callHook` 返回的东西若为 AsyncIterable 就原样返回。
 
 - [ ] **Step 4: 运行确认通过**
