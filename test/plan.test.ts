@@ -70,6 +70,15 @@ test('没有闭合标签返回 no-plan', () => {
   assert.deepEqual(parsePlan('</CHISEL_PLAN>'), { error: 'no-plan' })
 })
 
+test('大量未闭合的起始标签返回 no-plan，不逐个回溯', () => {
+  assert.deepEqual(parsePlan('<CHISEL_PLAN>'.repeat(50_000)), { error: 'no-plan' })
+})
+
+test('闭合标签出现在 JSON 字符串里时按截断处理，返回 bad-json', () => {
+  const json = JSON.stringify({ goal: 'g', steps: [candidate({ args: { path: '</CHISEL_PLAN>' } })] })
+  assert.deepEqual(parsePlan(wrap(json)), { error: 'bad-json' })
+})
+
 /* ------------------------------------------------------------------------- *
  * 规则 3：结构错误一律 bad-shape
  * ------------------------------------------------------------------------- */
@@ -114,6 +123,29 @@ test('重复 id 返回 bad-shape', () => {
   assert.deepEqual(parsePlan(body(steps)), { error: 'bad-shape' })
 })
 
+test('id 必须是单个大写字母 A–Z', () => {
+  const bad = ['', 'a', 'AA', 'A1', '1', 'Z ', ' A', 'A\n', '😀', 'A'.repeat(30)]
+  for (const id of bad) {
+    assert.deepEqual(parsePlan(body([candidate({ id })])), { error: 'bad-shape' }, JSON.stringify(id))
+  }
+  for (const id of ['A', 'M', 'Z']) {
+    assert.equal(planOf([candidate({ id })]).steps[0].id, id)
+  }
+})
+
+test('26 个字母候选可以共存，多于 26 个必然重复或非法', () => {
+  const letters = [...'ABCDEFGHIJKLMNOPQRSTUVWXYZ']
+  assert.equal(planOf(letters.map((id) => candidate({ id }))).steps.length, 26)
+  assert.deepEqual(parsePlan(body([...letters, 'A'].map((id) => candidate({ id })))), { error: 'bad-shape' })
+})
+
+test('tool 必须非空（trim 后），值本身不重写', () => {
+  for (const tool of ['', '   ', '\t\n']) {
+    assert.deepEqual(parsePlan(body([candidate({ tool })])), { error: 'bad-shape' }, JSON.stringify(tool))
+  }
+  assert.equal(planOf([candidate({ tool: ' read ' })]).steps[0].tool, ' read ')
+})
+
 /* ------------------------------------------------------------------------- *
  * 规则 5：args 里只允许字面量，唯一例外是 $public 模板
  * ------------------------------------------------------------------------- */
@@ -139,9 +171,44 @@ test('$public 子树原样保留，$scalar 是值不是键', () => {
   assert.deepEqual(planOf([candidate({ args })]).steps[0].args, args)
 })
 
+test('根级 $public 在此放行，由绑定阶段拒绝', () => {
+  const args = { $public: { after: 'A', field: 'name' } }
+  assert.deepEqual(planOf([candidate({ args })]).steps[0].args, args)
+})
+
 test('$public 子树里也不能出现别的 $ 前缀键', () => {
   const args = { path: { $public: { after: 'A', field: 'name', $eval: 'x' } } }
   assert.deepEqual(parsePlan(body([candidate({ args })])), { error: 'bad-shape' })
+})
+
+test('原型相关键名在任何深度都返回 bad-shape', () => {
+  const bad: unknown[] = [
+    JSON.parse('{"__proto__":{"polluted":1}}'),
+    JSON.parse('{"a":[{"__proto__":1}]}'),
+    { constructor: { prototype: { x: 1 } } },
+    { a: { prototype: 1 } },
+    { list: [{ constructor: 1 }] },
+  ]
+  for (const args of bad) {
+    assert.deepEqual(parsePlan(body([candidate({ args })])), { error: 'bad-shape' }, JSON.stringify(args))
+  }
+  // 作为值出现是合法的：只有键名受限
+  assert.equal(planOf([candidate({ args: { pattern: 'constructor' } })]).steps[0].args.pattern, 'constructor')
+})
+
+test('args 深度上限 64，超过返回 bad-shape', () => {
+  const nested = (levels: number): Record<string, unknown> => {
+    let node: Record<string, unknown> = { leaf: true }
+    for (let i = 1; i < levels; i += 1) node = { nested: node }
+    return node
+  }
+  const atCap = parsePlan(body([candidate({ args: nested(64) })]))
+  assert.ok('plan' in atCap)
+  assert.deepEqual(parsePlan(body([candidate({ args: nested(65) })])), { error: 'bad-shape' })
+
+  let deepArray: unknown = true
+  for (let i = 0; i < 2_000; i += 1) deepArray = [deepArray]
+  assert.deepEqual(parsePlan(body([candidate({ args: { list: deepArray } })])), { error: 'bad-shape' })
 })
 
 /* ------------------------------------------------------------------------- *
@@ -197,6 +264,12 @@ test('json_equals 载荷不合法返回 bad-shape', () => {
       { error: 'bad-shape' },
       JSON.stringify(json_equals),
     )
+  }
+})
+
+test('空字符串 guard 操作数返回 bad-shape（恒真守卫不能绕过 guard-trivial）', () => {
+  for (const guard of [{ text_contains: '' }, { text_not_contains: '' }]) {
+    assert.deepEqual(parsePlan(body([candidate({ guards: [guard] })])), { error: 'bad-shape' }, JSON.stringify(guard))
   }
 })
 
@@ -262,6 +335,18 @@ test('未知顶层键与候选键被忽略，结果只含约定字段', () => {
   assert.deepEqual(Object.keys(plan.steps[0]), ['id', 'tool', 'args', 'guards'])
 })
 
-test('空字符串 id 是字符串，按规则接受', () => {
-  assert.equal(planOf([candidate({ id: '' })]).steps[0].id, '')
+test('垃圾输入不抛错，只返回错误码', () => {
+  const inputs = [
+    '',
+    'nothing',
+    '<CHISEL_PLAN>',
+    '<CHISEL_PLAN></CHISEL_PLAN>',
+    `<CHISEL_PLAN>${'x'.repeat(10_000)}</CHISEL_PLAN>`,
+    '<CHISEL_PLAN>{"goal":</CHISEL_PLAN>',
+    '\uD800',
+    '<CHISEL_PLAN>\u0000</CHISEL_PLAN>',
+  ]
+  for (const input of inputs) {
+    assert.doesNotThrow(() => parsePlan(input), JSON.stringify(input))
+  }
 })
