@@ -43,10 +43,12 @@
  * trivial guard means there was nothing to verify, so it is not potential.
  *
  * The returned `ask-selector.candidates` is a new array of fresh candidate
- * objects (`{ ...candidate, args: boundArgs }`), so the plan's own objects stay
- * untouched and the args in the decision are ready to execute; `commit.args` is
- * the same freshly bound tree. A `$public` template never survives into a
- * decision.
+ * objects: each carries the bound args and a copied `guards` array whose guard
+ * objects are copied too, so neither the plan's candidate objects, their args,
+ * nor their guards can be changed through the decision. (`args` is the only
+ * thing that reaches the tool call; the guard copy makes the isolation claim
+ * true at every depth the caller can reach.) `commit.args` is the same freshly
+ * bound tree. A `$public` template never survives into a decision.
  *
  * @module dsh-boost/gate/decide
  */
@@ -144,7 +146,9 @@ function bindAndVerify(
  *
  * Both outcomes carry the bound args, so the caller never has to bind again:
  * `commit` returns them directly, `ask-selector` returns a fresh candidate per
- * survivor (`{ ...candidate, args }`) and leaves the plan's objects untouched.
+ * survivor and leaves the plan's objects untouched. The guard copy is one
+ * level deep per guard because every `Guard` form is flat — its only nested
+ * value, `json_equals.value`, is a scalar.
  */
 function resolve(survivors: Viable[]): Decision {
   const [only] = survivors
@@ -152,7 +156,11 @@ function resolve(survivors: Viable[]): Decision {
   if (survivors.length > 1) {
     return {
       kind: 'ask-selector',
-      candidates: survivors.map((entry) => ({ ...entry.candidate, args: entry.args })),
+      candidates: survivors.map((entry) => ({
+        ...entry.candidate,
+        args: entry.args,
+        guards: entry.candidate.guards.map((guard) => ({ ...guard })),
+      })),
     }
   }
   return { kind: 'commit', candidateId: only.candidate.id, args: only.args }

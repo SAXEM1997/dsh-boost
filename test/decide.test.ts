@@ -162,9 +162,29 @@ test('ask-selector 携带已绑定参数，plan 原件保持模板不变', () =>
     assert.deepEqual(d.candidates.map((c) => c.args), [{ path: '/from-root' }, { path: '/other' }])
     assert.notEqual(d.candidates[0], a)
     assert.notEqual(d.candidates[1], b)
+    // guards 及其中的 guard 对象也不能与 plan 共享：调用方改 guard 不能改到计划。
+    assert.notEqual(d.candidates[0].guards, a.guards)
+    assert.notEqual(d.candidates[0].guards[0], a.guards[0])
+    d.candidates[0].guards[0] = { ok: true }
+    assert.deepEqual(a.guards, [{ text_contains: 'path:' }])
   }
   assert.deepEqual(a.args, { path: template('path') })
   assert.deepEqual(b.args, { path: template('name') })
+})
+
+test('错误回执只让 ok 守卫失败：text_contains 仍按原文判定', () => {
+  const errored = { text: 'x', isError: true, empty: false, textBlocks: 1 }
+  const textOnly = decide({
+    plan: plan([{ id: 'A', tool: 'read', args: { path: '/a' }, guards: [{ text_contains: 'x' }] }]),
+    stepId: 'root', whitelist: WL, receipts: new Map([['root', errored]]),
+  })
+  assert.deepEqual(textOnly, { kind: 'commit', candidateId: 'A', args: { path: '/a' } })
+
+  const layered = decide({
+    plan: plan([{ id: 'A', tool: 'read', args: { path: '/a' }, guards: [{ ok: true }, { text_contains: 'x' }] }]),
+    stepId: 'root', whitelist: WL, receipts: new Map([['root', errored]]),
+  })
+  assert.deepEqual(layered, { kind: 'fallback', code: 'no-candidate' })
 })
 
 test('守卫只读 stepId 对应回执，不读其它节点', () => {
