@@ -1,6 +1,10 @@
-import test from 'node:test'
+import test, { beforeEach } from 'node:test'
 import assert from 'node:assert/strict'
-import { choose, SELECTOR_PURPOSE } from '../src/selector/jev.ts'
+import { choose, SELECTOR_PURPOSE, resetPurposeSupport } from '../src/selector/jev.ts'
+
+beforeEach(() => {
+  resetPurposeSupport()
+})
 
 const ROUTE = { provider: 'deepseek', model: 'deepseek-chat' }
 
@@ -135,6 +139,65 @@ test('purpose 被拒时去掉 purpose 用同一请求重试一次', async () => 
   assert.deepEqual(seen[1].messages, seen[0].messages)
 })
 
+test('pre-text finish:error 先重试一次无 purpose，再失败则 error', async () => {
+  const seen: any[] = []
+  const llm = {
+    async *stream(opts: any) {
+      seen.push(opts)
+      yield { type: 'finish', reason: { kind: 'error' } }
+    },
+  }
+  const r = await choose({ llm: llm as any, ...ROUTE, candidates: cands, receiptText: 'x', maxTokens: 512 })
+  assert.deepEqual(r, { abstain: 'error' })
+  assert.equal(seen.length, 2)
+  assert.equal(seen[0].purpose, SELECTOR_PURPOSE)
+  assert.equal('purpose' in seen[1], false)
+})
+
+test('探针命中后，后续选择不再发送 purpose', async () => {
+  const seen: any[] = []
+  let calls = 0
+  const llm = {
+    async *stream(opts: any) {
+      calls++
+      seen.push(opts)
+      if (calls === 1) {
+        yield { type: 'finish', reason: { kind: 'error' } }
+        return
+      }
+      yield { type: 'text-delta', index: 0, text: 'A' }
+      yield { type: 'finish', reason: { kind: 'stop' } }
+    },
+  }
+  const first = await choose({ llm: llm as any, ...ROUTE, candidates: cands, receiptText: 'x', maxTokens: 512 })
+  assert.deepEqual(first, { choice: 'A' })
+  assert.equal(seen.length, 2)
+  assert.equal(seen[0].purpose, SELECTOR_PURPOSE)
+  assert.equal('purpose' in seen[1], false)
+
+  const second = await choose({ llm: llm as any, ...ROUTE, candidates: cands, receiptText: 'x', maxTokens: 512 })
+  assert.deepEqual(second, { choice: 'A' })
+  assert.equal(seen.length, 3)
+  assert.equal('purpose' in seen[2], false)
+})
+
+test('finish:error 后迭代器 close 抛错：保持 error 且不重试', async () => {
+  let calls = 0
+  const llm = {
+    async *stream() {
+      calls++
+      try {
+        yield { type: 'finish', reason: { kind: 'error' } }
+      } finally {
+        throw new Error('close boom')
+      }
+    },
+  }
+  const r = await choose({ llm: llm as any, ...ROUTE, candidates: cands, receiptText: 'x', maxTokens: 512 })
+  assert.deepEqual(r, { abstain: 'error' })
+  assert.equal(calls, 1)
+})
+
 test('已收到文本后抛错不重试，直接 error', async () => {
   let calls = 0
   const llm = {
@@ -230,4 +293,58 @@ test('timeoutMs 为 0 时立即超时，不发起模型调用', async () => {
   const r = await choose({ llm: llm as any, ...ROUTE, candidates: cands, receiptText: 'x', maxTokens: 512, timeoutMs: 0 })
   assert.deepEqual(r, { abstain: 'timeout' })
   assert.equal(calls, 0)
+})
+
+test('timeoutMs 为负数时立即超时，不发起模型调用', async () => {
+  let calls = 0
+  const llm = {
+    async *stream() {
+      calls++
+      yield { text: 'A' }
+    },
+  }
+  const r = await choose({ llm: llm as any, ...ROUTE, candidates: cands, receiptText: 'x', maxTokens: 512, timeoutMs: -1 })
+  assert.deepEqual(r, { abstain: 'timeout' })
+  assert.equal(calls, 0)
+})
+
+test('超长 timeoutMs 被钳到 Node 计时器上限', async () => {
+  const realSetTimeout = globalThis.setTimeout
+  const delays: number[] = []
+  globalThis.setTimeout = ((fn: (...args: any[]) => void, ms?: number, ...args: any[]) => {
+    delays.push(ms as number)
+    return realSetTimeout(fn, 0, ...args)
+  }) as typeof setTimeout
+  try {
+    const r = await choose({ llm: llmOf(['A']) as any, ...ROUTE, candidates: cands, receiptText: 'x', maxTokens: 512, timeoutMs: 3_000_000_000 })
+    assert.deepEqual(r, { choice: 'A' })
+    assert.ok(delays.includes(2_147_483_647), `setTimeout saw ${JSON.stringify(delays)}`)
+    assert.equal(delays.filter((ms) => ms > 2_147_483_647).length, 0)
+  } finally {
+    globalThis.setTimeout = realSetTimeout
+  }
+})
+
+test('完成与被放弃的尝试都不留下 unhandled rejection', async () => {
+  const unhandled: unknown[] = []
+  const onUnhandled = (reason: unknown) => { unhandled.push(reason) }
+  process.on('unhandledRejection', onUnhandled)
+  try {
+    const done = await choose({ llm: llmOf(['A']) as any, ...ROUTE, candidates: cands, receiptText: 'x', maxTokens: 512 })
+    assert.deepEqual(done, { choice: 'A' })
+
+    const late = {
+      async *stream() {
+        await new Promise((resolve) => setTimeout(resolve, 20))
+        throw new Error('late-boom')
+      },
+    }
+    const timed = await choose({ llm: late as any, ...ROUTE, candidates: cands, receiptText: 'x', maxTokens: 512, timeoutMs: 5 })
+    assert.deepEqual(timed, { abstain: 'timeout' })
+
+    await new Promise((resolve) => setTimeout(resolve, 40))
+    assert.deepEqual(unhandled, [])
+  } finally {
+    process.off('unhandledRejection', onUnhandled)
+  }
 })
