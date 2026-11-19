@@ -1,0 +1,15 @@
+name=2026-11-18-dsh-token-efficiency
+gate=2
+round=4
+tier=full
+timestamp=2026-11-19T16:20:00+08:00
+p0_merged=5
+p1_merged=7
+p2_merged=2
+p3_merged=0
+p0_raw=5
+p1_raw=7
+p2_raw=2
+p3_raw=0
+degradation=round4 landing+align agents failed; main agent self-verified appendix and stale shapes
+note=user terminated review after assembly tasks downgraded to signature-only
