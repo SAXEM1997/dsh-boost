@@ -31,7 +31,7 @@
  * @module dsh-boost/hooks/post-execute
  */
 import type { GenerateOptions, StreamChunk } from '@deepseek-ai/dsh-llm'
-import { PROTOCOL_TEXT } from '../prompt/protocol.js'
+import { PROTOCOL_NAME, PROTOCOL_ORDER, PROTOCOL_TEXT } from '../prompt/protocol.js'
 import { canonicalise } from '../projection/canonicalise.js'
 import type { CanonicalReceipt } from '../projection/canonicalise.js'
 import type { ReceiptStore } from '../receipts/store.js'
@@ -39,12 +39,6 @@ import type { ScopeStore } from '../scope/store.js'
 import { SELECTOR_PURPOSE } from '../selector/jev.js'
 import type { AgentLike, BoostConfig, PluginContext } from '../types.js'
 import { rejectIfTampered } from './execute.js'
-
-/** Section name the protocol text is registered under (design §5.3). */
-const PROTOCOL_SECTION_NAME = 'dsh-boost'
-
-/** Section order: the protocol sits with the other tool-contract sections. */
-const PROTOCOL_SECTION_ORDER = 100
 
 /** The execution facts a `tools/post-execute` listener reads here. */
 type PostExecuteExec = {
@@ -279,8 +273,8 @@ function registerExecute(ctx: PluginContext, deps: PostExecuteDeps): void {
 /** Mount the protocol section, whose provider stays synchronous and per-agent. */
 function registerProtocolSection(ctx: PluginContext, scope: ScopeStore | undefined): void {
   ctx.systemPrompt.section({
-    name: PROTOCOL_SECTION_NAME,
-    order: PROTOCOL_SECTION_ORDER,
+    name: PROTOCOL_NAME,
+    order: PROTOCOL_ORDER,
     interpolate: false,
     text: (context) => protocolText(scope, context),
   })
