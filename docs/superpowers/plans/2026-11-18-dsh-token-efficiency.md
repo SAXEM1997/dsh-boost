@@ -2091,7 +2091,20 @@ git commit -m "feat: wire post-execute decisions, admission, projection and tamp
 - [ ] **Step 1: 写失败测试** → **Step 2** 失败
 - [ ] **Step 3: 实现**
 
-规则顺序（**检查必须在写收据与 `queue.take` 之前**）：`purpose` → `receipts.stopped()` → 可见性（`resolveSession` **必填**，返回 `undefined` 即放行并清该 session 队列）→ 无 pending → `budget.take()` → 合成。
+规则顺序（**检查必须在写收据与 `queue.take` 之前**）：`purpose` → `receipts.stopped()` → 可见性（`resolveSession` **必填**，返回 `undefined` 即放行并清该 session 队列）→ 无 pending → 回合有效（`entry.turn === clock.turn()`，否则清队列放行）→ 锚点仍完好 → **不取预算**（T23b 在 `post-execute` 已经 `budget.take()` 过；此处再取会让每次替换扣 2 格）→ 合成。
+
+**T23c 必须满足的十一条**（每条都来自前序任务的复审发现，缺一条产品就是坏的或测不到的）：
+1. **clock 与 budget 必须按 session 分**。`HookDeps` 目前是单实例；已证跨会话污染：s2 的事件会让 s1 的 `callId` 用上 s2 的 turn/step，s2 的换回合会中途清掉 s1 的收据表（丢 `$public` 绑定），共享 `StepBudget(1)` 会让一个会话饿死另一个。
+2. **不要在这里再 `budget.take()`**（见上）。
+3. **`peek` 不 `take`**，entry 必须活到 `tools/execute`。
+4. **回合有效性**：换回合时的清队列发生在"新回合第一次 `post-execute`"，而它晚于新回合第一次 `llm/stream`；不在这里比 `entry.turn` 就会合成一个上一回合的替换，而它的 `callId` 随后还能匹配上、被接受。
+5. **`usage.markSubstituted` 没有 unmark**。reset 或换回合丢掉 entry 却留着标记，下一次透传请求就会为一次从未发生的替换结算"节省"。这里要 settle-and-discard。
+6. **剪枝/压缩检测在这里**：对 `options.messages` 检查承载锚点的消息是否含 `PRUNE_MARKER`、或锚点原文是否已不在；命中即放弃 pending。`ReceiptAnchors` 没有 turn 字段，所以只能用 `entry.turn` 判新旧。
+7. **`purpose === SELECTOR_PURPOSE` 的请求不得进 `usage.request()`**，否则选择器自己那次调用会成为配对样本，`saved_input_tokens` 直接算错。
+8. **`ask-selector` 由本任务兑现**：调 `choose`，commit 必须用 `decision.candidates[].args`（已绑定）。
+9. **`resolveSession` 必须是真实现**（当前 stub 恒 `undefined`，整条路径不工作），且必须在该 session 第一次有意义的 `post-execute` 之前预热可见性判定。`llm/stream` 是**同步** waterfall 返回 `AsyncIterable`，所以预热在那里启动、在生成器第一次 `yield` 之前 await。
+10. **会话结束要清理**：`ReceiptSessionState.clear`（已暴露为 `HookDeps.sessionState`）与 `AnchorStore.clear` 都需要调用者；`sessionState.clear` 目前只清收据与派发表，不清队列和锚点。
+11. **收据**：合成时写 `{kind:'substitute'}`；下一次真实请求结束时若有过 `markSubstituted`，`settle()` 并写 `{kind:'substitute-settled'}`（`saved_input_tokens` / `output_tokens` 原样落盘，`'unknown'` 不计数）。
 合成分支：`markSubstituted(candidateId)` → 写 `{kind:'substitute'}` → **`peek`（不是 `take`）** → `yield* synthesizeTurn(e)`，**不再调 `next()`**。entry 必须存活到 `tools/execute`：合成的回合在流结束后才派发工具调用，若此处 `take` 掉，T23b 的 `peek` 永远为空，防篡改在生产路径上**一次都不会触发**（而 T23b 的单元测试手工塞队列仍然全绿）。消费方是 T23b 的 execute 钩子。
 透传分支：`yield* next()`，遇 `{type:'usage'}` 映射后 `request()`；若上一轮有 `markSubstituted`，此时 `settle()` 并追加 `substitute-settled`。
 `plans`：拼 `text-delta` 成文本，流结束后 `parsePlan` 存进 map。
