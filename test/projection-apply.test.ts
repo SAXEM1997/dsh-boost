@@ -45,6 +45,17 @@ test('saveText 抛错时回退原文（R18）', async () => {
   assert.equal(r.outcome.reason, 'spill-failed')
 })
 
+test('formatFooter 抛错时不冒泡：回退原文，记 footer-failed', async () => {
+  const text = 'a'.repeat(18432)
+  let spills = 0
+  const capture = { saveText: async () => { spills++; return { locator: '/spill/read-1.txt', retrievalHint: 'h' } } }
+  const badFooter = () => { throw new Error('notice renderer exploded') }
+  const r = await projectApply({ text, isError: false, family: 'read', cfg: DEFAULT_CONFIG, sessionId: 's1', toolName: 'read', spill: capture, formatFooter: badFooter })
+  assert.equal(r.content, text)
+  assert.deepEqual(r.outcome, { kind: 'skipped', reason: 'footer-failed' })
+  assert.equal(spills, 1)
+})
+
 test('缺 formatFooter 不落盘（R16）', async () => {
   const text = 'a'.repeat(18432)
   let saved = 0

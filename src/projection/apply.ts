@@ -10,9 +10,10 @@
  * `projectApply` is the half that replaces, and it only replaces what is still
  * recoverable: the canonical receipt is persisted through the injected spill
  * backend first, then head line, head, spill footer and tail are composed. All
- * guards run before the write, a failed write is a skip rather than an
- * exception, and a footer that would grow the receipt sends the original back
- * unchanged — a projection that grows a receipt defeats the plugin's premise.
+ * guards run before the write, a failed write or footer is a skip rather than
+ * an exception, and a footer that would grow the receipt sends the original
+ * back unchanged — a projection that grows a receipt defeats the plugin's
+ * premise.
  *
  * The projected size is composed here, not read off `Truncation.after`:
  * `after` is the head line plus the two windows *without* the omission note, so
@@ -25,7 +26,8 @@
  * is evidence and is never projected), `family-not-configured` (the family has
  * no window), `not-worth-it` (`truncate`'s guard said no, or the footer left no
  * net gain), `empty` (shadow's empty receipt), and on the apply half
- * `no-spill`, `no-owner`, `projection-skipped:no-footer`, and `spill-failed`.
+ * `no-spill`, `no-owner`, `projection-skipped:no-footer`, `spill-failed`, and
+ * `footer-failed`.
  *
  * @module dsh-boost/projection/apply
  */
@@ -215,7 +217,7 @@ function precheck(input: ProjectApplyInput): { skip: ProjectionOutcome } | Ready
 /**
  * Replace an oversized receipt with its head, tail, and a way back to the rest.
  *
- * The canonical original is spilled *before* anything is cut — never the
+ * The canonical original is spilled *before* anything is replaced — never the
  * projection, which would make the footer point at an artifact that does not
  * contain what it promises. The footer sits on its own line between the two
  * windows, and the composed replacement is re-checked against the original:
@@ -223,8 +225,11 @@ function precheck(input: ProjectApplyInput): { skip: ProjectionOutcome } | Ready
  * the receipt it replaces, and a projection that grows a receipt is worse than
  * none.
  *
- * A spill failure is swallowed and reported as `spill-failed`; the caller's
- * `post-execute` hook must never see an exception from here.
+ * A spill or footer failure is swallowed and reported as `spill-failed` /
+ * `footer-failed`; the caller's `post-execute` hook must never see an exception
+ * from here. The footer must be guarded too: the host turns a throwing
+ * `post-execute` listener into an `isError` result, which would lose the very
+ * output this module exists to preserve.
  */
 export async function projectApply(
   input: ProjectApplyInput,
@@ -235,34 +240,41 @@ export async function projectApply(
   const { text, family, toolName, callId, label } = input
   const { truncation, owner, spill, formatFooter } = ready
 
-  let ref: SpillHandle
+  // One guard covers both host calls: `saveText` and the footer renderer. The
+  // marker tells the two failures apart, because status counts distinguish
+  // them — and neither may reach the caller as an exception.
+  let phase: 'spill' | 'footer' = 'spill'
   try {
-    ref = await spill.saveText({
+    const ref = await spill.saveText({
       owner,
       source: { kind: 'tool', toolName, callId: callId ?? toolName, label: label ?? family },
       suggestedName: `${toolName}.txt`,
       content: text,
     })
+    phase = 'footer'
+
+    const footer = formatFooter({ kind: 'exact', count: truncation.omittedBytes }, ref)
+    const assembled = `${renderHeadLine(truncation)}\n${truncation.head}\n${footer}\n${truncation.tail}`
+
+    // The footer is only known after the write, so this check can only run now.
+    // The backend exposes no delete: a spill that reaches this point stays in
+    // the store, unreferenced, while the model gets the original content back.
+    if (assembled.length >= text.length) {
+      return { content: text, outcome: { kind: 'skipped', reason: 'not-worth-it' } }
+    }
+
+    return {
+      content: assembled,
+      outcome: {
+        kind: 'applied',
+        omittedBytes: truncation.omittedBytes,
+        omittedCodePoints: truncation.omittedCodePoints,
+      },
+    }
   } catch {
-    return { content: text, outcome: { kind: 'skipped', reason: 'spill-failed' } }
-  }
-
-  const footer = formatFooter({ kind: 'exact', count: truncation.omittedBytes }, ref)
-  const assembled = `${renderHeadLine(truncation)}\n${truncation.head}\n${footer}\n${truncation.tail}`
-
-  // The footer is only known after the write, so this check can only run now.
-  // The backend exposes no delete: a spill that reaches this point stays in the
-  // store, unreferenced, while the model gets the original content back.
-  if (assembled.length >= text.length) {
-    return { content: text, outcome: { kind: 'skipped', reason: 'not-worth-it' } }
-  }
-
-  return {
-    content: assembled,
-    outcome: {
-      kind: 'applied',
-      omittedBytes: truncation.omittedBytes,
-      omittedCodePoints: truncation.omittedCodePoints,
-    },
+    return {
+      content: text,
+      outcome: { kind: 'skipped', reason: phase === 'spill' ? 'spill-failed' : 'footer-failed' },
+    }
   }
 }
