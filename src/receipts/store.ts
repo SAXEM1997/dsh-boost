@@ -62,12 +62,11 @@ type ReceiptCore = {
  * Invariant (plan line 581): a receipt with `kind === 'projection'` always
  * carries `unit: 'raw'` as a literal — T19/T26 filter on it, so a projection
  * receipt without it would be invisible to the counters. The plan keeps
- * `Receipt` an interface, which cannot pair `kind` with `unit`, so this module
- * enforces the invariant by preservation: unknown fields (including `unit`) are
- * copied through verbatim, the writer supplies the literal, and
- * `test/receipts.test.ts` pins that a projection receipt survives a round trip.
- * A malformed projection receipt is still written, not rejected: it must remain
- * auditable.
+ * `Receipt` an interface, which cannot pair `kind` with `unit`, so `buildReceipt`
+ * enforces the invariant by construction: it overwrites `unit` with `'raw'` on
+ * every projection receipt, ignoring any caller-supplied value, because the
+ * literal is the invariant rather than a parameter. A projection receipt is
+ * never rejected for shape; it must remain auditable.
  */
 export interface Receipt extends ReceiptCore {
   version: 1
@@ -78,7 +77,6 @@ export interface Receipt extends ReceiptCore {
 /** What callers hand to `append`; the store fills `version`, `receipt_hash` and `preview`. */
 type ReceiptInput = ReceiptCore & {
   version?: 1
-  receipt_hash?: string
   preview?: string
 }
 
@@ -161,19 +159,39 @@ function previewOf(text: string | undefined): string {
   return Array.from(text ?? '').slice(0, PREVIEW_CODE_POINTS).join('')
 }
 
-/** Fill the derived fields, keeping every caller field (notably `unit` for projections). */
+/**
+ * Fill the derived fields. `receipt_hash` is always computed here — a
+ * caller-supplied value would let the stored hash stop covering the receipt's
+ * identifying fields, which is the one property the hash exists to guarantee.
+ * A projection receipt's `unit` is likewise forced: the literal is the
+ * invariant T19/T26 filter on, not a caller parameter.
+ */
 function buildReceipt(r: ReceiptInput): Receipt {
-  return {
+  const receipt: Receipt = {
     ...r,
     version: r.version ?? 1,
-    receipt_hash: r.receipt_hash ?? receiptHash(r),
+    receipt_hash: receiptHash(r),
     preview: previewOf(r.preview),
   }
+  if (receipt.kind === 'projection') receipt.unit = 'raw'
+  return receipt
 }
 
 /** One receipt as one newline-terminated JSON line. */
 function serialiseReceipt(r: ReceiptInput): string {
   return `${JSON.stringify(buildReceipt(r))}\n`
+}
+
+/**
+ * Reject a session id that could escape `<root>/receipts/`.
+ *
+ * The store rejects rather than sanitises: a malformed id is a host bug, and
+ * mapping it to a different name would silently merge two sessions' receipts.
+ */
+function assertSessionId(sessionId: string): void {
+  if (sessionId === '' || sessionId === '.' || sessionId.includes('..') || /[\\/]/.test(sessionId)) {
+    throw new TypeError(`invalid sessionId: ${JSON.stringify(sessionId)}`)
+  }
 }
 
 /** `stat(dir).isDirectory()`-equivalent check without recursing into Node's `mkdir` spin. */
@@ -203,6 +221,33 @@ async function ensureDirectory(dir: string): Promise<void> {
   }
 }
 
+/**
+ * The complete-line prefix of `data`.
+ *
+ * A trailing line without `\n` was never finished, so it is not a receipt:
+ * `size` is the byte offset just past the last newline (zero when the first
+ * line is unfinished). The tail is truncated from `path`; a failed repair is
+ * ignored for reads (`repairFailure: 'ignore'`) but propagates for writes, so
+ * an append never lands after a crashed half line.
+ */
+async function completePrefix(
+  path: string,
+  data: Buffer,
+  repairFailure: 'throw' | 'ignore' = 'throw',
+): Promise<{ valid: Buffer; size: number }> {
+  let size = data.length
+  const lastNewline = data.lastIndexOf(NEWLINE)
+  if (size > 0 && lastNewline !== size - 1) {
+    size = lastNewline + 1
+    try {
+      await truncate(path, size)
+    } catch (error) {
+      if (repairFailure === 'throw') throw error
+    }
+  }
+  return { valid: data.subarray(0, size), size }
+}
+
 /** Read a shard, discarding (and truncating) an unfinished tail line. */
 async function readShard(path: string): Promise<Receipt[]> {
   let data: Buffer
@@ -213,22 +258,9 @@ async function readShard(path: string): Promise<Receipt[]> {
     throw error
   }
 
-  let size = data.length
-  const lastNewline = data.lastIndexOf(NEWLINE)
-  if (size > 0 && lastNewline !== size - 1) {
-    // The final line was never completely written, so it is not a receipt. Cut
-    // it at the last newline; a failed repair is best effort and must not hide
-    // the complete lines that precede it.
-    size = lastNewline + 1
-    try {
-      await truncate(path, size)
-    } catch {
-      // Keep reading the complete prefix.
-    }
-  }
-
+  const { valid } = await completePrefix(path, data, 'ignore')
   const receipts: Receipt[] = []
-  for (const line of data.subarray(0, size).toString('utf8').split('\n')) {
+  for (const line of valid.toString('utf8').split('\n')) {
     if (line === '') continue
     let parsed: unknown
     try {
@@ -262,8 +294,11 @@ function countNewlines(data: Buffer): number {
 /**
  * Append-only, crash-safe, bounded store of receipts per session.
  *
- * See the module docs for the write and read paths. All methods are safe to
- * call concurrently; writes are serialised through an internal promise chain.
+ * See the module docs for the write and read paths. Concurrent method calls on
+ * one instance are safe: writes are serialised through an internal promise
+ * chain. The store is single-writer per root by design — rotation counters are
+ * per instance, so two instances (or processes) writing one root can exceed the
+ * shard caps and lose receipts. The plugin owns exactly one store per root.
  */
 export class ReceiptStore {
   private readonly root: string
@@ -288,15 +323,20 @@ export class ReceiptStore {
     this.maxLines = opts.maxLines ?? DEFAULT_MAX_LINES
   }
 
-  /** Append one receipt. Never rejects: failures are counted and buffered. */
-  append(receipt: ReceiptInput): Promise<void> {
+  /**
+   * Append one receipt. Write failures never reject: they are counted and
+   * buffered. An invalid session id is a caller error, not a write failure, and
+   * rejects with `TypeError`.
+   */
+  async append(receipt: ReceiptInput): Promise<void> {
+    assertSessionId(receipt.sessionId)
     const run = this.chain.then(() => this.appendNow(receipt))
     const safe = run.then(
       () => undefined,
       () => undefined,
     )
     this.chain = safe
-    return safe
+    await safe
   }
 
   /** Force the buffered lines and the current shards to disk (called at turn end). */
@@ -315,10 +355,7 @@ export class ReceiptStore {
   /** Number of receipts readable for `sessionId` (`.1` plus current). */
   async count(sessionId: string): Promise<number> {
     let count = 0
-    for await (const receipt of this.scan(sessionId)) {
-      void receipt
-      count += 1
-    }
+    for await (const _ of this.scan(sessionId)) count += 1
     return count
   }
 
@@ -330,6 +367,7 @@ export class ReceiptStore {
    * unfinished trailing line is truncated and skipped.
    */
   async *scan(sessionId?: string): AsyncIterable<Receipt> {
+    if (sessionId !== undefined) assertSessionId(sessionId)
     await this.chain
     const sessionIds = sessionId === undefined ? await this.listSessionIds() : [sessionId]
     for (const id of sessionIds) {
@@ -397,7 +435,7 @@ export class ReceiptStore {
   /** Replay buffered lines in order; the head stays queued until its write succeeds. */
   private async drainPending(): Promise<void> {
     while (this.pending.length > 0) {
-      await this.writeLine(this.pending[0]!)
+      await this.writeLine(this.pending[0])
       this.pending.shift()
     }
   }
@@ -433,16 +471,11 @@ export class ReceiptStore {
       data = Buffer.alloc(0)
     }
 
-    let size = data.length
-    const lastNewline = data.lastIndexOf(NEWLINE)
-    if (size > 0 && lastNewline !== size - 1) {
-      // A crash left a partial line; appending after it would make the next
-      // receipt unreadable too. Cut it before counting and writing.
-      size = lastNewline + 1
-      await truncate(path, size)
-    }
-
-    const state: ShardState = { lines: countNewlines(data.subarray(0, size)), bytes: size }
+    // A crash left a partial line; appending after it would make the next
+    // receipt unreadable too. `completePrefix` cuts it before counting and
+    // writing, and propagates a failed repair so this append fails instead.
+    const { valid, size } = await completePrefix(path, data)
+    const state: ShardState = { lines: countNewlines(valid), bytes: size }
     this.states.set(sessionId, state)
     return state
   }

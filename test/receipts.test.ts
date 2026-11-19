@@ -1,6 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { appendFile, mkdtemp, readFile, stat, unlink, writeFile } from 'node:fs/promises'
+import { appendFile, mkdir, mkdtemp, readFile, stat, unlink, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { ReceiptStore, receiptHash } from '../src/receipts/store.ts'
@@ -154,6 +154,70 @@ test('projection 收据的 unit:"raw" 字面量原样落盘（T19/T26 过滤依�
   assert.equal(line.unit, 'raw')
   assert.equal(line.before, 120)
   assert.equal(line.after, 30)
+})
+
+test('projection 缺 unit 或被篡改时由 store 强制写 unit:"raw"', async () => {
+  const root = await freshRoot()
+  const s = new ReceiptStore(root)
+  await s.append(rec('a', { kind: 'projection', before: 5, after: 2 }))
+  await s.append(rec('a', { kind: 'projection', unit: 'tokens', before: 9, after: 3 }))
+  const lines = (await readFile(join(root, 'receipts', 'a.jsonl'), 'utf8')).trim().split('\n')
+  assert.equal(JSON.parse(lines[0]).unit, 'raw')
+  assert.equal(JSON.parse(lines[1]).unit, 'raw')
+})
+
+test('调用方传入的 receipt_hash 不可信，store 总是重算', async () => {
+  const root = await freshRoot()
+  const s = new ReceiptStore(root)
+  await s.append(rec('a', { receipt_hash: 'deadbeefdeadbeef' }))
+  const line = JSON.parse((await readFile(join(root, 'receipts', 'a.jsonl'), 'utf8')).trim())
+  assert.equal(line.receipt_hash, receiptHash({ sessionId: 'a', turn: 1, stepId: 'A', tool: 'read', args: {} }))
+  assert.notEqual(line.receipt_hash, 'deadbeefdeadbeef')
+})
+
+test('新 store 首次 append 先截断崩溃残留的半行，不把新收据拼上去', async () => {
+  const root = await freshRoot()
+  const first = new ReceiptStore(root)
+  await first.append(rec('a', { turn: 0 }))
+  await appendFile(join(root, 'receipts', 'a.jsonl'), '{"version":1,"half":')
+
+  const second = new ReceiptStore(root)
+  await second.append(rec('a', { turn: 1 }))
+  const text = await readFile(join(root, 'receipts', 'a.jsonl'), 'utf8')
+  const lines = text.split('\n').filter((line) => line !== '')
+  assert.equal(lines.length, 2)
+  assert.deepEqual(lines.map((line) => JSON.parse(line).turn), [0, 1])
+  assert.equal(text.includes('"half"'), false)
+  assert.equal(await second.count('a'), 2)
+})
+
+test('只有半行的分片先截为空再追加', async () => {
+  const root = await freshRoot()
+  await mkdir(join(root, 'receipts'), { recursive: true })
+  await writeFile(join(root, 'receipts', 'a.jsonl'), '{"version":1,"half":')
+
+  const s = new ReceiptStore(root)
+  await s.append(rec('a', { turn: 7 }))
+  const text = await readFile(join(root, 'receipts', 'a.jsonl'), 'utf8')
+  const lines = text.split('\n').filter((line) => line !== '')
+  assert.equal(lines.length, 1)
+  assert.equal(JSON.parse(lines[0]).turn, 7)
+  assert.equal(text.includes('"half"'), false)
+  assert.equal(await s.count('a'), 1)
+})
+
+test('拒绝含路径分隔符或 .. 的 sessionId，不写出 receipts/', async () => {
+  const root = await freshRoot()
+  const s = new ReceiptStore(root)
+  await assert.rejects(s.append(rec('../escape')), /invalid sessionId/)
+  await assert.rejects(s.append(rec('nested/name')), /invalid sessionId/)
+  await assert.rejects(s.count('../escape'), /invalid sessionId/)
+  await assert.rejects(async () => {
+    for await (const _ of s.scan('../escape')) {
+      void _
+    }
+  }, /invalid sessionId/)
+  await assert.rejects(stat(join(root, 'escape.jsonl')))
 })
 
 test('.1 分片里的半行同样在读取时丢弃并截断', async () => {
