@@ -1,6 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdir, mkdtemp, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, readFile, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { assertSupportedJsonSchema, validateJsonSchemaValue } from '@deepseek-ai/dsh-tools'
@@ -193,6 +193,48 @@ test('scope-set 把 version 1 文件显式升级为 v2（store 的既有写路�
   assert.equal(after.doc.version, 2)
 })
 
+test('scope-set / shadow 拒绝重写 future version 文件，文件逐字保留', async () => {
+  const future = {
+    version: 3,
+    revision: 4,
+    mode: 'global',
+    workspaceIds: ['future-ws'],
+    shadow: false,
+    projection: 'on',
+    futureField: { keep: true },
+  }
+
+  for (const args of [
+    { cmd: 'scope-set', body: { mode: 'selected' }, baseRevision: 0 },
+    { cmd: 'shadow', body: true, baseRevision: 0 },
+  ] as const) {
+    const d = await dirDeps()
+    const file = join(d.dir, 'scope.json')
+    await writeFile(file, JSON.stringify(future))
+
+    assert.deepEqual(await runBoost({ args, ...d }), {
+      ok: false,
+      code: 'ERR_SCOPE_FUTURE_VERSION',
+    })
+    assert.deepEqual(JSON.parse(await readFile(file, 'utf8')), future)
+
+    const read = await runBoost({ args: { cmd: 'scope-get' }, ...d })
+    assert.deepEqual(read, { ok: false, code: 'ERR_SCOPE_FUTURE_VERSION' })
+  }
+})
+
+test('scope-set 原样透出 ERR_SCOPE_LOCKED', async () => {
+  const d = await dirDeps()
+  await writeFile(
+    join(d.dir, 'scope.lock'),
+    JSON.stringify({ pid: process.pid, startedAt: Date.now() }),
+  )
+  assert.deepEqual(
+    await runBoost({ args: { cmd: 'scope-set', body: { mode: 'global' }, baseRevision: 0 }, ...d }),
+    { ok: false, code: 'ERR_SCOPE_LOCKED' },
+  )
+})
+
 // --- rule 3: shadow is its own switch, not projection ----------------------
 
 test('shadow 只切换 shadow 而不动 projection，并走 CAS', async () => {
@@ -224,7 +266,10 @@ test('shadow 只切换 shadow 而不动 projection，并走 CAS', async () => {
 test('status 空收据目录返回零账目而不是抛错', async () => {
   const d = await deps()
   const status = await getStatus(d)
-  assert.deepEqual(status.counts, {})
+  // A null-prototype map so a receipt code of `toString` or `__proto__` is an
+  // ordinary key, not a prototype hit.
+  assert.equal(Object.getPrototypeOf(status.counts), null)
+  assert.equal(Object.keys(status.counts).length, 0)
   assert.deepEqual(status.saved, {
     substitution: 0,
     projectionGross: 0,
@@ -271,9 +316,62 @@ test('status 计数跨分片，空 sessionId 的 skip:no-scope 也计入', async
   assert.equal(status.counts['shadow:recorded'], 1)
 })
 
-test('status 替换账只累加数字型 saved_input_tokens，unknown 不计入', async () => {
+test('status counts 把 toString / __proto__ 当作普通码，不串值也不丢失', async () => {
+  const d = await dirDeps()
+  await mkdir(join(d.dir, 'receipts'), { recursive: true })
+  const lines = ['toString', '__proto__'].map(code =>
+    JSON.stringify({
+      version: 1,
+      ts: new Date().toISOString(),
+      sessionId: 'raw',
+      turn: 1,
+      kind: 'skip',
+      code,
+      receipt_hash: code,
+      preview: '',
+    }),
+  )
+  await writeFile(join(d.dir, 'receipts', 'raw.jsonl'), `${lines.join('\n')}\n`)
+
+  const status = await getStatus(d)
+  assert.equal(Object.getPrototypeOf(status.counts), null)
+  assert.equal(status.counts['toString'], 1)
+  assert.equal(status.counts['__proto__'], 1)
+  assert.equal(typeof status.counts['toString'], 'number')
+})
+
+test('status 读取轮转的 .1 分片', async () => {
+  const d = await dirDeps()
+  const receipts = new ReceiptStore(d.dir, { maxLines: 1 })
+  const ts = new Date().toISOString()
+  await receipts.append({
+    version: 1,
+    ts,
+    sessionId: 's1',
+    turn: 1,
+    kind: 'skip',
+    code: 'skip:first',
+  })
+  await receipts.append({
+    version: 1,
+    ts,
+    sessionId: 's1',
+    turn: 1,
+    kind: 'skip',
+    code: 'skip:second',
+  })
+  await receipts.flush()
+
+  const status = await getStatus({ scope: d.scope, receipts })
+  assert.equal(status.counts['skip:first'], 1)
+  assert.equal(status.counts['skip:second'], 1)
+})
+
+test('status 替换账只累加 substitute-settled 的数字型 saved_input_tokens', async () => {
   const d = await deps()
   const ts = new Date().toISOString()
+  // The synth-time line is written before any measurement exists; design §5.3
+  // says the field is measured, so its 'unknown' must not be counted.
   await d.receipts.append({
     version: 1,
     ts,
@@ -292,22 +390,51 @@ test('status 替换账只累加数字型 saved_input_tokens，unknown 不计入'
     code: 'substitute-settled',
     saved_input_tokens: 2000,
   })
+  await d.receipts.flush()
+
+  const status = await getStatus(d)
+  assert.equal(status.saved.substitution, 2000)
+  // The substitute line stays visible as an event count, not as savings.
+  assert.equal(status.counts['substituted'], 1)
+})
+
+test('status 同一替换两行都带数字时只计 settle 一行', async () => {
+  const d = await deps()
+  const ts = new Date().toISOString()
   await d.receipts.append({
     version: 1,
     ts,
     sessionId: 's1',
-    turn: 2,
+    turn: 1,
     kind: 'substitute',
     code: 'substituted',
+    saved_input_tokens: 700,
+  })
+  await d.receipts.append({
+    version: 1,
+    ts,
+    sessionId: 's1',
+    turn: 1,
+    kind: 'substitute',
+    code: 'substituted',
+    saved_input_tokens: 500,
+  })
+  await d.receipts.append({
+    version: 1,
+    ts,
+    sessionId: 's1',
+    turn: 1,
+    kind: 'substitute-settled',
+    code: 'substitute-settled',
     saved_input_tokens: 500,
   })
   await d.receipts.flush()
 
   const status = await getStatus(d)
-  assert.equal(status.saved.substitution, 2500)
+  assert.equal(status.saved.substitution, 500, 'one substitution must be counted once')
 })
 
-test('status 投影毛额只算 unit:raw，净额扣掉已记录的 retrievalCost', async () => {
+test('status 投影毛额读 saved_projection_tokens，净额扣掉已记录的 retrievalCost', async () => {
   const d = await deps()
   await d.receipts.append({
     version: 1,
@@ -316,7 +443,7 @@ test('status 投影毛额只算 unit:raw，净额扣掉已记录的 retrievalCos
     turn: 1,
     kind: 'projection',
     code: 'projection',
-    saved: 100,
+    saved_projection_tokens: 100,
     retrieved: true,
     retrievalCost: 30,
   })
@@ -340,7 +467,7 @@ test('status 取回未记录 retrievalCost 时净额等于毛额', async () => {
     turn: 1,
     kind: 'projection',
     code: 'projection',
-    saved: 100,
+    saved_projection_tokens: 100,
     retrieved: true,
   })
   await d.receipts.flush()
@@ -349,6 +476,58 @@ test('status 取回未记录 retrievalCost 时净额等于毛额', async () => {
   assert.equal(status.saved.projectionGross, 100)
   assert.equal(status.saved.retrievals, 1)
   assert.equal(status.saved.projectionNet, 100)
+})
+
+test('status 投影毛额保留 saved 旧拼写作为后备', async () => {
+  const d = await deps()
+  await d.receipts.append({
+    version: 1,
+    ts: new Date().toISOString(),
+    sessionId: 's1',
+    turn: 1,
+    kind: 'projection',
+    code: 'projection',
+    saved: 100,
+  })
+  await d.receipts.flush()
+
+  const status = await getStatus(d)
+  assert.equal(status.saved.projectionGross, 100)
+})
+
+test('status 投影毛额优先取 saved_projection_tokens 而不是 saved', async () => {
+  const d = await deps()
+  await d.receipts.append({
+    version: 1,
+    ts: new Date().toISOString(),
+    sessionId: 's1',
+    turn: 1,
+    kind: 'projection',
+    code: 'projection',
+    saved_projection_tokens: 120,
+    saved: 999,
+  })
+  await d.receipts.flush()
+
+  const status = await getStatus(d)
+  assert.equal(status.saved.projectionGross, 120)
+})
+
+test('status 忽略字符串型 saved，不把文本拼进账目', async () => {
+  const d = await deps()
+  await d.receipts.append({
+    version: 1,
+    ts: new Date().toISOString(),
+    sessionId: 's1',
+    turn: 1,
+    kind: 'projection',
+    code: 'projection',
+    saved: '100',
+  })
+  await d.receipts.flush()
+
+  const status = await getStatus(d)
+  assert.equal(status.saved.projectionGross, 0)
 })
 
 test('status 不把没有 unit:raw 的 projection 收据算进毛额', async () => {
@@ -379,7 +558,7 @@ test('status 不把没有 unit:raw 的 projection 收据算进毛额', async () 
 
 // --- rule 5: degraded collects observed stable codes ----------------------
 
-test('status degraded 收集收据里观察到的宿主降级码', async () => {
+test('status 把 projection-skipped:no-spill 映射为 ERR_HOST_NO_SPILL（过滤器，不是生产者）', async () => {
   const d = await deps()
   const ts = new Date().toISOString()
   await d.receipts.append({
@@ -388,15 +567,7 @@ test('status degraded 收集收据里观察到的宿主降级码', async () => {
     sessionId: 's1',
     turn: 1,
     kind: 'projection',
-    code: 'ERR_HOST_NO_SPILL',
-  })
-  await d.receipts.append({
-    version: 1,
-    ts,
-    sessionId: 's1',
-    turn: 1,
-    kind: 'projection',
-    code: 'ERR_HOST_NO_TOKENMETER',
+    code: 'projection-skipped:no-spill',
   })
   await d.receipts.append({
     version: 1,
@@ -409,11 +580,11 @@ test('status degraded 收集收据里观察到的宿主降级码', async () => {
   await d.receipts.flush()
 
   const status = await getStatus(d)
-  assert.deepEqual(status.degraded, [
-    'ERR_HOST_NO_SPILL',
-    'ERR_HOST_NO_TOKENMETER',
-    'scope-degraded',
-  ])
+  assert.equal(status.counts['projection-skipped:no-spill'], 1)
+  assert.deepEqual(status.degraded, ['ERR_HOST_NO_SPILL', 'scope-degraded'])
+  // ERR_HOST_NO_TOKENMETER has no receipt channel until T25's host probe; a
+  // literal code must not be conjured from the receipt stream.
+  assert.equal(status.degraded.includes('ERR_HOST_NO_TOKENMETER'), false)
 })
 
 test('status 在 scope.json 不可读时报 scope-degraded 且仍给出账目', async () => {
@@ -479,5 +650,20 @@ test('boostTool.execute 复用 runBoost：成功给 data，失败给稳定码而
   assert.deepEqual(await def.execute({ cmd: 'nope' }, {}), {
     ok: false,
     code: 'ERR_BOOST_UNKNOWN_CMD',
+  })
+})
+
+test('runBoost 对 null 输入与抛错 getter 返回稳定码，不抛错', async () => {
+  const d = await deps()
+  assert.deepEqual(await runBoost(null as any), { ok: false, code: 'ERR_BOOST_UNKNOWN_CMD' })
+
+  const throwing = {
+    get cmd(): string {
+      throw new Error('boom')
+    },
+  }
+  assert.deepEqual(await runBoost({ args: throwing as any, ...d }), {
+    ok: false,
+    code: 'ERR_BOOST_INTERNAL',
   })
 })

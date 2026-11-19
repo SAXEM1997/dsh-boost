@@ -111,3 +111,23 @@ test('supportsStepWhen 为假时整族不注册并告警 ERR_HOST_NO_STEP_WHEN',
   assert.equal(registrations, 0)
   assert.ok(warnings.includes('ERR_HOST_NO_STEP_WHEN'), JSON.stringify(warnings))
 })
+
+test('tools.register 抛错时独立告警带稳定码，不冒充 hook 注册失败', () => {
+  const warnings: string[] = []
+  const host = fakeHost()
+  host.logger = { info: () => {}, warn: (msg: string) => warnings.push(msg) }
+  host.tools.register = () => {
+    throw new Error('duplicate tool name')
+  }
+
+  assert.doesNotThrow(() => plugin.apply(host as unknown as PluginContext, {}))
+  assert.ok(
+    warnings.some(msg => msg.includes('ERR_BOOST_TOOL_REGISTER_FAILED')),
+    JSON.stringify(warnings),
+  )
+  assert.equal(
+    warnings.some(msg => msg.includes('hook registration skipped')),
+    false,
+    JSON.stringify(warnings),
+  )
+})

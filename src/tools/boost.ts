@@ -23,7 +23,16 @@
  *   `mutate` returns, so this rejection is what stops a v1-shaped document.
  * - Both ledger sides come from the receipts. This module never estimates a
  *   retrieval cost; if no producer has recorded one, the net equals the gross
- *   and `retrievals` shows how many retrieved receipts were counted.
+ *   and `retrievals` shows how many retrieved receipts were counted. The
+ *   projection saving is read from `saved_projection_tokens` (the design §5.3
+ *   name T23b/T26 write), falling back to `saved`; a producer must write one of
+ *   them or the headline saving reads as zero. The substitution saving is read
+ *   only from the settled line, because the synth-time line predates any
+ *   measurement.
+ * - `status.degraded` maps the receipt code a real producer writes
+ *   (`projection-skipped:no-spill`) to its stable code (`ERR_HOST_NO_SPILL`).
+ *   `ERR_HOST_NO_TOKENMETER` has no receipt channel and is left to Task 25's
+ *   host probe rather than faked from the receipt stream.
  * - `runBoost` is pure orchestration over the two stores: no `ctx`, no host
  *   calls. The tool definition is therefore testable without a host, and the
  *   host probe lives in `src/index.ts`.
@@ -33,8 +42,10 @@
  *
  * @module dsh-boost/tools/boost
  */
+import type { JsonSchemaNode } from '@deepseek-ai/dsh-tools'
 import type { ProjectionMode } from '../projection/apply.js'
 import {
+  ERR_SCOPE_FUTURE_VERSION,
   ERR_SCOPE_LOCKED,
   ERR_SCOPE_PARSE_FAILED,
   ERR_SCOPE_READ_FAILED,
@@ -60,6 +71,7 @@ const ERR_BOOST_INTERNAL = 'ERR_BOOST_INTERNAL'
 /** Every scope failure code, for passing the store's codes through unchanged. */
 const SCOPE_CODES: ReadonlySet<string> = new Set([
   ERR_SCOPE_UNKNOWN_VERSION,
+  ERR_SCOPE_FUTURE_VERSION,
   ERR_SCOPE_PARSE_FAILED,
   ERR_SCOPE_READ_FAILED,
   ERR_SCOPE_REVISION_CONFLICT,
@@ -67,10 +79,17 @@ const SCOPE_CODES: ReadonlySet<string> = new Set([
 ])
 
 /**
- * Stable host/degradation codes `status` may report. Only codes actually
- * observed are emitted; Task 25 extends this list with its probe results.
+ * Receipt codes that mean the host is degraded, mapped to the stable code
+ * `status` reports.
+ *
+ * `projection-skipped:no-spill` is the code the projection path records when
+ * the spill backend is absent (design §5.4), so it is the real producer behind
+ * `ERR_HOST_NO_SPILL`. `ERR_HOST_NO_TOKENMETER` has no receipt channel at all:
+ * it is a host probe result and is added by Task 25, not invented here.
  */
-const DEGRADED_CODES = ['ERR_HOST_NO_SPILL', 'ERR_HOST_NO_TOKENMETER'] as const
+const RECEIPT_DEGRADATION: ReadonlyArray<{ readonly code: string; readonly degraded: string }> = [
+  { code: 'projection-skipped:no-spill', degraded: 'ERR_HOST_NO_SPILL' },
+]
 
 /** The scope document's caller-writable fields. Everything else is store-owned. */
 const PATCH_FIELDS = ['mode', 'workspaceIds', 'shadow', 'projection'] as const
@@ -96,9 +115,18 @@ export interface BoostStatus {
   shadow: boolean
   projection: ProjectionMode
   saved: {
-    /** Σ numeric `saved_input_tokens`; `'unknown'` is not counted (design §5.3). */
+    /**
+     * Σ numeric `saved_input_tokens` over settled substitutions only. The
+     * synth-time `substitute` line predates any measurement (design §5.3 says
+     * the field is measured), so its value is `'unknown'` or absent and never
+     * contributes; `counts` keeps the event count.
+     */
     substitution: number
-    /** Σ `saved` over `kind:'projection'` receipts carrying `unit:'raw'`. */
+    /**
+     * Σ `saved_projection_tokens` (T23b/T26's authoritative name, with `saved`
+     * as the legacy fallback) over `kind:'projection'` receipts carrying
+     * `unit:'raw'`.
+     */
     projectionGross: number
     /** `projectionGross` minus the recorded `retrievalCost` of retrieved receipts. */
     projectionNet: number
@@ -126,25 +154,32 @@ async function aggregate(receipts: ReceiptStore): Promise<{
   saved: BoostStatus['saved']
   degraded: string[]
 }> {
-  const counts: Record<string, number> = {}
+  const counts: Record<string, number> = Object.create(null)
   let substitution = 0
   let projectionGross = 0
   let retrievals = 0
   let retrievalCost = 0
 
   for await (const receipt of receipts.scan()) {
+    // A receipt is untrusted text from a file: `counts` has no prototype so a
+    // code of `toString` or `__proto__` is an ordinary numeric key, never a
+    // string concatenation and never a dropped assignment.
     if (typeof receipt.code === 'string') {
       counts[receipt.code] = (counts[receipt.code] ?? 0) + 1
     }
 
-    if (receipt.kind === 'substitute' || receipt.kind === 'substitute-settled') {
+    // Only the settled line carries a measured saving; the synth-time line is
+    // an event and is already visible in `counts`.
+    if (receipt.kind === 'substitute-settled') {
       const saved = receipt.saved_input_tokens
       if (typeof saved === 'number' && Number.isFinite(saved)) substitution += saved
     }
 
     if (receipt.kind !== 'projection') continue
     if (receipt.unit === 'raw') {
-      const saved = receipt.saved
+      // T23b/T26 write `saved_projection_tokens`; `saved` is the pre-T23b
+      // spelling this consumer accepted first. Never estimate a value here.
+      const saved = receipt.saved_projection_tokens ?? receipt.saved
       if (typeof saved === 'number' && Number.isFinite(saved)) projectionGross += saved
     }
     if (receipt.retrieved === true) {
@@ -154,7 +189,9 @@ async function aggregate(receipts: ReceiptStore): Promise<{
     }
   }
 
-  const degraded = DEGRADED_CODES.filter(code => counts[code] !== undefined)
+  const degraded = RECEIPT_DEGRADATION.filter(entry => counts[entry.code] !== undefined).map(
+    entry => entry.degraded,
+  )
   return {
     counts,
     saved: {
@@ -310,24 +347,26 @@ const COMMANDS: Record<BoostCmd, (deps: BoostDeps, args: BoostArgs) => Promise<B
  * Run one `boost` invocation. Pure orchestration over the two stores.
  *
  * Failures are values: an unknown command, an invalid body or a store code all
- * come back as `{ ok: false, code }`. The outer catch exists only so an
- * unexpected store failure cannot turn the user's only control surface into a
- * thrown tool error; it is not an expected path.
+ * come back as `{ ok: false, code }`. The `try` covers the argument read as
+ * well as the handler, so a null call or an argument object with a throwing
+ * getter answers a stable code instead of throwing. The catch exists only so
+ * an unexpected store failure cannot turn the user's only control surface into
+ * a thrown tool error; it is not an expected path.
  */
 export async function runBoost(input: {
   args: { cmd: BoostCmd; body?: unknown; baseRevision?: number }
   scope: ScopeStore
   receipts: ReceiptStore
 }): Promise<{ ok: true; data: unknown } | { ok: false; code: string }> {
-  const cmd: unknown = (input.args as { cmd?: unknown } | undefined)?.cmd
-  const handler =
-    typeof cmd === 'string' && Object.prototype.hasOwnProperty.call(COMMANDS, cmd)
-      ? COMMANDS[cmd as BoostCmd]
-      : undefined
-  if (handler === undefined) return { ok: false, code: ERR_BOOST_UNKNOWN_CMD }
-
   try {
-    return await handler(input, input.args)
+    const args = (input as { args?: unknown } | null | undefined)?.args
+    const cmd = (args as { cmd?: unknown } | null | undefined)?.cmd
+    const handler =
+      typeof cmd === 'string' && Object.prototype.hasOwnProperty.call(COMMANDS, cmd)
+        ? COMMANDS[cmd as BoostCmd]
+        : undefined
+    if (handler === undefined) return { ok: false, code: ERR_BOOST_UNKNOWN_CMD }
+    return await handler(input, args as BoostArgs)
   } catch {
     return { ok: false, code: ERR_BOOST_INTERNAL }
   }
@@ -344,7 +383,7 @@ const DESCRIPTION = [
 ].join(' ')
 
 /** The argument schema shown to the model; `status`/`scope-get` need only `cmd`. */
-const PARAMETERS = {
+const PARAMETERS: Record<string, unknown> = {
   type: 'object',
   properties: {
     cmd: {
@@ -376,7 +415,7 @@ const PARAMETERS = {
   },
   required: ['cmd'],
   additionalProperties: false,
-} as const
+}
 
 /**
  * The canonical output envelope. The host validates every successful return
@@ -384,7 +423,7 @@ const PARAMETERS = {
  * `{ ok: false, code }` (the tool never throws its stable codes), so both
  * branches are declared.
  */
-const OUTPUT_SCHEMA = {
+const OUTPUT_SCHEMA: JsonSchemaNode = {
   oneOf: [
     {
       type: 'object',
@@ -405,7 +444,7 @@ const OUTPUT_SCHEMA = {
       additionalProperties: false,
     },
   ],
-} as const
+}
 
 /** Render the canonical envelope as one text block; `JSON.stringify` is the format. */
 function renderResult(_args: unknown, value: unknown): { type: 'text'; text: string }[] {
@@ -422,9 +461,9 @@ function renderResult(_args: unknown, value: unknown): { type: 'text'; text: str
 export function boostTool(deps: BoostDeps): {
   name: 'boost'
   description: string
-  parameters: unknown
+  parameters: Record<string, unknown>
   output: {
-    schema: unknown
+    schema: JsonSchemaNode
     render: (args: unknown, value: unknown) => { type: 'text'; text: string }[]
   }
   execute: (args: unknown, exec: unknown) => Promise<unknown>

@@ -5,6 +5,7 @@ import {
   isVisible,
   DEFAULT_SCOPE,
   ERR_SCOPE_UNKNOWN_VERSION,
+  ERR_SCOPE_FUTURE_VERSION,
   ERR_SCOPE_PARSE_FAILED,
   ERR_SCOPE_READ_FAILED,
   ERR_SCOPE_REVISION_CONFLICT,
@@ -23,12 +24,23 @@ test('version 1 只读降级，不抛错（Review Focus #4）', () => {
   assert.deepEqual(r.doc, DEFAULT_SCOPE)
 })
 
-test('非对象 / 数组 / null 判 parse-failed；对象但 version≠2 判 unknown-version（R12）', () => {
+test('非对象 / 数组 / null 判 parse-failed；对象但 version≠2 判版本码（R12）', () => {
   for (const raw of ['not an object', null, [], 42]) {
     assert.equal(parseScope(raw).code, 'ERR_SCOPE_PARSE_FAILED')
   }
-  assert.equal(parseScope({ version: 2.1 }).code, 'ERR_SCOPE_UNKNOWN_VERSION')
+  assert.equal(parseScope({ version: 2.1 }).code, 'ERR_SCOPE_FUTURE_VERSION')
   assert.equal(parseScope({ mode: 'global' }).code, 'ERR_SCOPE_UNKNOWN_VERSION')
+})
+
+test('version > 2 判 future-version；v1 与缺失/非数字 version 仍是 unknown-version', () => {
+  for (const version of [3, 2.1, 99]) {
+    assert.equal(parseScope({ version }).code, 'ERR_SCOPE_FUTURE_VERSION', String(version))
+  }
+  for (const version of [1, 0, -1, '3', null, undefined]) {
+    assert.equal(parseScope({ version }).code, 'ERR_SCOPE_UNKNOWN_VERSION', String(version))
+  }
+  assert.equal(parseScope({}).code, 'ERR_SCOPE_UNKNOWN_VERSION')
+  assert.equal(parseScope({ version: Number.NaN }).code, 'ERR_SCOPE_UNKNOWN_VERSION')
 })
 
 test('selected + [ws] 只对该工作区可见', () => {
@@ -54,8 +66,9 @@ test('DEFAULT_SCOPE 逐字符合设计稿 §5.5：selected + []，shadow 与投�
   })
 })
 
-test('五个稳定拒绝码常量等于自身字面量（T9 直接引用）', () => {
+test('六个稳定拒绝码常量等于自身字面量（T9 直接引用）', () => {
   assert.equal(ERR_SCOPE_UNKNOWN_VERSION, 'ERR_SCOPE_UNKNOWN_VERSION')
+  assert.equal(ERR_SCOPE_FUTURE_VERSION, 'ERR_SCOPE_FUTURE_VERSION')
   assert.equal(ERR_SCOPE_PARSE_FAILED, 'ERR_SCOPE_PARSE_FAILED')
   assert.equal(ERR_SCOPE_READ_FAILED, 'ERR_SCOPE_READ_FAILED')
   assert.equal(ERR_SCOPE_REVISION_CONFLICT, 'ERR_SCOPE_REVISION_CONFLICT')

@@ -9,11 +9,15 @@
  * not an arbitrary host object: exotic in-memory shapes (throwing getters,
  * inherited fields) are outside the contract and are not defended against.
  *
- * Parsing is fail-closed in two ordered stages. **Type delimitation runs
- * before the version check**: a non-object, `null` or an array is a parse
- * failure even when it carries a `version` property, and only an object whose
- * `version` is exactly `2` has its remaining fields read. Anything else — a
- * missing version, version 1, a future version — is an unknown version.
+ * Parsing is fail-closed in three ordered stages. **Type delimitation runs
+ * before the version checks**: a non-object, `null` or an array is a parse
+ * failure even when it carries a `version` property. Then a numeric `version`
+ * greater than `2` is a **future version**: it is a valid document written by a
+ * newer plugin, so reads degrade but writes must never rewrite it (the field
+ * set may be newer than this parser knows). Finally anything whose `version` is
+ * not exactly `2` — version 1, a missing or non-numeric version — is an
+ * **unknown version**; a version 1 document is the one upgradeable case, and
+ * the command decides when to upgrade it.
  *
  * A matching stage rejects immediately, and no failure returns a partial
  * document: every failure comes back as a fresh deep copy of `DEFAULT_SCOPE`,
@@ -33,6 +37,14 @@ import type { ProjectionMode } from '../projection/apply.js'
 /** Stable rejection code: the file names a version this parser does not know. */
 export const ERR_SCOPE_UNKNOWN_VERSION = 'ERR_SCOPE_UNKNOWN_VERSION'
 
+/**
+ * Stable rejection code: the file's version is a number newer than this parser
+ * (version 3+). Reads degrade like any other failure, but the document is
+ * **read-only**: it may carry fields and workspace ids this parser would prune,
+ * so writing it back would silently lose the user's configuration.
+ */
+export const ERR_SCOPE_FUTURE_VERSION = 'ERR_SCOPE_FUTURE_VERSION'
+
 /** Stable rejection code: the file is not a scope document at all. */
 export const ERR_SCOPE_PARSE_FAILED = 'ERR_SCOPE_PARSE_FAILED'
 
@@ -45,16 +57,20 @@ export const ERR_SCOPE_REVISION_CONFLICT = 'ERR_SCOPE_REVISION_CONFLICT'
 /** Stable rejection code: another writer holds the scope lock. */
 export const ERR_SCOPE_LOCKED = 'ERR_SCOPE_LOCKED'
 
-/** Every stable scope failure code (design §5.5). */
+/** Every stable scope failure code (design §5.5 plus the future-version split). */
 export type ScopeCode =
   | typeof ERR_SCOPE_UNKNOWN_VERSION
+  | typeof ERR_SCOPE_FUTURE_VERSION
   | typeof ERR_SCOPE_PARSE_FAILED
   | typeof ERR_SCOPE_READ_FAILED
   | typeof ERR_SCOPE_REVISION_CONFLICT
   | typeof ERR_SCOPE_LOCKED
 
 /** The subset `parseScope` itself can return. */
-type ParseCode = typeof ERR_SCOPE_UNKNOWN_VERSION | typeof ERR_SCOPE_PARSE_FAILED
+type ParseCode =
+  | typeof ERR_SCOPE_UNKNOWN_VERSION
+  | typeof ERR_SCOPE_FUTURE_VERSION
+  | typeof ERR_SCOPE_PARSE_FAILED
 
 /** A parsed `scope.json` document, version 2 (design §5.5). */
 export interface ScopeDoc {
@@ -85,12 +101,15 @@ export const DEFAULT_SCOPE: ScopeDoc = {
 }
 
 /**
- * Type delimitation, in the order the cases must be checked.
+ * Type delimitation and version classification, in the order the cases must be
+ * checked.
  *
  * The first entry rejects everything that is not a plain object (including
- * `null` and arrays, whatever extra properties they carry); the second rejects
- * every plain object whose `version` is not exactly `2`. A matching entry ends
- * parsing before the remaining fields are read.
+ * `null` and arrays, whatever extra properties they carry). The second marks a
+ * numeric version greater than 2 as a future version; it must run **before**
+ * the catch-all third entry, which treats every remaining non-2 version
+ * (version 1, missing, non-numeric) as unknown. A matching entry ends parsing
+ * before the remaining fields are read.
  */
 const DELIMITERS: ReadonlyArray<{
   readonly code: ParseCode
@@ -99,6 +118,13 @@ const DELIMITERS: ReadonlyArray<{
   {
     code: ERR_SCOPE_PARSE_FAILED,
     matches: (raw) => raw === null || typeof raw !== 'object' || Array.isArray(raw),
+  },
+  {
+    code: ERR_SCOPE_FUTURE_VERSION,
+    matches: (raw) => {
+      const version = (raw as { version?: unknown }).version
+      return typeof version === 'number' && version > 2
+    },
   },
   {
     code: ERR_SCOPE_UNKNOWN_VERSION,
@@ -146,7 +172,7 @@ function parseProjection(raw: unknown): ProjectionMode {
  */
 export function parseScope(raw: unknown): {
   doc: ScopeDoc
-  code?: 'ERR_SCOPE_UNKNOWN_VERSION' | 'ERR_SCOPE_PARSE_FAILED'
+  code?: 'ERR_SCOPE_UNKNOWN_VERSION' | 'ERR_SCOPE_FUTURE_VERSION' | 'ERR_SCOPE_PARSE_FAILED'
 } {
   const rejection = DELIMITERS.find((delimiter) => delimiter.matches(raw))
   if (rejection) return rejected(rejection.code)

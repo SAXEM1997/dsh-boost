@@ -15,6 +15,7 @@
  */
 import { homedir } from 'node:os'
 import { join } from 'node:path'
+import type { ToolDefinition } from '@deepseek-ai/dsh-tools'
 import { resolveConfig } from './config.js'
 import { registerHooks } from './hooks/post-execute.js'
 import { ReceiptStore } from './receipts/store.js'
@@ -78,7 +79,10 @@ function registerBoostTool(
     ctx.logger?.warn?.('ERR_HOST_NO_STEP_WHEN')
     return
   }
-  ctx.tools.register(boostTool(deps), { when: () => true })
+  // Annotating with the host's ToolDefinition makes a host-side tightening a
+  // build error instead of a runtime registration failure.
+  const definition: ToolDefinition = boostTool(deps)
+  ctx.tools.register(definition, { when: () => true })
 }
 
 export function apply(ctx: PluginContext, config: unknown): void {
@@ -92,11 +96,13 @@ export function apply(ctx: PluginContext, config: unknown): void {
     return
   }
 
+  let hooksMounted = false
   try {
     const root = boostRoot()
     const scope = new ScopeStore(root)
     const receipts = new ReceiptStore(root)
     registerHooks(ctx, { config: cfg, scope, receipts })
+    hooksMounted = true
     // After the hooks: `registerHooks` mounts the prompt section first and
     // throws on a duplicate, so a second `apply` aborts above before it can
     // register the tool twice.
@@ -106,6 +112,15 @@ export function apply(ctx: PluginContext, config: unknown): void {
     // mounts it first), which means the plugin is already wired — not that
     // wiring failed. Returning here leaves the existing mounts untouched.
     if (alreadyMounted(error)) return
+    // The tool is the user's only control surface, so its failure must not be
+    // reported as a hook failure (that would hide the degradation behind a
+    // misleading message).
+    if (hooksMounted) {
+      ctx.logger?.warn?.(
+        `dsh-boost: boost tool registration failed (ERR_BOOST_TOOL_REGISTER_FAILED): ${messageOf(error)}`,
+      )
+      return
+    }
     ctx.logger?.warn?.(`dsh-boost: hook registration skipped: ${messageOf(error)}`)
   }
 }

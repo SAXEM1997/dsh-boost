@@ -375,6 +375,36 @@ test('version 1 文件在显式写入时升级到 v2（baseRevision 取降级读
   assert.equal(after.doc.version, 2)
 })
 
+test('future version 文件只读降级且拒绝写入，内容逐字保留', async () => {
+  const dir = await tempDir()
+  const file = join(dir, 'scope.json')
+  const future = {
+    version: 3,
+    revision: 4,
+    mode: 'global',
+    workspaceIds: ['future-ws'],
+    futureField: { keep: true },
+  }
+  await writeFile(file, JSON.stringify(future))
+  const s = new ScopeStore(dir)
+
+  const before = await s.read()
+  assert.equal(before.degraded, 'scope-degraded')
+  assert.equal(before.code, 'ERR_SCOPE_FUTURE_VERSION')
+  assert.equal(before.doc.revision, 0)
+
+  await assert.rejects(
+    () => s.write(d => ({ ...d, mode: 'selected' }), before.doc.revision),
+    (error: unknown) => {
+      const scopeError = error as NodeJS.ErrnoException
+      assert.equal(scopeError.code, 'ERR_SCOPE_FUTURE_VERSION')
+      assert.match(scopeError.message, /ERR_SCOPE_FUTURE_VERSION/)
+      return true
+    },
+  )
+  assert.deepEqual(JSON.parse(await readFile(file, 'utf8')), future)
+})
+
 test('写失败的错误在 message 与 .code 上带同一个稳定码', async () => {
   const dir = await tempDir()
   const s = new ScopeStore(dir)

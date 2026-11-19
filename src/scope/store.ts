@@ -58,6 +58,7 @@ import type { FileHandle } from 'node:fs/promises'
 import { join } from 'node:path'
 import {
   DEFAULT_SCOPE,
+  ERR_SCOPE_FUTURE_VERSION,
   ERR_SCOPE_LOCKED,
   ERR_SCOPE_PARSE_FAILED,
   ERR_SCOPE_READ_FAILED,
@@ -192,16 +193,25 @@ export class ScopeStore {
    * `updatedAt` now) and leaves it cached.
    *
    * A missing file is a first write: the base is `DEFAULT_SCOPE` at revision 0,
-   * so it succeeds only when the caller passes 0. A corrupt or unknown-version
-   * file is also based on the strict default, which is how `boost scope set`
-   * explicitly upgrades a version 1 document. An existing file that cannot be
-   * read at all is `ERR_SCOPE_READ_FAILED` — never overwritten blindly.
+   * so it succeeds only when the caller passes 0. A corrupt or version 1 file
+   * is also based on the strict default, which is how `boost scope set`
+   * explicitly upgrades a version 1 document. A **future** version (a numeric
+   * version greater than 2) is refused with `ERR_SCOPE_FUTURE_VERSION` before
+   * the mutation: the newer field set cannot be represented here, so rewriting
+   * it would silently drop configuration. An existing file that cannot be read
+   * at all is `ERR_SCOPE_READ_FAILED` — never overwritten blindly.
    */
   async write(mutate: (doc: ScopeDoc) => ScopeDoc, baseRevision: number): Promise<ScopeDoc> {
     await this.ensureDirectory()
     await this.acquireLock()
     try {
       const current = this.readDiskSync()
+      if (!current.ok && current.code === ERR_SCOPE_FUTURE_VERSION) {
+        throw scopeError(
+          ERR_SCOPE_FUTURE_VERSION,
+          `refusing to rewrite ${this.file}: it declares a newer scope version`,
+        )
+      }
       if (!current.ok && current.code === ERR_SCOPE_READ_FAILED && !current.missing) {
         const detail = current.cause === undefined ? 'unknown read error' : messageOf(current.cause)
         throw scopeError(ERR_SCOPE_READ_FAILED, `cannot read ${this.file}: ${detail}`)
