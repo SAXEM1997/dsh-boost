@@ -31,6 +31,7 @@
  * @module dsh-boost/hooks/post-execute
  */
 import type { GenerateOptions, StreamChunk } from '@deepseek-ai/dsh-llm'
+import { PROTOCOL_TEXT } from '../prompt/protocol.js'
 import { canonicalise } from '../projection/canonicalise.js'
 import type { CanonicalReceipt } from '../projection/canonicalise.js'
 import type { ReceiptStore } from '../receipts/store.js'
@@ -44,14 +45,6 @@ const PROTOCOL_SECTION_NAME = 'dsh-boost'
 
 /** Section order: the protocol sits with the other tool-contract sections. */
 const PROTOCOL_SECTION_ORDER = 100
-
-/**
- * Task 17 placeholder body for the protocol section.
- *
- * Task 20 replaces this with `PROTOCOL_TEXT`. It is exported so a wiring test
- * can name the value the provider must return without restating the literal.
- */
-export const PLACEHOLDER_TEXT = ''
 
 /** The execution facts a `tools/post-execute` listener reads here. */
 type PostExecuteExec = {
@@ -127,7 +120,7 @@ function protocolText(scope: ScopeStore | undefined, context: { scope?: unknown 
   if (scope == null || typeof scope.judgement !== 'function') return ''
   const key = agentKeyOf(context?.scope)
   if (key === undefined) return ''
-  return scope.judgement(key) ? PLACEHOLDER_TEXT : ''
+  return scope.judgement(key) ? PROTOCOL_TEXT : ''
 }
 
 /**

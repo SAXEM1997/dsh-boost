@@ -1,7 +1,8 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { fakeHost } from './fakes/host.ts'
-import { PLACEHOLDER_TEXT, registerHooks } from '../src/hooks/post-execute.ts'
+import { registerHooks } from '../src/hooks/post-execute.ts'
+import { PROTOCOL_TEXT } from '../src/prompt/protocol.ts'
 import { DEFAULT_CONFIG } from '../src/config.ts'
 import { DEFAULT_SCOPE } from '../src/scope/doc.ts'
 import { SELECTOR_PURPOSE } from '../src/selector/jev.ts'
@@ -58,7 +59,7 @@ test('协议段 text 必须是函数，并按 scope 里的 session id 读 judgem
   assert.equal(typeof s.text, 'function')
   // 宿主把组装上下文构造成 { agent, scope: agent, signal }，所以 scope 就是 agent。
   const out = s.text({ scope: { session: { header: { id: 's1', cwd: '/w' } } } })
-  assert.equal(out, PLACEHOLDER_TEXT)
+  assert.equal(out, PROTOCOL_TEXT)
   assert.deepEqual(calls, ['s1'])
 })
 
