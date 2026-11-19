@@ -577,7 +577,8 @@ git commit -m "feat: apply projection with spill persistence"
 - Create: `src/receipts/store.ts`, `test/receipts.test.ts`
 
 **Interfaces:**
-- Produces: `export type ReceiptKind = 'substitute' | 'shadow' | 'projection' | 'skip' | 'reset'`
+- Produces: `export type ReceiptKind = 'substitute' | 'substitute-settled' | 'shadow' | 'projection' | 'skip' | 'reset'`
+- 不变量：`kind === 'projection'` 的收据**必带** `unit: 'raw'` 字面量（T19/T26 按它过滤）
 - Produces: `export interface Receipt { version: 1; ts: string; sessionId: string; turn: number; stepId?: string; kind: ReceiptKind; code: string; tool?: string; receipt_hash: string; preview: string; [k: string]: unknown }`
 - Produces: `export function receiptHash(r: { sessionId: string; turn: number; stepId?: string; tool?: string }): string`——`sha256(稳定 JSON)` 的十六进制前 16 位
 - Produces: `export class ReceiptStore { constructor(root: string, opts?: { fsyncEveryLines?: number; maxBytes?: number; maxLines?: number }); append(r: Receipt): Promise<void>; flush(): Promise<void>; count(sessionId: string): Promise<number>; scan(sessionId?: string): AsyncIterable<Receipt>; failures(): number; stopped(): boolean }`
@@ -882,7 +883,8 @@ git commit -m "feat: atomic scope writes with lock"
 - Produces: `export interface WorkspaceRegistry { list(): readonly { id: string; path: string }[]; resolveByPath?(path: string): Promise<{ id: string } | undefined> }`——**宿主只有同步 `list()` 与异步 `resolveByPath()`，没有 `byPath`**
 - Produces: `export function workspaceIdOf(agent: { session?: { header?: { cwd?: string } } } | undefined, registry: WorkspaceRegistry | undefined): string | undefined`（`cwd` 经 `registry.list()` 按 `path` 精确匹配换成宿主 UUID；**不是路径本身**，也不 await——`systemPrompt` 装配是同步的。异步 `resolveByPath` 只用于预热缓存）
 - Produces: `export async function resolveVisible(store: ScopeStore, agent: unknown, registry: WorkspaceRegistry | undefined): Promise<boolean>`
-- Produces: `test/fakes/host.ts` 的 `export function fakeHost(overrides?: Record<string, unknown>): any`（可注入 `tools.register/resolve/definitions`、`llm.stream`、`systemPrompt.section`、`tokenMeter`、`spillStore`）
+- Produces: `export type SpillLike = { saveText(text: string, name?: string): Promise<SpillHandle> }`（宿主 spill 的最小投影）
+- Produces: `test/fakes/host.ts` 的 `export function fakeHost(overrides?: Record<string, unknown>): any`——**必须暴露**：`register/resolve/definitions`、`llm.stream`、`systemPrompt.section`、`tokenMeter`、`spillStore`、`callHook(name, args, next)`、`receipts: unknown[]`、`hooked(name): boolean`、`section(name?): { text: (c: any) => string } | undefined`、`nextCalls: number`、`synthesized: number`、`stream(sessionId: string): AsyncIterable<StreamChunk>`、`lastStream(): AsyncIterable<StreamChunk> | undefined`、`visible(name: string, agent: AgentLike): Promise<boolean>`
 
 - [ ] **Step 1: 写失败测试**
 
@@ -1236,25 +1238,25 @@ const llmOf = (chunks: string[], delay = 0) => ({
 const cands = [{ id: 'A', summary: 'read /a' }, { id: 'B', summary: 'read /b' }]
 
 test('单标签被解析为选择', async () => {
-  const r = await choose({ llm: llmOf(['B']) as any, route: ROUTE, candidates: cands, receiptText: 'x', maxTokens: 512 })
+  const r = await choose({ llm: llmOf(['B']) as any, provider: 'deepseek', model: 'deepseek-chat', candidates: cands, receiptText: 'x', maxTokens: 512 })
   assert.deepEqual(r, { choice: 'B' })
 })
 
 test('问号与其它字符一律 abstain:no-label', async () => {
   for (const s of ['?', 'AB', 'neither']) {
-    const r = await choose({ llm: llmOf([s]) as any, route: ROUTE, candidates: cands, receiptText: 'x', maxTokens: 512 })
+    const r = await choose({ llm: llmOf([s]) as any, provider: 'deepseek', model: 'deepseek-chat', candidates: cands, receiptText: 'x', maxTokens: 512 })
     assert.deepEqual(r, { abstain: 'no-label' })
   }
 })
 
 test('超时 abstain:timeout', async () => {
-  const r = await choose({ llm: llmOf(['A'], 100) as any, route: ROUTE, candidates: cands, receiptText: 'x', maxTokens: 512, timeoutMs: 10 })
+  const r = await choose({ llm: llmOf(['A'], 100) as any, provider: 'deepseek', model: 'deepseek-chat', candidates: cands, receiptText: 'x', maxTokens: 512, timeoutMs: 10 })
   assert.deepEqual(r, { abstain: 'timeout' })
 })
 
 test('调用抛错 abstain:error', async () => {
   const llm = { async *stream() { throw new Error('boom') } }
-  const r = await choose({ llm: llm as any, route: ROUTE, candidates: cands, receiptText: 'x', maxTokens: 512 })
+  const r = await choose({ llm: llm as any, provider: 'deepseek', model: 'deepseek-chat', candidates: cands, receiptText: 'x', maxTokens: 512 })
   assert.deepEqual(r, { abstain: 'error' })
 })
 
@@ -1412,7 +1414,6 @@ git commit -m "feat: substitution decision pipeline"
 - Produces: `export function remainingSteps(input: { stepsSoFar: number[]; horizonSteps: number; historyTurns: number }): number`
 - Produces: `export class StepBudget { constructor(max: number); take(): boolean; reset(): void; exhausted(): boolean; count(): number }`——**必须有 `reset()`**，否则插件生命周期单例会在 8 次普通请求后永久关闭替换
 - Produces: `export function worthSubstituting(input: { savedTokens: number; overheadTokens: number; thresholdTokens: number; deterministicSingle: boolean }): boolean`
-- Produces: `export class StepBudget { constructor(max: number); take(): boolean; exhausted(): boolean; count(): number }`
 
 - [ ] **Step 1: 写失败测试**
 
@@ -1543,7 +1544,8 @@ Expected: FAIL，`fakeHost` 未接钩子
 
 - [ ] **Step 3: 实现**
 
-`registerHooks(ctx, deps)` 从 `src/hooks/post-execute.ts` 导出（T23 会扩展 `deps` 并补全规则），本任务注册四件事：① `ctx.on('tools/post-execute', ...)`，顺序严格为 `canonicalise →（替换决策占位）→ 投影 → 返回 decision`，`exec.agent` 为空时直接 `next()` 并写 `skip:no-scope` 收据；② `ctx.on('llm/stream', ...)`，第一行 `opts?.purpose === SELECTOR_PURPOSE → next()`；③ `ctx.on('tools/execute', ...)` 先注册**直通占位**（T18 换成 `rejectIfTampered`）；④ `ctx.systemPrompt.section({ name: 'dsh-boost', order: 100, text: (c) => c.scope && deps.scope.judgement(keyOf(c.scope)) ? PROTOCOL_TEXT_OR_EMPTY : '', interpolate: false })`——**`text` 必须是函数形式**（宿主 `PromptSection.text: string | ((c: AssembleContext) => string)`，接一个静态字符串就等于对所有会话无条件注入、违反 G3）；provider 是**同步**的，只能读 `judgement` 缓存，不能 await。T17 先用占位常量，T20 换成 `PROTOCOL_TEXT`。注册本身必须在 T17 完成且可断言。`fakeHost` 增加 `callHook(name, args, next)`、`receipts` 数组、`hooked()`、`section(name)` 与 `when` 注册捕获——瀑布钩子统一按"先参数数组、后 next"调用。
+`registerHooks(ctx, deps)` 从 `src/hooks/post-execute.ts` 导出（T23 会扩展 `deps` 并补全规则），本任务注册四件事：① `ctx.on('tools/post-execute', ...)`，顺序严格为 `canonicalise →（替换决策占位）→ 投影 → 返回 decision`，`exec.agent` 为空时直接 `next()` 并写 `skip:no-scope` 收据；② `ctx.on('llm/stream', ...)`，第一行 `opts?.purpose === SELECTOR_PURPOSE → next()`；③ `ctx.on('tools/execute', ...)` 先注册**直通占位**（T18 换成 `rejectIfTampered`）；④ `ctx.systemPrompt.section({ name: 'dsh-boost', order: 100, text: (c) => (c.scope && deps.scope.judgement(agentKeyOf(c.scope)) ? PLACEHOLDER_TEXT : '')
+// PLACEHOLDER_TEXT = ''（T17 先占位，T20 换成 PROTOCOL_TEXT）；agentKeyOf(c) 读 (c as AgentLike).session.header.id, interpolate: false })`——**`text` 必须是函数形式**（宿主 `PromptSection.text: string | ((c: AssembleContext) => string)`，接一个静态字符串就等于对所有会话无条件注入、违反 G3）；provider 是**同步**的，只能读 `judgement` 缓存，不能 await。T17 先用占位常量，T20 换成 `PROTOCOL_TEXT`。注册本身必须在 T17 完成且可断言。`fakeHost` 增加 `callHook(name, args, next)`、`receipts` 数组、`hooked()`、`section(name)` 与 `when` 注册捕获——瀑布钩子统一按"先参数数组、后 next"调用。
 
 - [ ] **Step 4: 运行确认通过**
 
@@ -1993,7 +1995,7 @@ git push origin main   # remote 由 T1 布置（内网镜像）；GitHub 作为�
 - Produces: `export class PendingQueue { set(sessionId: string, e: PendingEntry): void; take(sessionId: string): PendingEntry | undefined; peek(sessionId: string): PendingEntry | undefined; clear(sessionId: string): void }`——**按 sessionId 隔离**，`llm/stream` 只有 sessionId，跨会话串号会把 A 的待办合成给 B
 - Produces: `export function callIdFor(sessionId: string, turn: string | number, candidateId: string): string`——`sha256(sessionId + '/' + turn + '/' + candidateId).slice(0, 16)`，确定性、可重放；**必须带 turn**，否则同一会话重复候选会撞 id，宿主按 callId 关联 tool 结果
 - Produces: `export async function* synthesizeTurn(e: PendingEntry, usage?: TokenUsage): AsyncIterable<StreamChunk>`——**必须逐个 yield 宿主 chunk，不是返回一个对象**
-- Produces: `export interface HookDeps { config: BoostConfig; scope: ScopeStore; receipts: ReceiptStore; queue: PendingQueue; budget: StepBudget; usage: UsageLedger; clock: TurnClock; plans: Map<string, Plan>; spill: SpillLike | undefined; formatFooter: typeof formatSpillNotice; estimateText: (t: string) => number; projection: (text: string, family: ToolFamily) => ProjectionResult; resolveSession: (sessionId: string) => string | undefined }`
+- Produces: `export interface HookDeps { config: BoostConfig; scope: ScopeStore; receipts: ReceiptStore; queue?: PendingQueue; budget?: StepBudget; usage?: UsageLedger; clock?: TurnClock; plans?: Map<string, Plan>; spill?: SpillLike; formatFooter?: (o: { kind: 'exact'; count: number }, ref: SpillHandle) => string; estimateText?: (t: string) => number; projection?: (text: string, family: ToolFamily) => { content: string; outcome: ProjectionOutcome }; resolveSession: (sessionId: string) => string | undefined }`
 - Produces: `export function registerHooks(ctx: PluginContext, deps: HookDeps): void`
 
 **合成的 chunk 序列（照参照实现 `ref-harnessmm/dsh-plugin/harnessmm-desktop/lib/index.js:669-721`，不是自创）**
@@ -2168,7 +2170,12 @@ Expected: 全部 PASS
 
 `synthesizeTurn` 里的 reasoning 文案抽成 `substitutionThinking(e)`。
 
-- [ ] **Step 6: 提交**
+- [ ] **Step 6: 全量测试**
+
+Run: `npm test`
+Expected: 全部 PASS
+
+**Step 7: 提交**
 
 ```bash
 git add src/hooks/ test/hooks.test.ts test/fakes/host.ts
@@ -2190,7 +2197,19 @@ git commit -m "feat: wire pending dispatch and synthesized tool-call stream"
 // test/integration/substitute.test.ts
 import test from 'node:test'
 import assert from 'node:assert/strict'
-// 五条：成功替换 / 守卫失败回退 / 多候选选择 / 准入不过 / 预算耗尽
+import { fakeHost } from '../fakes/host.ts'
+import { PendingQueue } from '../../src/hooks/pending.ts'
+import { ReceiptStore } from '../../src/receipts/store.ts'
+
+// runPath/collect 是本文件的夹具，不是被测代码——Step 3 把它们写完整
+async function runPath(opts: { path: string; guardFails?: boolean; candidates?: string[]; selectorChoice?: string; threshold?: number; prefillBudget?: number }) {
+  const host = fakeHost()
+  const receipts: any[] = []
+  const queue = new PendingQueue()
+  // …按 opts 装配 scope / budget / selector / spill，注册 registerHooks，驱动一次 llm/stream
+  return { host, receipts, queue }
+}
+async function collect(iter: AsyncIterable<any>) { const out: any[] = []; for await (const c of iter) out.push(c); return out }
 test('成功替换：合成回合出现 tool-call，收据含 saved_input_tokens', async () => {
   const { host, receipts } = await runPath({ path: 'happy' })
   const chunks = collect(await host.lastStream())
@@ -2264,15 +2283,23 @@ git commit -m "test: end-to-end substitution paths"
 - [ ] **Step 1: 写失败测试**
 
 ```ts
+import test from 'node:test'
+import assert from 'node:assert/strict'
 import { isPosixOnly } from '../src/host/platform.ts'
+import { familyOf } from '../src/tools/family.ts'
+import { resolveBoostRoot } from '../src/host/root.ts'
+import { loadOptional } from '../src/host/loader.ts'
+import { recordRetrieval } from '../src/admission/retrieval.ts'
+import { runBoost } from '../src/tools/boost.ts'
 
 test('Windows 上禁替换但投影仍可用', () => {
   const saved = process.platform
   Object.defineProperty(process, 'platform', { value: 'win32', configurable: true })
   try {
     assert.equal(isPosixOnly(), false)
-    // 禁用替换的判定由 boost status 的 degraded 暴露，断言稳定码
-    assert.ok(degradedCodes().includes('ERR_HOST_PLATFORM_UNSUPPORTED'))
+    // 禁用替换的判定由 boost status 的 degraded 暴露，断言稳定码（不另造 degradedCodes 辅助）
+    const status = await runBoost({ cmd: 'status' })
+    assert.ok((status.data as any).degraded.includes('ERR_HOST_PLATFORM_UNSUPPORTED'))
   } finally {
     Object.defineProperty(process, 'platform', { value: saved, configurable: true })
   }
