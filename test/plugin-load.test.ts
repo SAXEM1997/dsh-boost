@@ -2,6 +2,7 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import { readFile } from 'node:fs/promises'
 import * as plugin from '../src/index.ts'
+import type { PluginContext } from '../src/types.ts'
 
 test('插件导出 cordis 需要的元数据', () => {
   assert.equal(plugin.name, 'dsh-boost')
@@ -22,4 +23,20 @@ test('patch 行的 id/name 与 plugin.name、包名三者一致（R50）', async
   assert.equal(pkg.name, plugin.name)
   assert.equal(rowId, plugin.name)
   assert.equal(rowName, plugin.name)
+})
+
+test('apply 用假 ctx 调用不抛错，并记录解析后的步数预算（T1 补测）', () => {
+  const messages: string[] = []
+  const ctx = {
+    logger: {
+      info: (msg: string) => messages.push(msg),
+      warn: () => {},
+    },
+  } as unknown as PluginContext
+
+  assert.doesNotThrow(() => plugin.apply(ctx, { stepsPerTurn: 4 }))
+  assert.ok(
+    messages.some((msg) => msg.includes('stepsPerTurn=4')),
+    `missing resolved step budget in logs: ${JSON.stringify(messages)}`,
+  )
 })

@@ -7,6 +7,7 @@
  *
  * @module dsh-boost
  */
+import { resolveConfig } from './config.js'
 import type { PluginContext } from './types.js'
 
 export const name = 'dsh-boost'
@@ -14,5 +15,8 @@ export const name = 'dsh-boost'
 export const inject = ['tools', 'llm', 'systemPrompt'] as const
 
 export function apply(ctx: PluginContext, config: unknown): void {
-  ctx.logger?.info?.('dsh-boost loaded')
+  const cfg = resolveConfig(config)
+  ctx.logger?.info?.(
+    `dsh-boost loaded (stepsPerTurn=${cfg.stepsPerTurn}, horizonSteps=${cfg.horizonSteps})`,
+  )
 }
