@@ -16,15 +16,15 @@
  * and `$single` are whole-text forms, so they are unique by construction;
  * `$single` additionally refuses a value that spans a line.
  *
- * A line boundary is LF, CR, CRLF, U+2028 or U+2029, so a duplicate cannot hide
- * behind a separator convention (UIs render U+2028/U+2029 as breaks even though
- * they are not `\n`). Identifier projection is a linear per-line walk rather
- * than one cross-line regex: receipts are tool output and attacker-influenced,
- * and a cross-line `\s*` re-consumes the remaining whitespace at every line
- * start, which is quadratic on a blank-line-heavy receipt. The closing quote
- * must not be escaped: a captured value ending in an odd run of backslashes
- * means the quote that ended the match was itself escaped, so the line abstains
- * instead of binding a truncated prefix (`C:\x` ends in `x` and still binds).
+ * A line boundary is LF, CR, CRLF, NEL (U+0085), U+2028 or U+2029, so a
+ * duplicate cannot hide behind one of these common separator conventions.
+ * Identifier projection scans each line once with an anchored, non-global regex
+ * instead of running one cross-line global regex: the latter re-consumes the
+ * remaining whitespace at every line start, which is quadratic on a
+ * blank-line-heavy receipt. The identifier form's closing quote must not be
+ * escaped: a captured value ending in an odd run of backslashes means the quote
+ * that ended the match was itself escaped, so the line abstains instead of
+ * binding a truncated prefix (`C:\x` ends in `x` and still binds).
  *
  * Two scoping consequences are deliberate: a second assignment later on the
  * same line is not counted (`name: "a" name: "b"` binds `a`), and a line whose
@@ -101,10 +101,11 @@ const SCALAR = /^[A-Za-z0-9_+@.:/-]+$/
 const SINGLE = /^\['([^']*)'\]$/
 
 /**
- * Line boundaries the identifier scan recognises: LF, CR, CRLF (split twice,
- * harmlessly) and the Unicode line/paragraph separators U+2028/U+2029.
+ * Line boundaries the scan recognises: LF, CR, CRLF (split twice,
+ * harmlessly), NEL (U+0085) and the Unicode line/paragraph separators
+ * U+2028/U+2029.
  */
-const LINE_TERMINATOR = /[\r\n\u2028\u2029]/
+const LINE_TERMINATOR = /[\r\n\u0085\u2028\u2029]/
 
 /**
  * Whether the quote that ended the capture was itself escaped.
@@ -124,10 +125,11 @@ function escapedClosingQuote(value: string): boolean {
 /**
  * The identifier form on one line: `field: "value"` or `field="value"`.
  *
- * Applied line by line: the split has removed every line terminator, so the
- * anchored `\s*` can only consume horizontal whitespace and cannot re-consume
- * the rest of the receipt at each line start. That keeps the scan linear on a
- * whitespace-heavy receipt, where one cross-line global regex is quadratic.
+ * Applied line by line: the split has removed every line terminator, so an
+ * anchored `\s*` cannot run into the next line's whitespace (it may still match
+ * in-line `\v`/`\f`). One anchored, non-global `exec` per line therefore cannot
+ * re-consume the rest of the receipt, which is what made the old cross-line
+ * global regex quadratic on a blank-line-heavy receipt.
  *
  * The value must be non-empty (`+`): an empty projected value is never a useful
  * argument — it would reach a tool as `path: ""` and fail there, after the plan
@@ -147,12 +149,15 @@ function scalarField(text: string): string | undefined {
 }
 
 /**
- * Whole-text single-element string array whose value stays on one line and
- * whose closing single quote is not escaped.
+ * Whole-text single-element string array whose value stays on one line.
+ *
+ * The whole-text anchoring makes the capture the entire interior of the array,
+ * so there is no truncated-prefix case: a backslash is literal text here, and
+ * `['C:\']` binds `C:\` exactly as the spec regex says.
  */
 function singleField(text: string): string | undefined {
   const match = SINGLE.exec(text.trim())
-  if (match === null || LINE_TERMINATOR.test(match[1]) || escapedClosingQuote(match[1])) return undefined
+  if (match === null || LINE_TERMINATOR.test(match[1])) return undefined
   return match[1]
 }
 

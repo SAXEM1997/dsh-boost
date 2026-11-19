@@ -111,12 +111,14 @@ test('$single 要求整段恰为单元素单引号数组', () => {
 test('$single 的值不能跨行（与另外两种形式一致）', () => {
   assert.equal(extractField("['a\nb']", '$single'), undefined)
   assert.equal(extractField("['a\rb']", '$single'), undefined)
+  assert.equal(extractField("['a\u0085b']", '$single'), undefined)
   assert.equal(extractField("['a\u2028b']", '$single'), undefined)
   assert.equal(extractField("['a b']", '$single'), 'a b')
 })
 
-test('$single 结束引号被转义时判歧义', () => {
-  assert.equal(extractField("['a\\']", '$single'), undefined)
+test('$single 内部的反斜杠按字面保留，整段锚定不会截断', () => {
+  assert.equal(extractField("['C:\\']", '$single'), 'C:\\')
+  assert.equal(extractField("['a\\']", '$single'), 'a\\')
   assert.equal(extractField("['a\\\\']", '$single'), 'a\\\\')
 })
 
@@ -141,10 +143,12 @@ test('结束引号被转义时不返回截断前缀，Windows 路径仍绑定', 
   )
 })
 
-test('U+2028 / U+2029 也是行分隔：重复赋值判歧义', () => {
+test('U+2028 / U+2029 / NEL 也是行分隔：重复赋值判歧义', () => {
   assert.equal(extractField('name: "a"\u2028name: "b"', 'name'), undefined)
   assert.equal(extractField('name: "a"\u2029name: "b"', 'name'), undefined)
+  assert.equal(extractField('name: "a"\u0085name: "b"', 'name'), undefined)
   assert.equal(extractField('a\u2028name: "x"', 'name'), 'x')
+  assert.equal(extractField('a\u0085name: "x"', 'name'), 'x')
 })
 
 test('空白密集回执线性扫描：结果正确且快速返回', () => {
