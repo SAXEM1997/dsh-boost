@@ -6,16 +6,31 @@
  * last so a test can replace exactly one member (for example
  * `fakeHost({ receipts: myReceipts })` or a canned `llm`).
  *
- * Behaviour that no test exercises yet is the smallest honest implementation:
- * `nextCalls` and `synthesized` are counters left at 0, `receipts` is an empty
- * array, and `llm.stream` yields an empty stream. `tokenMeter` is empty because
- * no estimator is installed; a test that needs one overrides it.
+ * The hook surface follows the real waterfall contract: `on(name, handler)`
+ * records handlers, `hooked()` lists the mounted names, and
+ * `callHook(name, args, next)` runs them in registration order. Every handler
+ * receives the **same original args**, followed by a **zero-argument** `next()`
+ * that resumes the chain; only the return value is transformable. The terminal
+ * `next()` increments `nextCalls`, so a pass-through is observable and a hook
+ * that synthesizes a turn (returns its own iterable without calling `next()`)
+ * leaves `nextCalls` at 0.
  *
- * The hook surface is real: `on(name, handler)` records waterfall handlers,
- * `hooked()` lists the mounted names, and `callHook(name, args, next)` runs
- * them in registration order, passing each the previous `next`. Prompt
- * sections are recorded too, and `hooked()` reports `'systemPrompt'` once one
- * is registered, so a test can assert every mount point with one call.
+ * `stream(sessionId, options?)` is the driver a test uses to simulate a real
+ * model request: it runs the registered `llm/stream` waterfall with
+ * `{ ...options, sessionId }` and records the resulting iterable for
+ * `lastStream()`. When the waterfall never calls `next()`, the turn was
+ * synthesized, so the fake increments `synthesized` itself — a test never has
+ * to bump that counter by hand.
+ *
+ * Behaviour that no test exercises yet is the smallest honest implementation:
+ * `receipts` is an empty array, `llm.stream` yields an empty stream, and
+ * `tokenMeter` is empty because no estimator is installed (a test that needs
+ * one overrides it).
+ *
+ * Prompt sections are recorded too, and `hooked()` reports `'systemPrompt'`
+ * once one is registered, so a test can assert every mount point with one
+ * call. A duplicate section name throws, mirroring the real host, and
+ * `systemPrompt.section` returns a disposer.
  *
  * @module dsh-boost/test/fakes/host
  */
@@ -36,6 +51,14 @@ type Section = {
   interpolate?: boolean
 }
 
+/** The real spill backend's request shape; `owner` and `source` are required. */
+type SaveTextInput = {
+  owner?: { sessionId?: string }
+  source?: { kind?: string; toolName?: string; callId?: string; label?: string }
+  suggestedName: string
+  content: string
+}
+
 /** A stream that yields nothing; tests replace `llm` when they need chunks. */
 async function* emptyStream(): AsyncGenerator<StreamChunk> {
   // Intentionally empty: no test at this layer needs real model output.
@@ -46,6 +69,7 @@ export function fakeHost(overrides: Record<string, unknown> = {}): any {
   const registrations: Registered[] = []
   const hooks = new Map<string, ((...args: any[]) => unknown)[]>()
   const sections = new Map<string, Section>()
+  let lastSection: Section | undefined
   let last: AsyncIterable<StreamChunk> | undefined
 
   const host: any = {
@@ -61,22 +85,36 @@ export function fakeHost(overrides: Record<string, unknown> = {}): any {
     // --- host services ---
     llm: {
       stream(_options: GenerateOptions): AsyncIterable<StreamChunk> {
-        const iterable = emptyStream()
-        last = iterable
-        return iterable
+        return emptyStream()
       },
     },
     systemPrompt: {
-      section(section: Section): void {
+      section(section: Section): () => void {
+        if (sections.has(section.name)) {
+          throw new Error(`fakeHost: system prompt section "${section.name}" is already registered`)
+        }
         sections.set(section.name, section)
+        lastSection = section
+        return () => {
+          if (sections.get(section.name) !== section) return
+          sections.delete(section.name)
+          // `lastSection` tracks the last *registration*, not Map insertion
+          // order, so disposing the newest section falls back to the previous.
+          if (lastSection === section) lastSection = [...sections.values()].at(-1)
+        }
       },
     },
     tokenMeter: {},
     spillStore: {
-      async saveText(input: {
-        suggestedName: string
-        content: string
-      }): Promise<{ locator: string; bytes: number; retrievalHint: string }> {
+      saved: [] as SaveTextInput[],
+      async saveText(input: SaveTextInput): Promise<{
+        locator: string
+        bytes: number
+        retrievalHint: string
+      }> {
+        // Record the full request, including owner/source, so a caller that
+        // omits the fields the real backend needs is observable in a test.
+        host.spillStore.saved.push(input)
         return {
           locator: `/spill/${input.suggestedName}`,
           bytes: Buffer.byteLength(input.content, 'utf8'),
@@ -85,7 +123,7 @@ export function fakeHost(overrides: Record<string, unknown> = {}): any {
       },
     },
 
-    // --- hook surface ---
+    // --- hook surface (real waterfall contract: fixed args, zero-arg next) ---
     on(name: string, handler: (...args: any[]) => unknown): void {
       const list = hooks.get(name) ?? []
       list.push(handler)
@@ -94,15 +132,19 @@ export function fakeHost(overrides: Record<string, unknown> = {}): any {
     async callHook(
       name: string,
       args: readonly unknown[],
-      next: (...nextArgs: unknown[]) => unknown,
+      next: () => unknown,
     ): Promise<unknown> {
       const handlers = hooks.get(name) ?? []
-      const run = async (index: number, current: readonly unknown[]): Promise<unknown> => {
+      const run = async (index: number): Promise<unknown> => {
         const handler = handlers[index]
-        if (handler === undefined) return next(...current)
-        return handler(...current, (...nextArgs: unknown[]) => run(index + 1, nextArgs))
+        if (handler === undefined) {
+          // Scope note: counts every waterfall pass-through, for any event.
+          host.nextCalls += 1
+          return next()
+        }
+        return handler(...args, () => run(index + 1))
       }
-      return run(0, args)
+      return run(0)
     },
     hooked(): string[] {
       const names = [...hooks.keys()]
@@ -110,7 +152,7 @@ export function fakeHost(overrides: Record<string, unknown> = {}): any {
       return names
     },
     section(name?: string): Section | undefined {
-      return name === undefined ? [...sections.values()].at(-1) : sections.get(name)
+      return name === undefined ? lastSection : sections.get(name)
     },
 
     // --- counters and receipts later tasks fill in ---
@@ -118,19 +160,42 @@ export function fakeHost(overrides: Record<string, unknown> = {}): any {
     nextCalls: 0,
     synthesized: 0,
 
-    // --- stream helpers ---
+    // --- stream driver: runs the llm/stream waterfall like the real host ---
     stream(sessionId: string, options: Partial<GenerateOptions> = {}): AsyncIterable<StreamChunk> {
-      return host.llm.stream({ ...options, sessionId } as GenerateOptions)
+      const request = { ...options, sessionId } as GenerateOptions
+      let passedThrough = false
+      const result = host.callHook('llm/stream', [request], () => {
+        passedThrough = true
+        return host.llm.stream(request)
+      })
+      // A hook that returns without calling `next()` substituted its own
+      // turn, so the fake owns the count rather than each test bumping it.
+      void result.then(
+        () => {
+          if (!passedThrough) host.synthesized += 1
+        },
+        () => {},
+      )
+      const iterable = (async function* () {
+        yield* (await result) as AsyncIterable<StreamChunk>
+      })()
+      last = iterable
+      return iterable
     },
     lastStream(): AsyncIterable<StreamChunk> | undefined {
       return last
     },
 
     // --- visibility probe over the registered definitions ---
+    registered(name: string): boolean {
+      return registrations.some(entry => (entry.def as { name?: unknown } | null)?.name === name)
+    },
     async visible(name: string, agent: AgentLike): Promise<boolean> {
       const registration = registrations.find(
         entry => (entry.def as { name?: unknown } | null)?.name === name,
       )
+      // Unregistered is not the same as "registered but invisible"; use
+      // `registered(name)` when a test needs to tell the two apart.
       if (registration === undefined) return false
       if (registration.when === undefined) return true
       return Boolean(await registration.when({ agent, signal: new AbortController().signal }))

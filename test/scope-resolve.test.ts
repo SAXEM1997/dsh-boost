@@ -22,6 +22,42 @@ test('cwd 与注册 path 必须完全相等：/w/a 不匹配 /w/ab', () => {
   assert.equal(workspaceIdOf({ session: { header: { cwd: '/w/ab' } } }, registry), undefined)
 })
 
+test('尾斜杠不做归一化：/w/a 不匹配 /w/a/', () => {
+  const trailing = { list: () => [{ id: 'ws-uuid-1', path: '/w/a/' }] }
+  assert.equal(workspaceIdOf({ session: { header: { cwd: '/w/a' } } }, trailing), undefined)
+  assert.equal(workspaceIdOf({ session: { header: { cwd: '/w/a/' } } }, registry), undefined)
+})
+
+test('注册路径重复时取第一个匹配', () => {
+  const duplicate = {
+    list: () => [
+      { id: 'first', path: '/w/a' },
+      { id: 'second', path: '/w/a' },
+    ],
+  }
+  assert.equal(workspaceIdOf({ session: { header: { cwd: '/w/a' } } }, duplicate), 'first')
+})
+
+test('非字符串 cwd 不参与匹配，即使注册表里是同一个非字符串 path', () => {
+  const numeric = { list: () => [{ id: 'numeric', path: 42 }] as any }
+  assert.equal(workspaceIdOf({ session: { header: { cwd: 42 as any } } }, numeric), undefined)
+})
+
+test('workspaceIdOf 对非数组 / 抛错的 list() 也保持全域、不抛错', () => {
+  const agent = { session: { header: { cwd: '/w/a' } } }
+  assert.equal(workspaceIdOf(agent, { list: () => undefined as any }), undefined)
+  assert.equal(
+    workspaceIdOf(agent, {
+      list: () => {
+        throw new Error('registry down')
+      },
+    }),
+    undefined,
+  )
+  const malformed = { list: () => [null, { id: 'ok', path: '/w/a' }] as any }
+  assert.equal(workspaceIdOf(agent, malformed), 'ok')
+})
+
 test('缺 session / 缺 cwd 时没有 workspace id', () => {
   assert.equal(workspaceIdOf({}, registry), undefined)
   assert.equal(workspaceIdOf({ session: {} }, registry), undefined)
@@ -75,6 +111,18 @@ test('不可见的结果也写入缓存，而不是留下旧值（派发 R2）',
   assert.equal(s.judgement('s1', true), false)
 })
 
+test('降级读按 false 缓存，但下一次解析自愈（派发 Minor）', async () => {
+  const dir = await scopeDir()
+  const s = new ScopeStore(dir) // 没有 scope.json：read() 走降级分支
+  const agent = { session: { header: { id: 's1', cwd: '/w/a' } } }
+  assert.equal(await resolveVisible(s, agent, registry), false)
+  assert.equal(s.judgement('s1', true), false)
+
+  await s.write(d => ({ ...d, mode: 'global' }), 0)
+  assert.equal(await resolveVisible(s, agent, registry), true)
+  assert.equal(s.judgement('s1'), true)
+})
+
 test('无 session.header.id 时解析可见性但不写缓存（派发 R3）', async () => {
   const dir = await scopeDir()
   const s = new ScopeStore(dir)
@@ -124,12 +172,28 @@ test('fakeHost 记录 register 的 def 与 when，resolve() 返回已注册定�
   assert.deepEqual(host.resolve(), [def])
 })
 
-test('fakeHost().visible 按注册的 when 判定，未注册时不可见', async () => {
+test('fakeHost().visible 按注册的 when 判定；registered() 区分未注册与不可见', async () => {
   const host = fakeHost()
   const agent = { session: { header: { id: 's1', cwd: '/w/a' } } }
+  assert.equal(host.registered('read'), false)
   assert.equal(await host.visible('read', agent), false)
-  host.register({ name: 'read' }, { when: (c: { agent: typeof agent }) => c.agent === agent })
+
+  host.register(
+    { name: 'read' },
+    {
+      when: (c: { agent: typeof agent; signal: AbortSignal }) =>
+        c.agent === agent && c.signal instanceof AbortSignal,
+    },
+  )
+  assert.equal(host.registered('read'), true)
   assert.equal(await host.visible('read', agent), true)
+  assert.equal(
+    await host.visible('read', { session: { header: { id: 'other', cwd: '/w/b' } } }),
+    false,
+  )
+
+  host.register({ name: 'always' })
+  assert.equal(await host.visible('always', agent), true)
 })
 
 test('fakeHost 暴露后续任务依赖的成员，未用到的保持最小诚实实现', async () => {
@@ -142,6 +206,9 @@ test('fakeHost 暴露后续任务依赖的成员，未用到的保持最小诚�
   assert.ok('tokenMeter' in host)
   assert.equal(typeof host.spillStore.saveText, 'function')
   assert.equal(typeof host.callHook, 'function')
+  assert.equal(typeof host.on, 'function')
+  assert.equal(typeof host.registered, 'function')
+  assert.deepEqual(host.spillStore.saved, [])
   assert.deepEqual(host.receipts, [])
   assert.deepEqual(host.hooked(), [])
   assert.equal(host.section('missing'), undefined)
@@ -152,9 +219,12 @@ test('fakeHost 暴露后续任务依赖的成员，未用到的保持最小诚�
   const chunks = host.stream('s1', {})
   assert.equal(typeof chunks[Symbol.asyncIterator], 'function')
   assert.equal(host.lastStream(), chunks)
+  // 没有监听器时直通 llm.stream：终态 next 计一次，且不算合成回合。
+  assert.equal(host.nextCalls, 1)
+  assert.equal(host.synthesized, 0)
 })
 
-test('fakeHost 的 section/hooked 记录 systemPrompt 挂载点', () => {
+test('fakeHost 的 section 拒绝重名、返回 disposer，section() 跟踪最后一次注册', () => {
   const host = fakeHost()
   const section = {
     name: 'dsh-boost',
@@ -162,26 +232,107 @@ test('fakeHost 的 section/hooked 记录 systemPrompt 挂载点', () => {
     text: (c: any) => String(c ?? ''),
     interpolate: false,
   }
-  host.systemPrompt.section(section)
+  const dispose = host.systemPrompt.section(section)
   assert.equal(host.section('dsh-boost'), section)
   assert.equal(host.section(), section)
   assert.deepEqual(host.hooked(), ['systemPrompt'])
+  assert.throws(() => host.systemPrompt.section({ ...section }), /already registered/)
+
+  const second = { name: 'second', order: 101, text: () => '' }
+  const disposeSecond = host.systemPrompt.section(second)
+  assert.equal(host.section(), second)
+  disposeSecond()
+  assert.equal(host.section(), section)
+  assert.equal(host.section('second'), undefined)
+  dispose()
+  assert.equal(host.section(), undefined)
+  assert.deepEqual(host.hooked(), [])
 })
 
-test('fakeHost 的 callHook 按注册顺序串接瀑布，最后落到 next', async () => {
+test('fakeHost 的 callHook 遵守真实瀑布：参数固定、next() 无参、返回值可变换', async () => {
   const host = fakeHost()
   const seen: string[] = []
   host.on('tools/post-execute', async (args: any, next: any) => {
     seen.push('first')
-    return next(args)
+    const downstream = await next()
+    return { ...downstream, wrapped: true }
   })
   host.on('tools/post-execute', async (args: any, next: any) => {
     seen.push('second')
-    return next(args)
+    // 后一个监听器拿到的是原始事件参数，不是 undefined。
+    assert.deepEqual(args, { name: 'read' })
+    return next()
   })
 
-  const out = await host.callHook('tools/post-execute', [{ name: 'read' }], async () => 'NEXT')
-  assert.equal(out, 'NEXT')
+  const out = await host.callHook(
+    'tools/post-execute',
+    [{ name: 'read' }],
+    async () => ({ kind: 'accept' }),
+  )
+  assert.deepEqual(out, { kind: 'accept', wrapped: true })
   assert.deepEqual(seen, ['first', 'second'])
+  assert.equal(host.nextCalls, 1)
   assert.deepEqual(host.hooked(), ['tools/post-execute'])
+})
+
+test('fakeHost().stream 走 llm/stream 瀑布，不调 next 的监听器算合成回合并计数', async () => {
+  const host = fakeHost()
+  const canned = (async function* () {
+    yield { type: 'tool-call-delta', name: 'read', argumentsDelta: '{"path":"/a"}' }
+  })()
+  let request: any
+  host.on('llm/stream', (options: any) => {
+    request = options
+    return canned
+  })
+
+  const chunks: any[] = []
+  for await (const chunk of host.stream('s1', { messages: [] })) chunks.push(chunk)
+
+  // 驱动器把 sessionId 合进 options，监听器拿到的是完整请求。
+  assert.deepEqual(request, { messages: [], sessionId: 's1' })
+  // lastStream() 看到的是 hook 返回的合成回合，不是空流。
+  assert.deepEqual(chunks, [
+    { type: 'tool-call-delta', name: 'read', argumentsDelta: '{"path":"/a"}' },
+  ])
+  assert.equal(host.nextCalls, 0)
+  assert.equal(host.synthesized, 1)
+})
+
+test('fakeHost().stream 无监听器时直通 llm.stream，next 计一次、不记合成', async () => {
+  const host = fakeHost()
+  const chunks: any[] = []
+  for await (const chunk of host.stream('s1')) chunks.push(chunk)
+  assert.deepEqual(chunks, [])
+  assert.equal(host.nextCalls, 1)
+  assert.equal(host.synthesized, 0)
+})
+
+test('fakeHost().stream 有监听器但调 next() 时直通，不记合成', async () => {
+  const host = fakeHost()
+  let seen = 0
+  host.on('llm/stream', (_options: any, next: () => any) => {
+    seen += 1
+    return next()
+  })
+  const chunks: any[] = []
+  for await (const chunk of host.stream('s1')) chunks.push(chunk)
+  assert.equal(seen, 1)
+  assert.deepEqual(chunks, [])
+  assert.equal(host.nextCalls, 1)
+  assert.equal(host.synthesized, 0)
+})
+
+test('fakeHost().spillStore.saveText 记录 owner/source 并返回真实字节数', async () => {
+  const host = fakeHost()
+  const input = {
+    owner: { sessionId: 's1' },
+    source: { kind: 'tool', toolName: 'read', callId: 'call-1', label: 'read /a' },
+    suggestedName: 'read.txt',
+    content: 'héllo',
+  }
+  const ref = await host.spillStore.saveText(input)
+  assert.deepEqual(host.spillStore.saved, [input])
+  assert.equal(ref.bytes, Buffer.byteLength('héllo', 'utf8'))
+  assert.match(ref.locator, /\/spill\/read\.txt$/)
 })

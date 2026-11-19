@@ -10,7 +10,10 @@
  *
  * Everything is fail-closed. No agent, no session, no cwd, no registry, no
  * matching entry, a throwing `list()`, or a malformed list all mean "no
- * workspace id", and `isVisible` treats that as invisible.
+ * workspace id", and `isVisible` treats that as invisible. `workspaceIdOf` is
+ * total on purpose: it is the synchronous accessor a later pre-warm path will
+ * call directly, so a broken registry degrades to `undefined` here instead of
+ * relying on `resolveVisible`'s catch.
  *
  * ## Why `resolveVisible` writes the cache
  *
@@ -59,17 +62,25 @@ function agentKeyOf(agent: unknown): string | undefined {
  * Resolve the host workspace UUID for an agent's cwd.
  *
  * The cwd is matched against `registry.list()` by exact `path` equality, so
- * `/w/a` does not match a workspace at `/w/ab`. Any missing link in the chain
- * — no agent, no session, no cwd, no registry, no match — yields `undefined`,
- * which `isVisible` treats as invisible.
+ * `/w/a` does not match a workspace at `/w/ab` (or at `/w/a/`). Any missing or
+ * malformed link in the chain — no agent, no session, a non-string cwd, no
+ * registry, a `list()` that is not an array, throws, or contains non-object
+ * entries — yields `undefined`, which `isVisible` treats as invisible. This
+ * function never throws, even when called outside `resolveVisible`.
  */
 export function workspaceIdOf(
   agent: AgentWithCwd | undefined,
   registry: WorkspaceRegistry | undefined,
 ): string | undefined {
   const cwd = agent?.session?.header?.cwd
-  if (cwd === undefined) return undefined
-  return registry?.list().find(workspace => workspace.path === cwd)?.id
+  if (typeof cwd !== 'string') return undefined
+  try {
+    const workspaces = registry?.list()
+    if (!Array.isArray(workspaces)) return undefined
+    return workspaces.find(workspace => workspace?.path === cwd)?.id
+  } catch {
+    return undefined
+  }
 }
 
 /**
@@ -80,6 +91,12 @@ export function workspaceIdOf(
  * all resolve to `false`. When the agent has a session id the result (including
  * a failure's `false`) is written with `store.remember` before returning, so a
  * subsequent synchronous `judgement(key)` sees the same answer.
+ *
+ * A degraded store read (missing, unreadable, corrupt or newer-versioned
+ * `scope.json`) is a *definitive* `false` for this resolution, not an unknown:
+ * it is cached like any other judgement. It is not sticky — the next
+ * `resolveVisible` call re-reads the store and overwrites the same key, so a
+ * repaired scope document self-heals the cache on the following resolution.
  */
 export async function resolveVisible(
   store: ScopeStore,
