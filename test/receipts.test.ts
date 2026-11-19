@@ -206,18 +206,42 @@ test('只有半行的分片先截为空再追加', async () => {
   assert.equal(await s.count('a'), 1)
 })
 
-test('拒绝含路径分隔符或 .. 的 sessionId，不写出 receipts/', async () => {
+test('sessionId 编码成单个安全分片名，收据体保留原始 id', async () => {
   const root = await freshRoot()
   const s = new ReceiptStore(root)
-  await assert.rejects(s.append(rec('../escape')), /invalid sessionId/)
-  await assert.rejects(s.append(rec('nested/name')), /invalid sessionId/)
-  await assert.rejects(s.count('../escape'), /invalid sessionId/)
-  await assert.rejects(async () => {
-    for await (const _ of s.scan('../escape')) {
-      void _
-    }
-  }, /invalid sessionId/)
+  await s.append(rec('../escape'))
+  await s.append(rec('team/2026'))
+  await s.append(rec('a..b'))
+
+  // 编码后的文件名都落在 receipts/ 内；原始 id 不会变成路径
+  await stat(join(root, 'receipts', '%2E%2E%2Fescape.jsonl'))
+  await stat(join(root, 'receipts', 'team%2F2026.jsonl'))
+  await stat(join(root, 'receipts', 'a%2E%2Eb.jsonl'))
   await assert.rejects(stat(join(root, 'escape.jsonl')))
+  assert.equal(s.failures(), 0)
+  assert.equal(s.stopped(), false)
+
+  // count/scan 用原始 id 寻址
+  assert.equal(await s.count('../escape'), 1)
+  assert.equal(await s.count('team/2026'), 1)
+  assert.equal(await s.count('a..b'), 1)
+  const rows: any[] = []
+  for await (const r of s.scan('team/2026')) rows.push(r)
+  assert.equal(rows.length, 1)
+  assert.equal(rows[0].sessionId, 'team/2026')
+
+  // 收据体里的 sessionId 是原值，hash 也覆盖原值
+  const line = JSON.parse((await readFile(join(root, 'receipts', '%2E%2E%2Fescape.jsonl'), 'utf8')).trim())
+  assert.equal(line.sessionId, '../escape')
+  assert.equal(
+    line.receipt_hash,
+    receiptHash({ sessionId: '../escape', turn: 1, stepId: 'A', tool: 'read', args: {} }),
+  )
+
+  // scan() 无参按分片读回全部三条，id 来自收据体
+  const all: any[] = []
+  for await (const r of s.scan()) all.push(r)
+  assert.deepEqual(all.map((r) => r.sessionId).sort(), ['../escape', 'a..b', 'team/2026'])
 })
 
 test('.1 分片里的半行同样在读取时丢弃并截断', async () => {

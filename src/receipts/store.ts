@@ -183,15 +183,32 @@ function serialiseReceipt(r: ReceiptInput): string {
 }
 
 /**
- * Reject a session id that could escape `<root>/receipts/`.
+ * Encode a session id as one safe filesystem path segment.
  *
- * The store rejects rather than sanitises: a malformed id is a host bug, and
- * mapping it to a different name would silently merge two sessions' receipts.
+ * Only `[A-Za-z0-9_-]` survives; every other character becomes `%XX` (uppercase
+ * hex, one per UTF-8 byte). The mapping is reversible and keeps `/`, `\`, `:`
+ * and `.` out of the name, so a host-supplied id can never escape
+ * `<root>/receipts/` and always yields one writable shard. The receipt body
+ * keeps the original id; only the file name is encoded.
  */
-function assertSessionId(sessionId: string): void {
-  if (sessionId === '' || sessionId === '.' || sessionId.includes('..') || /[\\/]/.test(sessionId)) {
-    throw new TypeError(`invalid sessionId: ${JSON.stringify(sessionId)}`)
+function encodeSegment(sessionId: string): string {
+  let encoded = ''
+  for (const char of sessionId) {
+    if (/^[A-Za-z0-9_-]$/.test(char)) {
+      encoded += char
+      continue
+    }
+    for (const byte of Buffer.from(char, 'utf8')) {
+      encoded += `%${byte.toString(16).toUpperCase().padStart(2, '0')}`
+    }
   }
+  return encoded
+}
+
+/** Path of a shard from an already-encoded base name (used by scans over the directory). */
+function shardFile(root: string, base: string, rotated: boolean): string {
+  const name = rotated ? `${base}.1.jsonl` : `${base}.jsonl`
+  return join(root, RECEIPTS_DIR, name)
 }
 
 /** `stat(dir).isDirectory()`-equivalent check without recursing into Node's `mkdir` spin. */
@@ -324,19 +341,18 @@ export class ReceiptStore {
   }
 
   /**
-   * Append one receipt. Write failures never reject: they are counted and
-   * buffered. An invalid session id is a caller error, not a write failure, and
-   * rejects with `TypeError`.
+   * Append one receipt. Never rejects: a serialisation or write failure is
+   * counted and buffered. The session id is encoded only for the shard name;
+   * the stored receipt keeps the original id.
    */
-  async append(receipt: ReceiptInput): Promise<void> {
-    assertSessionId(receipt.sessionId)
+  append(receipt: ReceiptInput): Promise<void> {
     const run = this.chain.then(() => this.appendNow(receipt))
     const safe = run.then(
       () => undefined,
       () => undefined,
     )
     this.chain = safe
-    await safe
+    return safe
   }
 
   /** Force the buffered lines and the current shards to disk (called at turn end). */
@@ -362,17 +378,18 @@ export class ReceiptStore {
   /**
    * Yield readable receipts, oldest first: `.1` before the current shard.
    *
-   * With no `sessionId`, every shard under `receipts/` is visited (session ids
-   * sorted for determinism). Unparseable middle lines are skipped; the
+   * The optional `sessionId` is encoded to its shard name; the receipts keep
+   * their original `sessionId`. With no argument, every shard under `receipts/`
+   * is visited (encoded shard names sorted for determinism), and each receipt
+   * supplies its own id from its body. Unparseable middle lines are skipped; the
    * unfinished trailing line is truncated and skipped.
    */
   async *scan(sessionId?: string): AsyncIterable<Receipt> {
-    if (sessionId !== undefined) assertSessionId(sessionId)
     await this.chain
-    const sessionIds = sessionId === undefined ? await this.listSessionIds() : [sessionId]
-    for (const id of sessionIds) {
+    const shards = sessionId === undefined ? await this.listShardNames() : [encodeSegment(sessionId)]
+    for (const base of shards) {
       for (const rotated of [true, false]) {
-        for (const receipt of await readShard(this.shardPath(id, rotated))) {
+        for (const receipt of await readShard(shardFile(this.root, base, rotated))) {
           yield receipt
         }
       }
@@ -519,24 +536,24 @@ export class ReceiptStore {
   }
 
   private shardPath(sessionId: string, rotated: boolean): string {
-    const name = rotated ? `${sessionId}.1.jsonl` : `${sessionId}.jsonl`
-    return join(this.root, RECEIPTS_DIR, name)
+    return shardFile(this.root, encodeSegment(sessionId), rotated)
   }
 
-  private async listSessionIds(): Promise<string[]> {
-    let names: string[]
+  /** Encoded shard base names present under `receipts/`, sorted. */
+  private async listShardNames(): Promise<string[]> {
+    let entries: string[]
     try {
-      names = await readdir(join(this.root, RECEIPTS_DIR))
+      entries = await readdir(join(this.root, RECEIPTS_DIR))
     } catch (error) {
       if (errorCode(error) === 'ENOENT') return []
       throw error
     }
-    const ids = new Set<string>()
-    for (const name of names) {
-      if (name.endsWith(ROTATED_SUFFIX)) ids.add(name.slice(0, -ROTATED_SUFFIX.length))
-      else if (name.endsWith(CURRENT_SUFFIX)) ids.add(name.slice(0, -CURRENT_SUFFIX.length))
+    const names = new Set<string>()
+    for (const name of entries) {
+      if (name.endsWith(ROTATED_SUFFIX)) names.add(name.slice(0, -ROTATED_SUFFIX.length))
+      else if (name.endsWith(CURRENT_SUFFIX)) names.add(name.slice(0, -CURRENT_SUFFIX.length))
     }
-    ids.delete('')
-    return [...ids].sort()
+    names.delete('')
+    return [...names].sort()
   }
 }
