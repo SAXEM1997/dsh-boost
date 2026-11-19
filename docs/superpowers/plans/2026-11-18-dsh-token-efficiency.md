@@ -1310,6 +1310,7 @@ git commit -m "feat: single-label selector with cooperative timeout"
 **Interfaces:**
 - Consumes: `parsePlan`/`isTrivial`（T11）、`bindArgs`（T12）、`evaluateAll`（T13）
 - Produces: `export type Decision = { kind: 'commit'; candidateId: string; args: Record<string, unknown> } | { kind: 'ask-selector'; candidates: Candidate[] } | { kind: 'fallback'; code: string }`
+- 影子语义：`decide(..., { shadow: true })` 时**跳过白名单过滤**（§5.2-5「影子期替换不设白名单，全量记账」）——否则 bash/ssh 的替换潜力在影子期永远记不到账，`shadow-report` 的按族命中率只有三件套。
 - Produces: `export function decide(input: { plan: Plan; stepId: string; receipts: ReadonlyMap<string, CanonicalReceipt>; whitelist: ReadonlySet<string> }): Decision`
 
 - [ ] **Step 1: 写失败测试**
@@ -2070,14 +2071,23 @@ test('pending 按 sessionId 隔离', () => {
 
 test('selector 内部调用直接放行', async () => {
   const { host } = setup()
-  assert.equal(await host.callHook('llm/stream', [{ purpose: SELECTOR_PURPOSE }], async () => 'PASS'), 'PASS')
+  const out = await host.callHook('llm/stream', [{ purpose: SELECTOR_PURPOSE }], async () => 'PASS')
+  assert.equal(host.nextCalls, 1)
+  assert.equal(out, 'PASS')
 })
 
-test('shadow 为真时不合成，写 shadow 收据后放行', async () => {
+test('shadow 为真：post-execute 写 shadow 收据且不入队，llm/stream 照常放行', async () => {
   const { host, queue } = setup({ scope: { read: async () => ({ doc: { ...DEFAULT_SCOPE, mode: 'global', shadow: true } }), judgement: () => true } })
-  queue.set('s1', { callId: 'x', candidateId: 'A', name: 'read', args: {}, createdAt: 0 })
-  assert.equal(host.nextCalls, 0)
-  assert.ok(host.receipts.some((r: any) => r.kind === 'shadow'))
+  // ① post-execute 收到一个 commit 决策：影子期只记收据、不 queue.set
+  await host.callHook('tools/post-execute', [execWithAgent('s1'), { ok: true }], async () => ({ kind: 'accept' }))
+  assert.equal(queue.peek('s1'), undefined)
+  const shadow = host.receipts.find((r: any) => r.kind === 'shadow')
+  assert.ok(shadow && shadow.candidateId && 'admitted' in shadow)
+  // ② llm/stream 看不到 pending ⇒ 必然放行（nextCalls 必须是 1，不是 0）
+  const out: any[] = []
+  for await (const c of host.stream('s1')) out.push(c)
+  assert.equal(host.nextCalls, 1)
+  assert.equal(out.filter((c: any) => c.type === 'tool-call-delta').length, 0)
 })
 
 test('有 pending 时合成且不调 next', async () => {
@@ -2094,7 +2104,9 @@ test('有 pending 时合成且不调 next', async () => {
 
 test('scope 不可见时放行并写 skip:no-scope', async () => {
   const { host } = setup({ scope: { read: async () => ({ doc: DEFAULT_SCOPE }), judgement: () => false } })
-  assert.equal(host.nextCalls, 0)
+  const out: any[] = []
+  for await (const c of host.stream('s1')) out.push(c)
+  assert.equal(host.nextCalls, 1)
   assert.ok(host.receipts.some((r: any) => r.code === 'skip:no-scope'))
 })
 
@@ -2105,8 +2117,9 @@ test('第 9 次替换被预算拦截并写 steps-exhausted', async () => {
   queue.set('s1', { callId: 'x', candidateId: 'I', name: 'read', args: {}, createdAt: 0 })
   const out: any[] = []
   for await (const c of host.stream('s1')) out.push(c)
-  assert.equal(host.nextCalls, 0)
-  assert.equal(out.length, 0)
+  // §5.2-6：图耗尽即回主模型——next 必须被调用，且流里没有合成出来的 tool-call
+  assert.equal(host.nextCalls, 1)
+  assert.equal(out.filter((c: any) => c.type === 'tool-call-delta').length, 0)
   assert.ok(host.receipts.some((r: any) => r.code === 'steps-exhausted'))
 })
 
@@ -2142,7 +2155,7 @@ Expected: FAIL，`Cannot find module '../src/hooks/pending.ts'`
 
 - [ ] **Step 3: 实现接线**
 
-`post-execute`：`next() → canonicalise → invalidate（T22）→ 投影（shadow 或 apply，见下）→ decide → 若 commit：`worthSubstituting`（准入，`overheadTokens = candidates.length > 1 ? 512 : 0`）+ `queue.set(sessionId, { callId: callIdFor(sessionId, turn, candidateId), ... })`；若 fallback：`queue.clear(sessionId)` + 写收据。
+`post-execute`：`next() → canonicalise → invalidate（T22）→ 投影（shadow 或 apply，见下）→ decide → 若 commit 且 `doc.shadow` 为真：写 `{kind:'shadow', decision, candidateId, guards, admitted}` 收据、**不 `queue.set`**；若 commit 且非影子：`worthSubstituting`（准入，`overheadTokens = candidates.length > 1 ? 512 : 0`，`deterministicSingle` 取 `candidates.length === 1`）+ `queue.set(sessionId, { callId: callIdFor(sessionId, turn, candidateId), ... })`；若 fallback：`queue.clear(sessionId)` + 写收据。
 - **计划文本来源**：`llm/stream` 包装里把 `text-delta` 拼成完整 assistant 文本，用 `parsePlan`（T11）解析后按 `sessionId` 存进 `deps.plans`（`HookDeps` 增加 `plans: Map<string, Plan>`）；`post-execute` 按当前步骤序号取 `plan.steps[i]` 传给 `decide`。**没有这一步 `decide` 永远拿不到 plan，替换一次都不会发生。**
 - **投影**：`HookDeps` 增加 `spill` / `formatFooter` / `estimateText` / `projection`；`post-execute` 在 decide 之前调 `projectApply`（apply 模式）或 `projectShadow`（shadow 模式），写 `{kind:'projection', before, after, saved, unit:'raw'}` 收据，并返回 `{kind:'accept', content}`。缺 spill 时只记 `ERR_HOST_NO_SPILL` 不投影。
 `llm/stream` 的钩子**必须同步返回 `AsyncIterable`**（cordis waterfall 是同步的，返回 Promise 会让宿主 `for await` 直接 TypeError、每个请求都失败）。唯一可行形状：
@@ -2154,7 +2167,8 @@ ctx.on('llm/stream', (options, next) => (async function* () {
 })())
 ```
 
-规则按序：① `purpose === SELECTOR_PURPOSE` → 直接 `yield* next()`；② `resolveSession` 拿不到或 scope 不可见 → `yield* next()` + 收据 `skip:no-scope`；③ `scope.shadow` → 写带决策字段的 `{kind:'shadow', decision, candidateId, guards, admitted}` 后 `yield* next()`（**影子期不 queue.set**，否则模型自己的工具调用会撞上 stale pending）；④ 有 pending → 写 `{kind:'substitute'}`、`queue.take(sessionId)`、`yield* synthesizeTurn(entry, usage)`；⑤ **只有在确认要合成之后**才 `budget.take()`，为假则回退并写 `steps-exhausted`；⑥ `receipts.stopped()` 为真 → 直接 `yield* next()`（连续写失败后 fail-closed）。
+规则按序（**所有检查都在写收据与消费 pending 之前**，否则会留下互相矛盾的收据）：① `purpose === SELECTOR_PURPOSE` → `yield* next()`；② `receipts.stopped()` → `yield* next()`（连续写失败后 fail-closed）；③ `resolveSession` 拿不到或 scope 不可见 → `yield* next()` + `skip:no-scope` 收据；④ 无 pending → `yield* next()`；⑤ `budget.take()` 为假 → `yield* next()` + `steps-exhausted` 收据（**回主模型，不是空回合**，§5.2-6「图耗尽即回主模型」）；⑥ 合成：写 `{kind:'substitute'}`、`queue.take(sessionId)`、`yield* synthesizeTurn(entry, usage)`。
+**影子模式分流点不在 llm/stream 而在 post-execute**：`doc.shadow` 为真时 post-execute 写完 `{kind:'shadow', decision, candidateId, guards, admitted}` 收据就结束，**不 `queue.set`**——于是 llm/stream 第④步永远看到空队列、自然 `yield* next()`，既不用在 llm/stream 里分叉，也不会留下 stale pending（用户把 shadow 关掉的瞬间把它合成出去）。
 多候选时先 `await choose({ llm, candidates, receiptText, maxTokens, route })`；abstain 即回退。
 `usage`：遍历 `next()` 返回的流时，遇到 `{type:'usage'}` 按 **`TokenUsage`** 字段映射后再记账——`usage.request({ input: u.inputTokens, cacheRead: u.cacheReadTokens ?? 0, output: u.outputTokens })`（`TokenUsage` 里没有 `input`/`cacheRead`/`output` 这三个名字，直传会得到三个 `undefined`）；替换提交时 `usage.markSubstituted(candidateId)`；下一次请求结束后 `usage.settle()`，用 `receipt_hash` 关联追加一条 `{kind:'substitute-settled', saved_input_tokens, cache_hit_delta}`（收据 append-only，不能原地改）。
 `rejectIfTampered` 在 `tools/execute` 里取 `const s = exec.agent?.session.header.id`，`const e = deps.queue.peek(s)`，比对 `e?.callId !== exec.callId`（**`peek` 的键是 sessionId，不是 callId**；写成 `peek(callId)` 会恒 `undefined`，防篡改静默失效）。拒绝时返回 `ToolExecutionResult` 的失败分支 `{ isError: true, error: { message: 'ERR_BOOST_DISPATCH_REJECTED', info: { code: 'dispatch-rejected' } }, content: [...] }`，并 `queue.clear(s)`。
