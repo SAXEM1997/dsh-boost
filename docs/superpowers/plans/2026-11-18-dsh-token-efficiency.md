@@ -85,6 +85,7 @@ Expected: FAIL，`Cannot find module '../src/index.ts'`
 - [ ] **Step 3: 建骨架**
 
 `package.json` 逐字采用设计稿 §11 的块（含 `version: 0.1.0`、`exports`、`peerDependencies` + `peerDependenciesMeta.optional`、`engines.dsh`、`dsh.bundle.patch`），只补 `"scripts": { "build": "tsc -p tsconfig.json", "test": "node --import tsx --test \"test/**/*.test.ts\"" }` 与 `devDependencies: { typescript, tsx, @types/node }`。**glob 必须加引号**：不加引号时 sh 只展开单层，根目录测试会被漏跑。
+**另需**：`peerDependencies` 与 `devDependencies` 都加上 `@deepseek-ai/dsh-llm`（`declare module` 合并与 T14 的 `GenerateOptions`/`StreamChunk` 类型都靠它；isolated 布局下缺它直接 TS2307）。源码内 import 一律用 `./x.js` 说明符——`module: NodeNext` 下写 `.ts` 会 TS5097、写裸 `./x` 会 TS2835，第一个跨模块 import 就会让 `npm run build` 失败。
 `tsconfig.json`：`target: ES2023`、`module: NodeNext`、`strict: true`、`declaration: true`、`types: ["node"]`、`outDir: dist`、`rootDir: src`、`include: ["src"]`。`declaration` 缺失时 `prepublishOnly` 的 `test -f dist/index.d.ts` 必挂；`types: ["node"]` 让 `node:fs` / `Buffer` 通过编译。
 `src/index.ts` 只导出上面三个符号；`apply` 暂为空函数体加 `ctx.logger?.info?.('dsh-boost loaded')`。
 `cordis.patch.yml` 按 §5.3 的完整 config 面写，`maxInlineTokens` 不下发（那是宿主 spill 的键，不是本插件的）；行必须是 `- id: dsh-boost` + `name: 'dsh-boost'`（缺一个宿主就静默跳过，§11）。`README.md` 用中文写主文档、`README.en.md` 是英文对应版（§11.2）；`locale/zh.json` / `locale/en.json` 放配置项标题；`scripts/` 与 `test/regression/` 先放 `.gitkeep` 占位，由 T26 落内容。
@@ -1542,7 +1543,7 @@ Expected: FAIL，`fakeHost` 未接钩子
 
 - [ ] **Step 3: 实现**
 
-`registerHooks(ctx, deps)` 从 `src/hooks/post-execute.ts` 导出（T23 会扩展 `deps` 并补全规则），本任务注册四件事：① `ctx.on('tools/post-execute', ...)`，顺序严格为 `canonicalise →（替换决策占位）→ 投影 → 返回 decision`，`exec.agent` 为空时直接 `next()` 并写 `skip:no-scope` 收据；② `ctx.on('llm/stream', ...)`，第一行 `opts?.purpose === SELECTOR_PURPOSE → next()`；③ `ctx.on('tools/execute', ...)` 先注册**直通占位**（T18 换成 `rejectIfTampered`）；④ `ctx.systemPrompt.section({ name: 'dsh-boost', order: 100, text: '', interpolate: false })`——空串由 T20 替换为 `PROTOCOL_TEXT`，但注册本身必须在 T17 完成且可断言。`fakeHost` 增加 `callHook(name, args, next)`、`receipts` 数组、`hooked()`、`section(name)` 与 `when` 注册捕获——瀑布钩子统一按"先参数数组、后 next"调用。
+`registerHooks(ctx, deps)` 从 `src/hooks/post-execute.ts` 导出（T23 会扩展 `deps` 并补全规则），本任务注册四件事：① `ctx.on('tools/post-execute', ...)`，顺序严格为 `canonicalise →（替换决策占位）→ 投影 → 返回 decision`，`exec.agent` 为空时直接 `next()` 并写 `skip:no-scope` 收据；② `ctx.on('llm/stream', ...)`，第一行 `opts?.purpose === SELECTOR_PURPOSE → next()`；③ `ctx.on('tools/execute', ...)` 先注册**直通占位**（T18 换成 `rejectIfTampered`）；④ `ctx.systemPrompt.section({ name: 'dsh-boost', order: 100, text: (c) => c.scope && deps.scope.judgement(keyOf(c.scope)) ? PROTOCOL_TEXT_OR_EMPTY : '', interpolate: false })`——**`text` 必须是函数形式**（宿主 `PromptSection.text: string | ((c: AssembleContext) => string)`，接一个静态字符串就等于对所有会话无条件注入、违反 G3）；provider 是**同步**的，只能读 `judgement` 缓存，不能 await。T17 先用占位常量，T20 换成 `PROTOCOL_TEXT`。注册本身必须在 T17 完成且可断言。`fakeHost` 增加 `callHook(name, args, next)`、`receipts` 数组、`hooked()`、`section(name)` 与 `when` 注册捕获——瀑布钩子统一按"先参数数组、后 next"调用。
 
 - [ ] **Step 4: 运行确认通过**
 
