@@ -13,12 +13,33 @@
  * exactly once, as a quoted string, on its own line (`name: "v"` / `name="v"`);
  * zero matches, two matches, or an unquoted right-hand side are all
  * `ambiguous`, and ambiguity means the slow path — never a guess. `$scalar`
- * and `$single` are whole-text forms, so they are unique by construction.
+ * and `$single` are whole-text forms, so they are unique by construction;
+ * `$single` additionally refuses a value that spans a line.
  *
- * Failures are values, never throws, and the order is fixed: a missing graph
- * node is `unresolvable`, an errored or empty receipt is `missing-receipt`, a
- * receipt that is not exactly one text block is `not-single-text`, and a
- * non-unique projection is `ambiguous`.
+ * A line boundary is LF, CR, CRLF, U+2028 or U+2029, so a duplicate cannot hide
+ * behind a separator convention (UIs render U+2028/U+2029 as breaks even though
+ * they are not `\n`). Identifier projection is a linear per-line walk rather
+ * than one cross-line regex: receipts are tool output and attacker-influenced,
+ * and a cross-line `\s*` re-consumes the remaining whitespace at every line
+ * start, which is quadratic on a blank-line-heavy receipt. The closing quote
+ * must not be escaped: a captured value ending in an odd run of backslashes
+ * means the quote that ended the match was itself escaped, so the line abstains
+ * instead of binding a truncated prefix (`C:\x` ends in `x` and still binds).
+ *
+ * Two scoping consequences are deliberate: a second assignment later on the
+ * same line is not counted (`name: "a" name: "b"` binds `a`), and a line whose
+ * right-hand side is not double-quoted is not a match at all (`name: "a"`
+ * followed by `name: b` binds `a`). In both cases the projected value is the
+ * line-start quoted occurrence, so nothing attacker-chosen is projected.
+ *
+ * Within the gate's contract — `args` from `parsePlan`, receipts from
+ * `canonicalise` — failures are values, never throws, and the order is fixed: a
+ * missing graph node is `unresolvable`, an errored or empty receipt is
+ * `missing-receipt`, a receipt that is not exactly one text block is
+ * `not-single-text`, and a non-unique projection is `ambiguous`. The function
+ * does not re-validate those inputs: a `null` receipt value, a `null` args, a
+ * cyclic tree, or an array passed as `args` would throw or be miscast. All of
+ * these are unreachable through `parsePlan`/`canonicalise`.
  *
  * Two containers fail closed. The root `args` object can never be a template
  * (`unresolvable`): a template replaces one value with a scalar, and an
@@ -80,40 +101,76 @@ const SCALAR = /^[A-Za-z0-9_+@.:/-]+$/
 const SINGLE = /^\['([^']*)'\]$/
 
 /**
- * The identifier form: `field: "value"` or `field="value"` on its own line.
- *
- * A line boundary is LF, CR or CRLF. Anchoring on `\n` alone would let a bare
- * `\r` separate a second assignment that the uniqueness count never sees; the
- * leading `\s*` consumes the paired character of a CRLF, so each occurrence is
- * still found exactly once.
+ * Line boundaries the identifier scan recognises: LF, CR, CRLF (split twice,
+ * harmlessly) and the Unicode line/paragraph separators U+2028/U+2029.
  */
-function identifierPattern(field: string): RegExp {
-  return new RegExp('(?:^|[\\r\\n])\\s*' + escapeRegExp(field) + '\\s*[:=]\\s*"([^"\\n]+)"', 'g')
+const LINE_TERMINATOR = /[\r\n\u2028\u2029]/
+
+/**
+ * Whether the quote that ended the capture was itself escaped.
+ *
+ * `name: "a\"b"` captures `a\`, because the regex cannot know that the `"` it
+ * stopped at was escaped. Binding that truncated prefix would hand the tool a
+ * value the receipt does not show, so an odd trailing run of backslashes
+ * invalidates the line. A Windows path such as `C:\x` ends in `x`, not a
+ * backslash, and still binds.
+ */
+function escapedClosingQuote(value: string): boolean {
+  let backslashes = 0
+  for (let i = value.length - 1; i >= 0 && value[i] === '\\'; i--) backslashes++
+  return backslashes % 2 === 1
 }
 
-/** Whole-text bare scalar; no spaces, quotes or newlines survive the match. */
+/**
+ * The identifier form on one line: `field: "value"` or `field="value"`.
+ *
+ * Applied line by line: the split has removed every line terminator, so the
+ * anchored `\s*` can only consume horizontal whitespace and cannot re-consume
+ * the rest of the receipt at each line start. That keeps the scan linear on a
+ * whitespace-heavy receipt, where one cross-line global regex is quadratic.
+ */
+function identifierPattern(field: string): RegExp {
+  return new RegExp('^\\s*' + escapeRegExp(field) + '\\s*[:=]\\s*"([^"]*)"')
+}
+
+/**
+ * Whole-text bare scalar; no spaces, quotes or newlines survive the match.
+ */
 function scalarField(text: string): string | undefined {
   const value = text.trim()
   return SCALAR.test(value) ? value : undefined
 }
 
-/** Whole-text single-element string array. */
+/**
+ * Whole-text single-element string array whose value stays on one line and
+ * whose closing single quote is not escaped.
+ */
 function singleField(text: string): string | undefined {
   const match = SINGLE.exec(text.trim())
-  return match === null ? undefined : match[1]
+  if (match === null || LINE_TERMINATOR.test(match[1]) || escapedClosingQuote(match[1])) return undefined
+  return match[1]
 }
 
 /**
  * One `field: "value"` line, exactly once.
  *
  * The right-hand side must be double-quoted, so `name=abc` yields no match and
- * therefore abstains. Zero and two-plus matches both abstain: uniqueness is
- * the entire defence against a crafted receipt that carries a second, fake
- * value on another line.
+ * therefore abstains. Zero and two-plus matches both abstain: uniqueness is the
+ * entire defence against a crafted receipt that carries a second, fake value on
+ * another line. The scan stops at the second match, because the answer is
+ * `undefined` regardless of what follows.
  */
 function identifierField(text: string, field: string): string | undefined {
-  const matches = [...text.matchAll(identifierPattern(field))]
-  return matches.length === 1 ? matches[0][1] : undefined
+  const pattern = identifierPattern(field)
+  let found: string | undefined
+  for (const line of text.split(LINE_TERMINATOR)) {
+    const match = pattern.exec(line)
+    if (match === null) continue
+    if (escapedClosingQuote(match[1])) return undefined
+    if (found !== undefined) return undefined
+    found = match[1]
+  }
+  return found
 }
 
 /**

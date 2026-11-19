@@ -108,11 +108,50 @@ test('$single 要求整段恰为单元素单引号数组', () => {
   assert.equal(extractField("['']", '$single'), '')
 })
 
-test('标识符右侧必须是双引号且非空的单行字符串', () => {
+test('$single 的值不能跨行（与另外两种形式一致）', () => {
+  assert.equal(extractField("['a\nb']", '$single'), undefined)
+  assert.equal(extractField("['a\rb']", '$single'), undefined)
+  assert.equal(extractField("['a\u2028b']", '$single'), undefined)
+  assert.equal(extractField("['a b']", '$single'), 'a b')
+})
+
+test('$single 结束引号被转义时判歧义', () => {
+  assert.equal(extractField("['a\\']", '$single'), undefined)
+  assert.equal(extractField("['a\\\\']", '$single'), 'a\\\\')
+})
+
+test('标识符右侧必须是双引号、值不能跨行；空值原样绑定', () => {
   assert.equal(extractField("name: ''", 'name'), undefined)
-  assert.equal(extractField('name: ""', 'name'), undefined)
+  assert.equal(extractField('name: ""', 'name'), '')
   assert.equal(extractField('name: "a\nb"', 'name'), undefined)
   assert.equal(extractField('  name = "v"  ', 'name'), 'v')
+})
+
+test('结束引号被转义时不返回截断前缀，Windows 路径仍绑定', () => {
+  assert.equal(extractField('name: "a\\"b"', 'name'), undefined)
+  assert.equal(extractField('name: "\\"a"', 'name'), undefined)
+  assert.equal(extractField('name: "a\\\\"', 'name'), 'a\\\\')
+  assert.equal(extractField('name: "C:\\x"', 'name'), 'C:\\x')
+  assert.deepEqual(
+    bindArgs(
+      { p: { $public: { after: 'A', field: 'name' } } },
+      new Map([['A', r('name: "a\\"b"')]]),
+    ),
+    { ok: false, reason: 'ambiguous' },
+  )
+})
+
+test('U+2028 / U+2029 也是行分隔：重复赋值判歧义', () => {
+  assert.equal(extractField('name: "a"\u2028name: "b"', 'name'), undefined)
+  assert.equal(extractField('name: "a"\u2029name: "b"', 'name'), undefined)
+  assert.equal(extractField('a\u2028name: "x"', 'name'), 'x')
+})
+
+test('空白密集回执线性扫描：结果正确且快速返回', () => {
+  const blanks = '\n'.repeat(131_072)
+  assert.equal(extractField(blanks, 'name'), undefined)
+  assert.equal(extractField(`${blanks}name: "x"`, 'name'), 'x')
+  assert.equal(extractField(`name: "a"${blanks}name: "b"`, 'name'), undefined)
 })
 
 /* ------------------------------------------------------------------------- *
