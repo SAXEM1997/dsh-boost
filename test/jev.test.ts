@@ -1,10 +1,6 @@
-import test, { beforeEach } from 'node:test'
+import test from 'node:test'
 import assert from 'node:assert/strict'
-import { choose, SELECTOR_PURPOSE, resetPurposeSupport } from '../src/selector/jev.ts'
-
-beforeEach(() => {
-  resetPurposeSupport()
-})
+import { choose, SELECTOR_PURPOSE } from '../src/selector/jev.ts'
 
 const ROUTE = { provider: 'deepseek', model: 'deepseek-chat' }
 
@@ -80,7 +76,7 @@ test('标签两侧空白被裁剪', async () => {
   assert.deepEqual(r, { choice: 'A' })
 })
 
-test('文本之后 finish:error 仍判 error，且不触发 purpose 重试', async () => {
+test('文本之后 finish:error 仍判 error，且只调用一次', async () => {
   let calls = 0
   const llm = {
     async *stream() {
@@ -117,44 +113,7 @@ test('候选 id 为 ? 时，? 仍是 abstain', async () => {
   assert.deepEqual(r, { abstain: 'no-label' })
 })
 
-test('purpose 被拒时去掉 purpose 用同一请求重试一次', async () => {
-  const seen: any[] = []
-  const llm = {
-    stream(opts: any) {
-      seen.push(opts)
-      if (seen.length === 1) throw new Error('unknown field: purpose')
-      return (async function* () {
-        yield { type: 'text-delta', index: 0, text: 'A' }
-        yield { type: 'finish', reason: { kind: 'stop' } }
-      })()
-    },
-  }
-  const r = await choose({ llm: llm as any, ...ROUTE, candidates: cands, receiptText: 'x', maxTokens: 512 })
-  assert.deepEqual(r, { choice: 'A' })
-  assert.equal(seen.length, 2)
-  assert.equal(seen[0].purpose, SELECTOR_PURPOSE)
-  assert.equal('purpose' in seen[1], false)
-  assert.equal(seen[1].provider, seen[0].provider)
-  assert.equal(seen[1].model, seen[0].model)
-  assert.deepEqual(seen[1].messages, seen[0].messages)
-})
-
-test('pre-text finish:error 先重试一次无 purpose，再失败则 error', async () => {
-  const seen: any[] = []
-  const llm = {
-    async *stream(opts: any) {
-      seen.push(opts)
-      yield { type: 'finish', reason: { kind: 'error' } }
-    },
-  }
-  const r = await choose({ llm: llm as any, ...ROUTE, candidates: cands, receiptText: 'x', maxTokens: 512 })
-  assert.deepEqual(r, { abstain: 'error' })
-  assert.equal(seen.length, 2)
-  assert.equal(seen[0].purpose, SELECTOR_PURPOSE)
-  assert.equal('purpose' in seen[1], false)
-})
-
-test('探针命中后，后续选择不再发送 purpose', async () => {
+test('每次调用都带 purpose，失败后的下一次仍然携带', async () => {
   const seen: any[] = []
   let calls = 0
   const llm = {
@@ -169,16 +128,14 @@ test('探针命中后，后续选择不再发送 purpose', async () => {
       yield { type: 'finish', reason: { kind: 'stop' } }
     },
   }
-  const first = await choose({ llm: llm as any, ...ROUTE, candidates: cands, receiptText: 'x', maxTokens: 512 })
-  assert.deepEqual(first, { choice: 'A' })
-  assert.equal(seen.length, 2)
-  assert.equal(seen[0].purpose, SELECTOR_PURPOSE)
-  assert.equal('purpose' in seen[1], false)
+  const failed = await choose({ llm: llm as any, ...ROUTE, candidates: cands, receiptText: 'x', maxTokens: 512 })
+  assert.deepEqual(failed, { abstain: 'error' })
+  assert.equal(seen.length, 1)
 
-  const second = await choose({ llm: llm as any, ...ROUTE, candidates: cands, receiptText: 'x', maxTokens: 512 })
-  assert.deepEqual(second, { choice: 'A' })
-  assert.equal(seen.length, 3)
-  assert.equal('purpose' in seen[2], false)
+  const next = await choose({ llm: llm as any, ...ROUTE, candidates: cands, receiptText: 'x', maxTokens: 512 })
+  assert.deepEqual(next, { choice: 'A' })
+  assert.equal(seen.length, 2)
+  assert.deepEqual(seen.map((opts) => opts.purpose), [SELECTOR_PURPOSE, SELECTOR_PURPOSE])
 })
 
 test('finish:error 后迭代器 close 抛错：保持 error 且不重试', async () => {
@@ -262,24 +219,6 @@ test('选择完成后清除超时计时器', async () => {
     globalThis.setTimeout = realSetTimeout
     globalThis.clearTimeout = realClearTimeout
   }
-})
-
-test('超时后放弃的尝试不再发起 purpose 重试', async () => {
-  let calls = 0
-  let release!: () => void
-  const gate = new Promise<void>((resolve) => { release = resolve })
-  const llm = {
-    async *stream() {
-      calls++
-      await gate
-      throw new Error('late')
-    },
-  }
-  const r = await choose({ llm: llm as any, ...ROUTE, candidates: cands, receiptText: 'x', maxTokens: 512, timeoutMs: 5 })
-  assert.deepEqual(r, { abstain: 'timeout' })
-  release()
-  await new Promise((resolve) => setTimeout(resolve, 0))
-  assert.equal(calls, 1)
 })
 
 test('timeoutMs 为 0 时立即超时，不发起模型调用', async () => {

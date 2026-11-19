@@ -10,9 +10,15 @@
  * This is the plugin's only model call of its own, so the rules are tight:
  *
  * - The request carries the boundary request's own `provider`/`model` (top-level
- *   fields, no `route` object) and `purpose: 'boost-selector'`, which the
- *   `llm/stream` hook uses to let the call through untouched. `reasoningEffort`
- *   is omitted rather than sent as `undefined`.
+ *   fields, no `route` object) and always carries `purpose: 'boost-selector'`,
+ *   which the `llm/stream` hook uses to let the call through untouched.
+ *   `reasoningEffort` is omitted rather than sent as `undefined`.
+ *
+ *   There is deliberately no purpose fallback. `purpose` is consumed host-side
+ *   only: the pi-ai adapter hands it to `requestHeaders` and never puts it in
+ *   the request body, so no gateway can reject it, while a marker-less selector
+ *   call would break the hook's only discriminator and could be mistaken for a
+ *   boundary request. A failed selection simply abstains.
  * - Text accumulates from a typed `text-delta` or an untyped `{ text }` chunk,
  *   keeping at most the first two non-whitespace characters: trimming leaves
  *   exactly those characters and no valid label has more than one, so the
@@ -23,20 +29,10 @@
  *   `tool-calls`, `max-tokens`, and provider extensions). The finish verdict is
  *   recorded before the loop breaks, so a throwing iterator close cannot turn
  *   it into a dispatch throw.
- * - A failure before any text while `purpose` was sent triggers one
- *   process-wide probe: mark the field unsupported, retry once without it, and
- *   omit it from every later selection. A gateway that rejects `purpose`
- *   therefore pays one extra attempt in total, and a genuine pre-text model
- *   failure also costs at most one extra attempt, never one per selection.
- *   There is no retry after text and none on timeout. A `finish:error` whose
- *   iterator close also threw keeps its verdict without probing (that is an
- *   adapter/consumer fault, not the clean rejection shape).
- *   `resetPurposeSupport()` is the test seam for the process-wide flag.
  * - The whole selection races one timer (20 s by default, clamped to Node's
  *   largest timer delay). The timer is always cleared; a non-positive
  *   `timeoutMs` abstains before any request. The losing branch of the race
- *   keeps running but is contained by `attempt`, so a late throw cannot escape
- *   and cannot start the purpose fallback after the caller already gave up.
+ *   keeps running but is contained by `attempt`, so a late throw cannot escape.
  * - Nothing here rejects: every failure mode is `{ abstain }`.
  *
  * The prompt is one constant system line plus one user message, because every
@@ -62,25 +58,6 @@ const DEFAULT_TIMEOUT_MS = 20_000
 
 /** Largest delay Node's `setTimeout` accepts; anything above overflows to 1 ms. */
 const MAX_TIMEOUT_MS = 2_147_483_647
-
-/**
- * Whether this process may still send `purpose`.
- *
- * Starts true. The first pre-text failure while `purpose` was sent clears it for
- * the rest of the process, so a gateway that rejects the field pays one extra
- * attempt in total instead of one per selection.
- */
-let purposeSupported = true
-
-/**
- * Forget the probe result, so the next selection sends `purpose` again.
- *
- * Test seam only: the probe is process-wide because one gateway's rejection is
- * learned once. Tests reset it to exercise both paths in one process.
- */
-export function resetPurposeSupport(): void {
-  purposeSupported = true
-}
 
 /**
  * The complete output contract, in one line. Kept short because it is paid for
@@ -113,14 +90,13 @@ type ChooseResult = { choice: string } | { abstain: 'timeout' | 'error' | 'no-la
 /**
  * One attempt: the label characters seen, or the way it failed.
  *
- * `closedCleanly` is only meaningful on `finish-error`: false means the failed
- * finish was followed by a throw from the iterator close, so the failure is not
- * the clean gateway-rejection shape the purpose probe looks for.
+ * `finish-error` is recorded even when the iterator close afterwards throws;
+ * both failure reasons end as `{ abstain: 'error' }`, and the distinction is
+ * kept so a failed finish is never reclassified as a dispatch throw.
  */
 type Attempt =
   | { ok: true; label: string[] }
-  | { ok: false; reason: 'threw'; sawText: boolean }
-  | { ok: false; reason: 'finish-error'; sawText: boolean; closedCleanly: boolean }
+  | { ok: false; reason: 'threw' | 'finish-error' }
 
 /** Sentinel returned by `withTimeout` when the timer wins the race. */
 const TIMEOUT = Symbol('selector-timeout')
@@ -169,19 +145,19 @@ function selectorMessage(input: ChooseInput): string {
   return `Candidates:\n${candidates}\n\nLatest receipt:\n${input.receiptText}\n\nChoose the candidate that should run next.`
 }
 
-/** Build the request; `withPurpose` is false only for the one fallback retry. */
-function requestOptions(input: ChooseInput, withPurpose: boolean): GenerateOptions {
+/** Build the request; every attempt carries the purpose marker. */
+function requestOptions(input: ChooseInput): GenerateOptions {
   const options: GenerateOptions = {
     provider: input.provider,
     model: input.model,
     maxTokens: input.maxTokens,
+    purpose: SELECTOR_PURPOSE,
     system: SELECTOR_SYSTEM_PROMPT,
     messages: [{ role: 'user', content: [{ type: 'text', text: selectorMessage(input) }] }],
   }
   if (input.reasoningEffort !== undefined) {
     options.reasoningEffort = input.reasoningEffort as GenerateOptions['reasoningEffort']
   }
-  if (withPurpose) options.purpose = SELECTOR_PURPOSE
   return options
 }
 
@@ -194,51 +170,23 @@ function requestOptions(input: ChooseInput, withPurpose: boolean): GenerateOptio
  * `IteratorClose` runs first; if that close throws, the flag keeps the finish
  * verdict instead of reclassifying the attempt as a dispatch throw.
  */
-async function attempt(input: ChooseInput, withPurpose: boolean): Promise<Attempt> {
-  let sawText = false
+async function attempt(input: ChooseInput): Promise<Attempt> {
   let failedFinish = false
-  let closedCleanly = true
   const label: string[] = []
   try {
-    for await (const chunk of input.llm.stream(requestOptions(input, withPurpose))) {
+    for await (const chunk of input.llm.stream(requestOptions(input))) {
       const delta = textOf(chunk)
-      if (delta !== undefined) {
-        if (delta.length > 0) sawText = true
-        collectLabel(label, delta)
-      }
+      if (delta !== undefined) collectLabel(label, delta)
       if (isFailedFinish(chunk)) {
         failedFinish = true
         break
       }
     }
   } catch {
-    if (!failedFinish) return { ok: false, reason: 'threw', sawText }
-    closedCleanly = false
+    if (!failedFinish) return { ok: false, reason: 'threw' }
   }
-  if (failedFinish) return { ok: false, reason: 'finish-error', sawText, closedCleanly }
+  if (failedFinish) return { ok: false, reason: 'finish-error' }
   return { ok: true, label }
-}
-
-/**
- * One attempt with `purpose`, then at most one probe without it.
- *
- * The probe exists for a gateway that rejects the `purpose` field: that failure
- * arrives before any text, either as a dispatch throw or as a clean pre-text
- * `finish:error`. The first such failure clears the process-wide flag and is
- * retried once without `purpose`; later selections never send it. A failed
- * `finish` whose iterator close also threw keeps its verdict without probing,
- * and a failure after text means the request was accepted, so neither retries.
- * `isExpired` keeps an abandoned attempt (the timeout won) from starting the
- * fallback after the caller moved on.
- */
-async function selectText(input: ChooseInput, isExpired: () => boolean): Promise<Attempt> {
-  const withPurpose = purposeSupported
-  const first = await attempt(input, withPurpose)
-  if (first.ok) return first
-  if (!withPurpose || first.sawText || isExpired()) return first
-  if (first.reason === 'finish-error' && !first.closedCleanly) return first
-  purposeSupported = false
-  return attempt(input, false)
 }
 
 /** Map the label characters onto a choice; anything but one known id is `no-label`. */
@@ -251,17 +199,13 @@ function interpret(label: readonly string[], candidates: readonly SelectorCandid
 /**
  * Race `work` against one timer and clear that timer on every settlement.
  *
- * `onTimeout` runs synchronously before the timeout sentinel resolves, which
- * lets the caller mark the dropped attempt as expired. The abandoned `work`
- * promise is never observed; `attempt` resolves it, so it cannot reject.
+ * The abandoned `work` promise is never observed; `attempt` resolves it, so it
+ * cannot reject.
  */
-async function withTimeout<T>(work: Promise<T>, timeoutMs: number, onTimeout?: () => void): Promise<T | typeof TIMEOUT> {
+async function withTimeout<T>(work: Promise<T>, timeoutMs: number): Promise<T | typeof TIMEOUT> {
   let timer: ReturnType<typeof setTimeout> | undefined
   const timeout = new Promise<typeof TIMEOUT>((resolve) => {
-    timer = setTimeout(() => {
-      onTimeout?.()
-      resolve(TIMEOUT)
-    }, timeoutMs)
+    timer = setTimeout(() => resolve(TIMEOUT), timeoutMs)
   })
   try {
     return await Promise.race([work, timeout])
@@ -288,8 +232,7 @@ export async function choose(input: ChooseInput): Promise<ChooseResult> {
     const limit = normalizeTimeout(input.timeoutMs)
     if (limit <= 0) return { abstain: 'timeout' }
 
-    let expired = false
-    const outcome = await withTimeout(selectText(input, () => expired), limit, () => { expired = true })
+    const outcome = await withTimeout(attempt(input), limit)
     if (outcome === TIMEOUT) return { abstain: 'timeout' }
     if (!outcome.ok) return { abstain: 'error' }
     return interpret(outcome.label, input.candidates)
