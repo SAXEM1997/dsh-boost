@@ -1,0 +1,31 @@
+# dsh-boost bundle patch — one insert over the profile root.
+#
+# Row ids are stable identity in the config tree; a later layer (the user's
+# profile cordis.patch.yml, $DSH_HOME/cordis.patch.yml, --patch overlays)
+# overrides a row by id.
+#
+# A patch replaces the targeted row's whole `config` rather than merging into
+# it, so the keys below are the complete configuration surface for this
+# profile. The plugin falls back to the same defaults for any key that is
+# missing here, and a tool family that is not listed is never projected.
+#
+# The host appends top-level `insert` rows and treats a row as installed only
+# when `row.id === entry.options.id && row.name === entry.options.name`; a
+# mismatch is skipped silently. Keep `id` and `name` equal to the export name
+# and the package name.
+
+- insert:
+    - id: dsh-boost
+      name: 'dsh-boost'
+      config:
+        projection:
+          read:  { triggerChars: 3000, headChars: 2000, tailChars: 500 }
+          grep:  { triggerChars: 700,  headChars: 400,  tailChars: 100 }
+          glob:  { triggerChars: 700,  headChars: 400,  tailChars: 100 }
+          bash:  { triggerChars: 4000, headChars: 2000, tailChars: 500 }
+          ssh:   { triggerChars: 2000, headChars: 1200, tailChars: 300 }
+        admission: { thresholdTokens: 1024 }
+        selector:  { maxTokens: 512 }
+        stepsPerTurn: 8
+        horizonSteps: 20
+        historyTurns: 5
