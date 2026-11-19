@@ -120,3 +120,40 @@ test('小数 max 向下取整，count() 永不越界', () => {
   assert.equal(b.take(), false)
   assert.equal(b.count(), 2)
 })
+
+test('小数 historyTurns 只取整一次，同一个 N 同时约束门槛与窗口', () => {
+  // floor(2.5) = 2：恰好两个条目就进入均值分支（用原始 2.5 会回落到 horizon 20）。
+  assert.equal(remainingSteps({ stepsSoFar: [4, 6], horizonSteps: 20, historyTurns: 2.5 }), 5)
+  // 窗口同样只取 2 个：更早的 100 不参与均值。
+  assert.equal(remainingSteps({ stepsSoFar: [100, 4, 6], horizonSteps: 20, historyTurns: 2.5 }), 5)
+})
+
+test('非有限 horizonSteps（NaN / Infinity）回落到 0', () => {
+  assert.equal(remainingSteps({ stepsSoFar: [], horizonSteps: NaN, historyTurns: 5 }), 0)
+  assert.equal(remainingSteps({ stepsSoFar: [], horizonSteps: Infinity, historyTurns: 5 }), 0)
+  assert.equal(remainingSteps({ stepsSoFar: [10, 10, 10, 10, 10], horizonSteps: NaN, historyTurns: 5 }), 0)
+  assert.equal(remainingSteps({ stepsSoFar: [10, 10, 10, 10, 10], horizonSteps: Infinity, historyTurns: 5 }), 0)
+})
+
+test('stepsSoFar 里的 NaN / Infinity 使均值不可用，回落到 horizon', () => {
+  assert.equal(remainingSteps({ stepsSoFar: [NaN, 10, 10, 10, 10], horizonSteps: 20, historyTurns: 5 }), 20)
+  assert.equal(remainingSteps({ stepsSoFar: [Infinity, 10, 10, 10, 10], horizonSteps: 20, historyTurns: 5 }), 20)
+})
+
+test('返回值是原始估计：小数 horizon 原样通过，不取整', () => {
+  assert.equal(remainingSteps({ stepsSoFar: [50, 50, 50, 50, 50], horizonSteps: 20.5, historyTurns: 5 }), 20.5)
+})
+
+test('返回值是原始估计：负 horizon 与负均值原样通过，不 clamp 到 0', () => {
+  assert.equal(remainingSteps({ stepsSoFar: [], horizonSteps: -1, historyTurns: 5 }), -1)
+  assert.equal(remainingSteps({ stepsSoFar: [-5, -5, -5], horizonSteps: 20, historyTurns: 3 }), -5)
+})
+
+test('StepBudget 的非有限 max 是空预算（Infinity 也不是无限）', () => {
+  for (const max of [Infinity, -Infinity, NaN]) {
+    const b = new StepBudget(max)
+    assert.equal(b.exhausted(), true)
+    assert.equal(b.take(), false)
+    assert.equal(b.count(), 0)
+  }
+})

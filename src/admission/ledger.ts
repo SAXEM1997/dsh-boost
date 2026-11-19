@@ -19,13 +19,19 @@
  * `Math.min(horizonSteps, Math.round(mean(last historyTurns)))`.
  *
  * Degenerate inputs are defined and never NaN:
- * - `historyTurns <= 0` has no window to average, so it takes the horizon
- *   path; the literal mean branch would divide by zero. Fractions floor.
- * - a non-finite `horizonSteps` degrades to `0` (fail-closed).
- * - a non-finite mean (for example a NaN in the window) falls back to the
+ * - `historyTurns` is floored once, and that same N gates both the short-
+ *   history check and the window, so `2.5` with two entries averages them.
+ *   A floored `historyTurns <= 0` has no window to average, so it takes the
+ *   horizon path; the literal mean branch would divide by zero.
+ * - a non-finite `horizonSteps` (`NaN` or `Infinity`) degrades to `0`
+ *   (fail-closed).
+ * - a non-finite mean (a `NaN` or `Infinity` in the window) falls back to the
  *   horizon.
  *
- * `horizonSteps: 0` therefore means zero remaining steps.
+ * The return is a raw estimate, not a sanitised count: a finite `horizonSteps`
+ * is passed through unclamped, so a fractional (`20.5`) or negative (`-1`)
+ * horizon — and a negative mean — reach the caller as-is. Callers must not
+ * assume a non-negative integer; `0` means zero remaining steps.
  */
 export function remainingSteps(input: {
   stepsSoFar: number[]
@@ -68,7 +74,9 @@ export function worthSubstituting(input: {
  *
  * A non-positive `max` is an empty budget — `take()` always returns `false`
  * and `exhausted()` is already `true`. A fractional max floors, so `count()`
- * can never exceed it; a non-finite max is treated as empty.
+ * can never exceed it. A non-finite max — including `Infinity`, whose literal
+ * reading would be "unlimited" — is also an empty budget: fail-closed, and
+ * unreachable through `resolveConfig`, which keeps only finite numbers.
  */
 export class StepBudget {
   private readonly max: number
