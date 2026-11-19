@@ -1,0 +1,40 @@
+import test from 'node:test'
+import assert from 'node:assert/strict'
+import { canonicalise } from '../src/projection/canonicalise.ts'
+
+test('多个 text block 按顺序拼成一个字符串', () => {
+  const r = canonicalise([{ type: 'text', text: 'a' }, { type: 'text', text: 'b' }], false)
+  assert.equal(r.text, 'ab')
+  assert.equal(r.textBlocks, 2)
+})
+
+test('非 text block 被跳过，图片不参与规范化', () => {
+  const r = canonicalise([{ type: 'text', text: 'x' }, { type: 'image' }, { type: 'text', text: 'y' }], false)
+  assert.equal(r.text, 'xy')
+  assert.equal(r.textBlocks, 2)   // 不是 blocks.length（= 3）
+})
+
+test('空回执标记 empty', () => {
+  assert.equal(canonicalise([], false).empty, true)
+  assert.equal(canonicalise([], false).textBlocks, 0)
+  assert.equal(canonicalise([{ type: 'text', text: '' }], false).empty, true)
+  assert.equal(canonicalise([{ type: 'text', text: ' ' }], false).empty, false)
+})
+
+test('isError 透传', () => {
+  const r = canonicalise([{ type: 'text', text: 'boom' }], true)
+  assert.equal(r.isError, true)
+  assert.equal(r.textBlocks, 1)
+})
+
+test('没有 text 字段的 text block 被当作非 text block（不计入 textBlocks）', () => {
+  const r = canonicalise([{ type: 'text' }, { type: 'text', text: 'z' }], false)
+  assert.equal(r.text, 'z')
+  assert.equal(r.textBlocks, 1)
+})
+
+test('不 trim、不改行尾，逐字保留', () => {
+  const r = canonicalise([{ type: 'text', text: ' a\r\n' }, { type: 'text', text: '\tb ' }], false)
+  assert.equal(r.text, ' a\r\n\tb ')
+  assert.equal(r.empty, false)
+})
