@@ -1994,9 +1994,9 @@ git push origin main   # remote 由 T1 布置（内网镜像）；GitHub 作为�
 
 **Interfaces:**
 - Consumes: `StreamChunk`/`TokenUsage`/`ToolCallId`（`@deepseek-ai/dsh-llm/types`，T1 已加 peer 依赖）
-- Produces: `export interface PendingEntry { callId: string; candidateId: string; name: string; args: Record<string, unknown>; turn: number | string; createdAt: number }`
+- Produces: `export interface PendingEntry { callId: string; candidateId: string; name: string; args: Record<string, unknown>; turn: number | string; step: number | string; createdAt: number }`——`step` 是**宿主回合内的步号**，不是插件自数的计数：同一候选在同一回合的两个不同步上替换时必须得到不同的 `callId`，否则宿主会落两条 `id` 相同的 assistant `tool_use`，Anthropic 风格的路由会直接拒绝。
 - Produces: `export class PendingQueue { set(sessionId: string, e: PendingEntry): void; take(sessionId: string): PendingEntry | undefined; peek(sessionId: string): PendingEntry | undefined; clear(sessionId: string): void; size(): number }`——键是 **sessionId**
-- Produces: `export function callIdFor(sessionId: string, turn: string | number, candidateId: string): string`——`sha256(sessionId + '/' + turn + '/' + candidateId)` 前 16 位
+- Produces: `export function callIdFor(sessionId: string, turn: number | string, step: number | string, candidateId: string): string`——`sha256(JSON.stringify([sessionId, String(turn), String(step), candidateId]))` 前 16 位。**用 JSON 数组而不是 `/` 拼接**：拼接对分隔符有歧义（`('s','1','2/3','c')` 与 `('s','1/2',3,'c')` 同串）。
 - Produces: `export async function* synthesizeTurn(e: PendingEntry): AsyncIterable<StreamChunk>`
 
 **测试（只列断言，不写实现体）**
@@ -2036,13 +2036,13 @@ git commit -m "feat: pending queue and synthesized tool turn"
 
 **Interfaces:**
 - Consumes: `decide`（T15，含 `shadow` 形参）、`rejectIfTampered`（T18）、`worthSubstituting`（T16）、`canonicalise`（T3）、`projectApply`/`projectShadow`（T5/T6）、`invalidate`+`ReceiptAnchors`（T22）、`PendingQueue`/`callIdFor`（T23a）、`parsePlan`（T11）
-- Produces: `export interface HookDeps { config: BoostConfig; scope: ScopeStore; receipts: ReceiptStore; anchors: AnchorStore; resolveSession: (sessionId: string) => string | undefined; queue?: PendingQueue; budget?: StepBudget; usage?: UsageLedger; clock?: TurnClock; plans?: Map<string, Plan>; spill?: SpillBackend; estimateText?: (t: string) => number }`——**`anchors` 与 `resolveSession` 必填**（缺后者会让替换永远走不到，见第 4 轮 P0-1）
+- Produces: `export interface HookDeps { config: BoostConfig; scope: ScopeStore; receipts: ReceiptStore; anchors: AnchorStore; resolveSession: (sessionId: string) => string | undefined; queue?: PendingQueue; budget?: StepBudget; usage?: UsageLedger; clock?: TurnClock; plans?: Map<string, Plan>; spill?: SpillBackend; estimateText?: (t: string) => number }`——**`step` 的唯一来源是 `clock.step()`**（T20 的 `TurnClock` 由宿主 `{turn, step}` 事件驱动）；`tools/post-execute` 的 `ToolExecution` 没有 turn/step 字段，**不得**用插件自数的计数冒充步号，否则同一回合内两次替换会撞同一个 `callId`。——**`anchors` 与 `resolveSession` 必填**（缺后者会让替换永远走不到，见第 4 轮 P0-1）
 - Consumes: `AnchorStore`（T22）
 - Produces: `export function registerHooks(ctx: PluginContext, deps: HookDeps): void`（本任务接 `tools/post-execute` 与 `tools/execute`）
 
 **测试**
 - `影子期 commit`：写 shadow 收据（含 `decision`/`candidateId`/`admitted`），`queue.peek` 为 `undefined`
-- `非影子 commit`：入队，`callId` 可由 `callIdFor` 复算
+- `非影子 commit`：入队，`callId` 可由 `callIdFor(sessionId, clock.turn(), clock.step(), candidateId)` 复算
 - `无 agent`：`next()` 被调一次 + `skip:no-scope` 收据
 - `投影收据`：`kind:'projection'` 且 `unit:'raw'`、`before`/`after` 为数字
 - `防篡改`：`callId` 不匹配 → 返回 failure（`isError:true`）且队列被清；**走 T18 的 `rejectIfTampered`，不另写比对**
@@ -2095,7 +2095,7 @@ git commit -m "feat: wire post-execute decisions, admission, projection and tamp
 合成分支：`markSubstituted(candidateId)` → 写 `{kind:'substitute'}` → **`peek`（不是 `take`）** → `yield* synthesizeTurn(e)`，**不再调 `next()`**。entry 必须存活到 `tools/execute`：合成的回合在流结束后才派发工具调用，若此处 `take` 掉，T23b 的 `peek` 永远为空，防篡改在生产路径上**一次都不会触发**（而 T23b 的单元测试手工塞队列仍然全绿）。消费方是 T23b 的 execute 钩子。
 透传分支：`yield* next()`，遇 `{type:'usage'}` 映射后 `request()`；若上一轮有 `markSubstituted`，此时 `settle()` 并追加 `substitute-settled`。
 `plans`：拼 `text-delta` 成文本，流结束后 `parsePlan` 存进 map。
-`clock`：由 `agent/request` 的 `{turn, step}` 驱动 `onModelRequest()`，turn 变化时 `budget.reset()`。
+`clock`：由 `agent/pre-step`（或 `agent/request`）的 `{turn, step}` 驱动 `onModelRequest(turn, step)`，turn 变化时 `budget.reset()`。**`TurnClock` 因此需要 `step()`**——T20 只做了 `turn()`/`stepsThisTurn()`，`stepsThisTurn()` 是插件自数的替换次数，**不是宿主步号**，不能拿它当 `callIdFor` 的 `step`。
 
 - [ ] **Step 4: 运行确认通过** — 8 tests PASS
 - [ ] **Step 5: 重构** — 抽 `resolveStreamPlan(deps, options)`
