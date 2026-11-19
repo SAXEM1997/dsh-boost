@@ -491,10 +491,10 @@ v1 的裁决组合：
 - 按 D5 展开为模板支持（bank 校验 + 防篡改 + 证书措辞）；起点是 `integrations/deepseek_harness/public_argument_binding.mjs` 的 `$public` 投影（语法规范见 §5.2）。注意现成的 bank 校验**不是**在 `parseBank` 拒模板——`{"path":{"$public":…}}` 是合法字面量对象，能通过解析；真正拒绝的是 `sameLiteral` 逐字校验链（`projectTurn` 的 `chain-arguments-differ` 与 `violateDispatch`）。扩成模板要同步改 `parseBank`、`projectTurn`、`violateDispatch` 三处，结论不变。
 - guard 按 §5.2 的词表实现：`ok` / `text_contains` / `text_not_contains` / `json_equals`。**不要**照抄参照实现的 `GUARD_FIELDS`——`stderr_empty` 在 v1 白名单（read/grep/glob）上恒真、`exit_code` 恒 `unknown`（恒拒），两者都不可用；"只有 `ok:true`"必须判不合格。
 - 收据格式：完整字段见 §5.3 的两组表——替换账 `saved_input_tokens` / `cache_hit_delta`；投影账 `projected_tokens_before` / `projected_tokens_after` / `saved_projection_tokens` / `projection_unit` / `projection_retrievals` / `projection_net_tokens`。不要写成 `saved_tokens_estimate`。
-- 收据存储（`$DSH_HOME/boost/receipts/<sessionId>.jsonl`）：
+- 收据存储（`$DSH_HOME/boost/receipts/<encodeSegment(sessionId)>.jsonl`，分片名把 `[A-Za-z0-9_-]` 以外的字符按 UTF-8 字节可逆百分号编码——session id 可能含 `/` 或 `..`，存储绝不能写出 `receipts/`）：
   - 每行一条收据，带 `version`（收据 schema 版本，从 1 起）与 `receipt_hash`（对 `sessionId` / `turn` / `stepId` / 工具名 / 参数 的稳定哈希）。
   - **只存摘要与预览**：`preview` = 规范化回执的前 256 字符，**不存 stdout 全文**；全文只在 spill 后端（页脚 locator 指向它）。
-  - 单文件上限默认 8 MiB 或 20,000 行；超限轮转为 `<sessionId>.1.jsonl`，保留最近 2 个。
+  - 单文件上限默认 8 MiB 或 20,000 行；超限轮转为 `<encodeSegment(sessionId)>.1.jsonl`，保留最近 2 个。
   - **每 N 行或每 turn 结束 `fsync` 一次**（不逐步 fsync，避免每步阻塞）；每行以 `\n` 结尾，**半行（无换行结尾）在读取时丢弃**并从该偏移截断，不猜内容。
   - 写失败：内存缓冲；**连续 3 次 append 抛错**即停止替换（收据 `receipt-write-failed`，见 §5.2）。
 - 所有模型调用走 `ctx.llm`，路由可配；默认复用边界请求自身的 route（现成插件已验证这条能避开 thinking-mode 网关的 400）。Jev 自调用带 `purpose: 'boost-selector'`（§5.1）。该 purpose 要先声明合并，否则编译期拒绝：
@@ -582,7 +582,7 @@ dsh-boost/
 - **`dist/` 不入库**（`.gitignore` 忽略），干净 clone 上必须能 `npm run build`——布局里因此要有 `tsconfig.json`，缺它 `tsc -p` 直接 `TS5058`；`prepublishOnly` 已含 build，发布包不会缺 dist。
 - `engines.dsh` 由 dsh 插件加载器读取，npm 忽略此字段。
 - `files` 与实际布局一致：没有 `lib`，所以不列 `lib`；`scripts/` 与 `test/` 是 dev-only，不进包。
-- `$DSH_HOME` 未设置时回退 `~/.dsh`；三处状态按同一规则解析：`boost/scope.json`、`boost/scope.lock`、`boost/receipts/<sessionId>.jsonl`（§10）。
+- `$DSH_HOME` 未设置时回退 `~/.dsh`；三处状态按同一规则解析：`boost/scope.json`、`boost/scope.lock`、`boost/receipts/<encodeSegment(sessionId)>.jsonl`（§10；分片名用可逆百分号编码，避免 id 中的 `/` 或 `..` 写出 `receipts/`）。
 
 **依赖声明（`inject`）**：依赖形态在这里定死。
 

@@ -2,12 +2,16 @@
  * Append-only receipt store.
  *
  * Every decision the plugin makes is one JSON line under
- * `<root>/receipts/<sessionId>.jsonl`: the shadow week is analysed offline from
- * these files, and the plugin is audited from them after the fact. The store is
- * therefore append-only (reads may only cut an incomplete tail), crash-safe (a
- * line that was never finished is not a receipt), bounded (current + `.1`, hard
- * limits), and fail-closed (three consecutive write failures stop substitution
- * rather than running without an audit trail).
+ * `<root>/receipts/<encodeSegment(sessionId)>.jsonl`: the shadow week is
+ * analysed offline from these files, and the plugin is audited from them after
+ * the fact. The shard name percent-encodes every character outside
+ * `[A-Za-z0-9_-]` (reversibly, one `%XX` per UTF-8 byte) because a host-supplied
+ * session id may contain `/` or `..` and the store must never write outside
+ * `receipts/`; the receipt body keeps the original id. The store is therefore
+ * append-only (reads may only cut an incomplete tail), crash-safe (a line that
+ * was never finished is not a receipt), bounded (current + `.1`, hard limits),
+ * and fail-closed (three consecutive write failures stop substitution rather
+ * than running without an audit trail).
  *
  * ## Write path
  *
@@ -553,7 +557,8 @@ export class ReceiptStore {
       if (name.endsWith(ROTATED_SUFFIX)) names.add(name.slice(0, -ROTATED_SUFFIX.length))
       else if (name.endsWith(CURRENT_SUFFIX)) names.add(name.slice(0, -CURRENT_SUFFIX.length))
     }
-    names.delete('')
+    // The empty base is the empty sessionId's shard (`.jsonl`). Keep it: scan()
+    // must yield every receipt, and `scan('')` can address it.
     return [...names].sort()
   }
 }

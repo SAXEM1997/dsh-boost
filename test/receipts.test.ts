@@ -244,6 +244,23 @@ test('sessionId 编码成单个安全分片名，收据体保留原始 id', asyn
   assert.deepEqual(all.map((r) => r.sessionId).sort(), ['../escape', 'a..b', 'team/2026'])
 })
 
+test('空 sessionId 的分片也能被 scan() 读回', async () => {
+  const root = await freshRoot()
+  const s = new ReceiptStore(root)
+  await s.append(rec(''))
+  await s.append(rec('x'))
+  await stat(join(root, 'receipts', '.jsonl'))
+
+  const all: any[] = []
+  for await (const r of s.scan()) all.push(r)
+  assert.deepEqual(all.map((r) => r.sessionId).sort(), ['', 'x'])
+
+  const empty: any[] = []
+  for await (const r of s.scan('')) empty.push(r)
+  assert.equal(empty.length, 1)
+  assert.equal(await s.count(''), 1)
+})
+
 test('.1 分片里的半行同样在读取时丢弃并截断', async () => {
   const root = await freshRoot()
   const s = new ReceiptStore(root, { maxLines: 1 })
