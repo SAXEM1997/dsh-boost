@@ -9,7 +9,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { fakeHost } from './fakes/host.ts'
-import { AnchorStore } from '../src/gate/invalidate.ts'
+import { AnchorStore, PRUNE_MARKER } from '../src/gate/invalidate.ts'
 import { PendingQueue, callIdFor } from '../src/hooks/pending.ts'
 import { registerHooks, SUBSTITUTION_WHITELIST } from '../src/hooks/post-execute.ts'
 import { StepBudget } from '../src/admission/ledger.ts'
@@ -333,6 +333,21 @@ test('O5 同一 shadow flag 也传给 decide：bash 在影子期 commit，非影
   assert.ok(realEnv.receipts.some((r) => r.code === 'tool-not-whitelisted'))
 })
 
+test('O5 影子期也走 live visibility：越权会话不记影子（F2 复核）', async () => {
+  const env = setup({
+    doc: doc({ shadow: true }),
+    deps: { resolveSession: () => undefined },
+  })
+  env.plans.set(SESSION, { goal: 'g', steps: [candidate('A', 'TRIGGER')] })
+
+  await runPost(env.host, 'TRIGGER')
+
+  assert.equal(env.receipts.some((r) => r.kind === 'shadow'), false)
+  assert.ok(env.receipts.some((r) => r.code === 'skip:no-scope'))
+  assert.equal(env.queue.peek(SESSION), undefined)
+  assert.equal(env.plans.get(SESSION)?.steps.length, 1, 'no commit, so no consumption')
+})
+
 // ---------------------------------------------------------------------------
 // Obligation 6: worthSubstituting, then budget.take(); never budget for a
 // call that is not substituted
@@ -367,7 +382,7 @@ test('O6 没有决定时不扣预算；准入通过后才 take（顺序颠倒则
   assert.equal(env.deps.usage.pendingCandidateId(), 'A', 'commit marks the usage pairing')
 })
 
-test('O6 预算耗尽：不入队，写 steps-exhausted', async () => {
+test('O6 预算耗尽：不覆盖已有条目，写 steps-exhausted', async () => {
   const budget = new StepBudget(8)
   for (let i = 0; i < 8; i += 1) budget.take()
   const env = setup({ deps: { budget } })
@@ -375,10 +390,21 @@ test('O6 预算耗尽：不入队，写 steps-exhausted', async () => {
     goal: 'g',
     steps: [candidate('A', 'TRIGGER'), candidate('B', 'IMPOSSIBLE')],
   })
+  // A live entry from another call in the same step: this invocation enqueued
+  // nothing, so it must not cancel it (review F2).
+  env.queue.set(SESSION, {
+    callId: 'live-call',
+    candidateId: 'LIVE',
+    name: 'read',
+    args: { file_path: '/live' },
+    turn: 1,
+    step: 0,
+    createdAt: 0,
+  })
 
   await runPost(env.host, 'TRIGGER')
 
-  assert.equal(env.queue.peek(SESSION), undefined)
+  assert.equal(env.queue.peek(SESSION)?.callId, 'live-call', 'the live entry survives')
   assert.ok(env.receipts.some((r) => r.code === 'steps-exhausted'))
 })
 
@@ -399,11 +425,32 @@ test('O6 准入不过时不入队（worthSubstituting 为假）', async () => {
   assert.ok(env.receipts.some((r) => r.code === 'not-admitted'))
 })
 
+test('O6 fallback 不清空另一调用的 pending 条目（F2）', async () => {
+  const env = setup()
+  env.queue.set(SESSION, {
+    callId: 'live-call',
+    candidateId: 'LIVE',
+    name: 'read',
+    args: { file_path: '/live' },
+    turn: 1,
+    step: 0,
+    createdAt: 0,
+  })
+  // A plan whose only guard fails: decide returns no-candidate (a fallback).
+  env.plans.set(SESSION, { goal: 'g', steps: [candidate('A', 'IMPOSSIBLE')] })
+
+  await runPost(env.host, 'TRIGGER')
+
+  assert.ok(env.receipts.some((r) => r.code === 'no-candidate'))
+  assert.equal(env.queue.peek(SESSION)?.callId, 'live-call', 'the live entry survives')
+  assert.equal(env.deps.budget.count(), 0, 'the fallback itself spends nothing')
+})
+
 // ---------------------------------------------------------------------------
 // Obligation 7: the execute hook peeks, compares callId, and clears both paths
 // ---------------------------------------------------------------------------
 
-test('O7 callId 不匹配：返回宿主 failure、清队列、写 dispatch-rejected、不派发', async () => {
+test('O7 callId 不同是普通调用：直通、不写收据、条目保留（F2）', async () => {
   const env = setup()
   env.queue.set(SESSION, {
     callId: 'decided-call',
@@ -417,19 +464,18 @@ test('O7 callId 不匹配：返回宿主 failure、清队列、写 dispatch-reje
   let dispatched = 0
   const out: Any = await env.host.callHook(
     'tools/execute',
-    [{ name: 'read', callId: 'tampered-call', arguments: { file_path: '/a' }, agent }],
+    [{ name: 'grep', callId: 'someone-else', arguments: { pattern: 'x' }, agent }],
     async () => {
       dispatched += 1
-      return 'DISPATCHED'
+      return 'OTHER'
     },
   )
 
-  assert.equal(out.isError, true)
-  assert.equal(out.error.info.code, 'dispatch-rejected')
-  assert.equal(out.error.info.name, 'DispatchRejectedError')
-  assert.equal(dispatched, 0)
-  assert.equal(env.queue.peek(SESSION), undefined, 'the entry must be cleared on reject')
-  assert.ok(env.receipts.some((r) => r.code === 'dispatch-rejected'))
+  // The host assigns call ids; a call with a different id is not our dispatch.
+  assert.equal(out, 'OTHER')
+  assert.equal(dispatched, 1, 'the ordinary call must reach its tool')
+  assert.equal(env.queue.peek(SESSION)?.callId, 'decided-call', 'the entry survives')
+  assert.equal(env.receipts.some((r) => r.code === 'dispatch-rejected'), false)
 })
 
 test('O7 名/参不符走 rejectIfTampered，且同样清队列', async () => {
@@ -454,7 +500,7 @@ test('O7 名/参不符走 rejectIfTampered，且同样清队列', async () => {
   assert.equal(env.queue.peek(SESSION), undefined)
 })
 
-test('O7 accept 路径也清队列：残留条目会把后续不同调用误判为 dispatch-rejected', async () => {
+test('O7 accept 路径清队列（条目完成使命后不得残留）', async () => {
   const env = setup()
   env.queue.set(SESSION, {
     callId: 'decided-call',
@@ -473,14 +519,14 @@ test('O7 accept 路径也清队列：残留条目会把后续不同调用误判�
   )
   assert.equal(first, 'DISPATCHED')
 
-  // A later, unrelated call must pass: a stale entry would compare its callId
-  // against this one and reject it.
+  // A later call with a different callId now passes through either way; the
+  // pinning observation is that the accepted entry did not survive.
   const second = await env.host.callHook(
     'tools/execute',
     [{ name: 'grep', callId: 'other-call', arguments: { pattern: 'x' }, agent }],
     async () => 'DISPATCHED-2',
   )
-  assert.equal(second, 'DISPATCHED-2', 'a stale entry must not reject a later call')
+  assert.equal(second, 'DISPATCHED-2')
   assert.equal(env.queue.peek(SESSION), undefined, 'the accept path must clear too')
 })
 
@@ -570,6 +616,7 @@ test('O10 commit 写 anchors（stepId root + root 文本），新 turn 清空', 
   env.clock.onModelRequest(2, 0)
   await runPost(env.host, text)
   assert.equal(env.anchors.get(SESSION), undefined, 'turn end clears the session anchors')
+  assert.equal(env.queue.peek(SESSION), undefined, 'turn end clears the pending entry too (F2)')
   assert.equal(env.receipts.some((r) => r.kind === 'reset'), false)
 })
 
@@ -609,6 +656,44 @@ test('O10 anchors 同时记录候选引用的历史回执 id', async () => {
   const anchors = env.anchors.get(SESSION)
   assert.deepEqual(anchors?.anchors, { root: 'B-TRIGGER', A: '/from-a' })
   assert.equal(anchors?.stepId, 'root')
+})
+
+// ---------------------------------------------------------------------------
+// Review F1: post-execute runs the marker branch only, never the anchor compare
+// ---------------------------------------------------------------------------
+
+test('F1 commit 后的下一条回执不触发 compaction-reset，anchors 保留', async () => {
+  const env = setup()
+  env.plans.set(SESSION, { goal: 'g', steps: [candidate('A', 'TRIGGER')] })
+
+  await runPost(env.host, 'TRIGGER')
+  assert.ok(env.queue.peek(SESSION), 'the commit is live')
+  assert.notEqual(env.anchors.get(SESSION), undefined, 'the commit sets anchors')
+
+  // The substituted call's own result (or any unrelated result) is a different
+  // call's text: the anchor comparison cannot establish identity here and would
+  // always fire a false compaction-reset (review F1).
+  await runPost(env.host, 'a different tool result')
+
+  assert.equal(env.receipts.some((r) => r.kind === 'reset'), false, 'no false reset')
+  assert.notEqual(env.anchors.get(SESSION), undefined, 'anchors must survive for 23c')
+  assert.ok(env.queue.peek(SESSION), 'the pending entry must survive too')
+})
+
+test('F2 重置清空 pending 条目并写真实 turn（设计 §5.2-7）', async () => {
+  const env = setup()
+  env.plans.set(SESSION, { goal: 'g', steps: [candidate('A', 'TRIGGER')] })
+
+  await runPost(env.host, 'TRIGGER')
+  assert.ok(env.queue.peek(SESSION), 'the commit is pending')
+
+  await runPost(env.host, `head${PRUNE_MARKER}tail`)
+
+  assert.equal(env.queue.peek(SESSION), undefined, 'a reset empties pending')
+  assert.equal(env.anchors.get(SESSION), undefined)
+  const reset = env.receipts.find((r) => r.kind === 'reset')
+  assert.equal(reset?.code, 'pruned-reset')
+  assert.equal(reset?.turn, 1, 'the reset receipt carries the clock turn')
 })
 
 // ---------------------------------------------------------------------------

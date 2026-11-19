@@ -22,11 +22,19 @@
  * inside the hooks' `try` blocks, because the callers own the no-throw
  * contract with the host.
  *
- * This is a private module: it is not exported from the package entry point,
- * and `HookDeps` deliberately does not expose it (T23c wires the hooks, not
- * the state). It lives apart from `post-execute.ts` because that file already
- * carries the four mount bodies and the twelve obligations; mixing a mutable
- * session map into it would make the hook harder to audit.
+ * **Lifetime.** One entry per session, scoped to the host turn. A session's
+ * entry is replaced on the first call of its next turn, so the steady-state
+ * retention is one turn's receipts (at most 27: `'root'` plus the plan's
+ * `A`–`Z`) and any in-flight dispatches. There is no session-end signal in the
+ * hooks this task owns, so a session that is never touched again keeps its last
+ * turn until the process exits. `clear(sessionId)` is exposed for 23c: pass the
+ * instance through `HookDeps.sessionState` and call it on whatever session-end
+ * signal the host offers.
+ *
+ * This module is private (`HookDeps` exposes only the optional instance, not
+ * the class's internals). It lives apart from `post-execute.ts` because that
+ * file already carries the four mount bodies and the twelve obligations;
+ * mixing a mutable session map into it would make the hook harder to audit.
  *
  * @module dsh-boost/hooks/session-state
  */
@@ -100,7 +108,12 @@ export class ReceiptSessionState {
     return candidateId
   }
 
-  /** Drop everything for one session (turn end, or a scope reset). */
+  /**
+   * Drop everything for one session: both maps and the stored turn.
+   *
+   * 23c calls this on a session-end signal; the hooks themselves only replace
+   * an entry lazily when the next turn's first call arrives.
+   */
   clear(sessionId: string): void {
     this.bySession.delete(sessionId)
   }

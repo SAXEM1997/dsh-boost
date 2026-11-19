@@ -87,12 +87,23 @@ export class TurnClock {
     return this.hostStep
   }
 
-  /** Count one tool step in the current turn. */
+  /**
+   * Count one tool step in the current turn.
+   *
+   * @deprecated A plugin-side counter, not the host step. Never feed it to
+   * `stepId`/`callId`: `callIdFor` takes `step()` (obligation 1). Retained for
+   * Task 20's tests and older callers.
+   */
   takeStep(): void {
     this.steps += 1
   }
 
-  /** Steps taken since the current turn began (or since construction). */
+  /**
+   * Steps taken since the current turn began (or since construction).
+   *
+   * @deprecated The same substitution counter; it is not `step()` and must not
+   * be used as the host step.
+   */
   stepsThisTurn(): number {
     return this.steps
   }

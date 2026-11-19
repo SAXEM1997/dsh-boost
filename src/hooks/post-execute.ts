@@ -68,7 +68,7 @@ import type { StepBudget } from '../admission/ledger.js'
 import type { UsageLedger } from '../admission/usage.js'
 import { DEFAULT_CONFIG } from '../config.js'
 import { decide } from '../gate/decide.js'
-import { alreadySpilled, invalidate } from '../gate/invalidate.js'
+import { alreadySpilled, looksPruned } from '../gate/invalidate.js'
 import type { AnchorStore, ReceiptAnchors } from '../gate/invalidate.js'
 import type { Plan } from '../gate/plan.js'
 import { PROTOCOL_NAME, PROTOCOL_ORDER, PROTOCOL_TEXT } from '../prompt/protocol.js'
@@ -134,6 +134,15 @@ export interface HookDeps {
   clock?: TurnClock
   /** Parsed plans per session, written by 23c's stream hook. */
   plans?: Map<string, Plan>
+  /**
+   * The per-session receipt/dispatch store. Optional so 23c can own the
+   * instance and call `clear(sessionId)` on a session-end signal; when omitted,
+   * `registerHooks` creates one. Lifetime: the store keeps one host turn's
+   * receipts and in-flight dispatches per session, folds them on the first call
+   * of a new turn, and otherwise retains the last turn until `clear` (or process
+   * exit). The class documents the reasoning.
+   */
+  sessionState?: ReceiptSessionState
   /** The host spill backend; absent skips apply-mode projection. */
   spill?: SpillBackend
   /** Token estimator; absent skips projection accounting entirely. */
@@ -304,13 +313,24 @@ function pendingAnchorsOf(deps: HookDeps, sessionId: string): ReceiptAnchors | u
   }
 }
 
-/** Ask {@link invalidate} without letting a malformed anchor record escape as a throw. */
-function invalidationOf(
+/**
+ * The only invalidation branch that is live at this call site: the prune marker.
+ *
+ * `invalidate` also compares the anchor text, but a `tools/post-execute` receipt
+ * is a *different* call's body, so that comparison can never establish the
+ * anchored receipt's identity here; it would fire `compaction-reset` after every
+ * commit, drop the anchors obligation 10 exists to keep for 23c, and skip one
+ * decision (review F1). The anchor branch belongs on the model-request path
+ * (`llm/stream`, 23c), where the compared text is the anchored receipt's current
+ * body in the outgoing messages.
+ */
+function markerResetOf(
   pending: ReceiptAnchors,
   receiptText: string,
-): 'pruned-reset' | 'compaction-reset' | undefined {
+): 'pruned-reset' | undefined {
   try {
-    return invalidate(pending, receiptText)
+    if (pending == null) return undefined
+    return looksPruned(receiptText) ? 'pruned-reset' : undefined
   } catch {
     return undefined
   }
@@ -386,6 +406,7 @@ async function appendResetReceipt(
   receipts: ReceiptStore | undefined,
   exec: PostExecuteExec | undefined,
   sessionId: string,
+  turn: number,
   stepId: string,
   code: 'pruned-reset' | 'compaction-reset',
 ): Promise<void> {
@@ -395,9 +416,7 @@ async function appendResetReceipt(
       version: 1,
       ts: new Date().toISOString(),
       sessionId,
-      // The mount observes no turn index; 0 is the same honest placeholder
-      // `skip:no-scope` uses, and the receipt's `ts` keeps ordering evidence.
-      turn: 0,
+      turn,
       stepId,
       kind: 'reset',
       code,
@@ -420,11 +439,15 @@ async function resetInvalidatedPending(
   deps: HookDeps,
   exec: PostExecuteExec | undefined,
   sessionId: string,
+  turn: number,
   pending: ReceiptAnchors,
   code: 'pruned-reset' | 'compaction-reset',
 ): Promise<void> {
+  // Design §5.2-7: a reset returns to the slow path *and* empties pending, so no
+  // queued substitution can fire from anchors that no longer name live text.
   clearAnchors(deps, sessionId)
-  await appendResetReceipt(deps.receipts, exec, sessionId, pending.stepId, code)
+  clearPending(deps, sessionId)
+  await appendResetReceipt(deps.receipts, exec, sessionId, turn, pending.stepId, code)
 }
 
 /**
@@ -763,7 +786,9 @@ async function decideSubstitution(
   }
 
   if (decision.kind === 'fallback') {
-    clearPending(deps, ctx.sessionId)
+    // This invocation enqueued nothing, so any pending entry belongs to another
+    // call in the step; cancelling it would leave the budget spent and usage
+    // marked for a substitution that never runs (review F2).
     await appendReceipt(deps, ledgerEntry(ctx, 'skip', decision.code, { stepId: 'root' }))
     return { shadowCommitted: false }
   }
@@ -772,6 +797,15 @@ async function decideSubstitution(
   if (candidate === undefined) {
     // decide only commits its own plan's ids; this is containment, not a path.
     await appendReceipt(deps, ledgerEntry(ctx, 'skip', 'no-candidate', { stepId: 'root' }))
+    return { shadowCommitted: false }
+  }
+
+  // The live visibility check runs for the shadow path too: the record-only
+  // measurement must describe the same population the real admission would
+  // consider, not a broader one (review F2). The cached judgement passed above,
+  // but the document may have changed while the session ran.
+  if (!substitutableSession(deps, ctx.sessionId, ctx.doc)) {
+    await appendReceipt(deps, ledgerEntry(ctx, 'skip', 'skip:no-scope', { stepId: 'root' }))
     return { shadowCommitted: false }
   }
 
@@ -792,11 +826,6 @@ async function decideSubstitution(
     )
     consumePlan(deps, ctx.sessionId, decision.candidateId)
     return { shadowCommitted: true }
-  }
-
-  if (!substitutableSession(deps, ctx.sessionId, ctx.doc)) {
-    await appendReceipt(deps, ledgerEntry(ctx, 'skip', 'skip:no-scope', { stepId: 'root' }))
-    return { shadowCommitted: false }
   }
 
   const step = clockStepOf(deps)
@@ -821,8 +850,9 @@ async function decideSubstitution(
   }
 
   if (!takeBudget(deps)) {
+    // No entry is ours to clear here: this invocation enqueued nothing, so a
+    // live entry belongs to another call in the step (review F2).
     await appendReceipt(deps, ledgerEntry(ctx, 'skip', 'steps-exhausted', { stepId: 'root' }))
-    clearPending(deps, ctx.sessionId)
     return { shadowCommitted: false }
   }
 
@@ -843,7 +873,13 @@ async function decideSubstitution(
   } catch {
     await appendReceipt(
       deps,
-      ledgerEntry(ctx, 'skip', 'substitution-unavailable', { stepId: 'root', reason: 'queue-failed' }),
+      // The step was already taken and this receipt is the only evidence that
+      // it bought no substitution; a throwing queue must not also hide the cost.
+      ledgerEntry(ctx, 'skip', 'substitution-unavailable', {
+        stepId: 'root',
+        reason: 'queue-failed',
+        budget: 'spent',
+      }),
     )
     return { shadowCommitted: false }
   }
@@ -1114,23 +1150,30 @@ async function postExecute(
     // dispatches here), then the arriving receipt becomes `root` and, if it is
     // the call we substituted, also becomes the candidate's receipt.
     const { rolledOver } = state.begin(sessionId, turn)
-    if (rolledOver) clearAnchors(deps, sessionId)
+    if (rolledOver) {
+      // A pending entry from the previous turn can never match a call in this
+      // one, so it is dead weight; the reset path clears mid-turn (F2).
+      clearAnchors(deps, sessionId)
+      clearPending(deps, sessionId)
+    }
     state.recordRoot(sessionId, turn, receipt)
     fileDispatchedReceipt(state, exec, sessionId, turn, receipt)
 
     // Conservative local invalidation check. The tool-result path cannot see
     // the host pruner (it rewrites session surface nodes, not this waterfall)
-    // or compaction, so this call site only catches a receipt whose tool output
-    // literally carries the marker, plus an anchor mismatch; a hit only
-    // abandons the decision, which is always safe. Task 23c owns the real
-    // check on the model-request path.
+    // or compaction, so only the **marker** branch is meaningful here: it
+    // catches a receipt whose tool output itself carries the pruner literal.
+    // The anchor comparison needs the anchored receipt's current text and
+    // belongs to the model-request path (23c); running it here would compare a
+    // different call's text and fire a false compaction-reset after every
+    // commit (review F1). A hit only abandons the decision, which is safe.
     const pending = pendingAnchorsOf(deps, sessionId)
     // `!= null` rather than `!== undefined`: a foreign store can hand back a
     // null, and dereferencing it would throw out of the hook.
     if (pending != null) {
-      const reset = invalidationOf(pending, receipt.text)
+      const reset = markerResetOf(pending, receipt.text)
       if (reset !== undefined) {
-        await resetInvalidatedPending(deps, exec, sessionId, pending, reset)
+        await resetInvalidatedPending(deps, exec, sessionId, turn, pending, reset)
         return decision
       }
     }
@@ -1228,13 +1271,14 @@ async function inspectDispatch(
     return { kind: 'reject' as const, message }
   }
 
-  // `rejectIfTampered` compares name and parsed arguments only; the call id is
-  // this hook's responsibility (T18's contract deliberately excludes it).
+  // A different call id is an ordinary call, not tampering: the host assigns
+  // call ids, so only a call that carries the id we chose is the dispatch under
+  // inspection. Rejecting the rest would lose a legitimate tool's output (F2).
   if (typeof exec.callId !== 'string' || exec.callId !== entry.callId) {
-    return reject(
-      'dsh-boost refused a substituted call: the dispatched call id does not match the pending decision',
-    )
+    return { kind: 'next' }
   }
+  // `rejectIfTampered` compares name and parsed arguments only; the call id was
+  // compared above.
   if (rejectIfTampered(exec, entry).reject) {
     return reject(
       'dsh-boost refused a substituted call: the dispatched arguments do not match the pending decision',
@@ -1250,13 +1294,14 @@ async function inspectDispatch(
  * The `tools/execute` hook body: refuse a tampered substitution.
  *
  * With no pending entry the plugin is not substituting this call, so `next()`
- * runs untouched. Otherwise the arriving call is looked up with `peek` — never
- * `take`: the entry must survive long enough for this hook to inspect it — and
- * compared with the decision. The entry is cleared on **both** paths. A stale
- * entry makes every later differing call in the session a false
- * `dispatch-rejected`, which is why the accept path clears too. On the accept
- * path the call id is remembered so the following `post-execute` can file the
- * receipt under its candidate id.
+ * runs untouched. The entry describes the dispatch we synthesised: a call that
+ * carries the **same** call id is inspected, compared with the decision, and
+ * the entry is cleared on both the accept and the reject path so it cannot
+ * outlive its dispatch. A call with a **different** call id is an ordinary call
+ * — the host assigns ids — and passes through without touching the entry
+ * (review F2: rejecting it would lose a legitimate tool's output). On the
+ * accept path the call id is remembered so the following `post-execute` can
+ * file the receipt under its candidate id.
  *
  * The mount fails open on an internal error (the design's fail-closed means
  * "pass through, do not substitute", never "intercept"): a broken queue must
@@ -1339,7 +1384,7 @@ function registerProtocolSection(ctx: PluginContext, scope: ScopeStore | undefin
  * registration.
  */
 export function registerHooks(ctx: PluginContext, deps: HookDeps): void {
-  const state = new ReceiptSessionState()
+  const state = deps.sessionState ?? new ReceiptSessionState()
   registerProtocolSection(ctx, deps.scope)
   registerPostExecute(ctx, deps, state)
   registerLlmStream(ctx)

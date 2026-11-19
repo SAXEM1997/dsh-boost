@@ -220,7 +220,7 @@ test('post-execute 命中 pruned-reset：清空 pending 并写 reset 收据', as
   assert.equal(typeof receipts[0].turn, 'number')
 })
 
-test('post-execute 命中 compaction-reset：清空 pending 并写 reset 收据', async () => {
+test('post-execute 不跑锚点比较：文本不同但无 marker 时不写 reset（F1）', async () => {
   const anchors = new AnchorStore()
   anchors.set(SESSION, { stepId: 'B', anchors: { B: 'original text' } })
   const { host, receipts } = hookSetup({ anchors })
@@ -229,11 +229,8 @@ test('post-execute 命中 compaction-reset：清空 pending 并写 reset 收据'
   const res = await runPost(host, 'completely different', decision)
 
   assert.equal(res, decision)
-  assert.equal(anchors.get(SESSION), undefined)
-  assert.equal(receipts.length, 1)
-  assert.equal(receipts[0].kind, 'reset')
-  assert.equal(receipts[0].code, 'compaction-reset')
-  assert.equal(receipts[0].stepId, 'B')
+  assert.notEqual(anchors.get(SESSION), undefined, 'the anchor branch belongs to 23c')
+  assert.equal(receipts.length, 0)
 })
 
 test('锚点相等且无 marker：post-execute 不清 pending、不写 reset 收据', async () => {
@@ -281,11 +278,11 @@ test('锚点存储 clear 抛错时仍然写 reset 收据且不抛', async () => 
   const { host, receipts } = hookSetup({ anchors })
   const decision = { kind: 'accept' }
 
-  const res = await runPost(host, 'completely different', decision)
+  const res = await runPost(host, `head${PRUNE_MARKER}tail`, decision)
 
   assert.equal(res, decision)
   assert.equal(receipts.length, 1)
-  assert.equal(receipts[0].code, 'compaction-reset')
+  assert.equal(receipts[0].code, 'pruned-reset')
 })
 
 test('锚点存储返回 null 且回执带 marker 时 post-execute 不抛', async () => {
@@ -311,7 +308,7 @@ test('收据写失败时 post-execute 不抛，pending 仍被清空', async () =
   })
   const decision = { kind: 'accept' }
 
-  const res = await runPost(host, 'completely different', decision)
+  const res = await runPost(host, `head${PRUNE_MARKER}tail`, decision)
 
   assert.equal(res, decision)
   assert.equal(anchors.get(SESSION), undefined)
