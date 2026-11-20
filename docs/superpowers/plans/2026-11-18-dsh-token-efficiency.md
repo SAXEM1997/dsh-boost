@@ -935,7 +935,7 @@ Expected: FAIL，模块不存在
 
 - [ ] **Step 3: 实现**
 
-`workspaceIdOf` 读 `agent?.session?.header?.cwd`（`Session.header` 非可选，不套多余可选链），再 `registry?.list().find(w => w.path === cwd)?.id`；没有 registry 或查不到 → `undefined`（**不可见**）。`resolveVisible` 先取 doc 再 `isVisible(doc, workspaceIdOf(agent, registry))`，任何异常 → `false`。`supportsStepWhen` 只做 `typeof` 判断。`test/fakes/host.ts` 提供一个最小假宿主：记录 `register` 调用（含 `when`）、`resolve()` 返回已注册列表、`llm.stream` 可控返回。
+`workspaceIdOf` 读 `agent?.session?.header?.cwd`（`Session.header` 在宿主类型上非可选，但外部 exec 可能是 `{agent:{}}` 这样的残缺对象，所以这里保留可选链作为运行时防御——见设计 §5.4），再 `registry?.list().find(w => w.path === cwd)?.id`；没有 registry 或查不到 → `undefined`（**不可见**）。`resolveVisible` 先取 doc 再 `isVisible(doc, workspaceIdOf(agent, registry))`，任何异常 → `false`。`supportsStepWhen` 只做 `typeof` 判断。`test/fakes/host.ts` 提供一个最小假宿主：记录 `register` 调用（含 `when`）、`resolve()` 返回已注册列表、`llm.stream` 可控返回。
 
 - [ ] **Step 4: 运行确认通过**
 

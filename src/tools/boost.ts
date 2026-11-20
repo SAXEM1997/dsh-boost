@@ -126,6 +126,7 @@ const ERR_BOOST_PARTIAL_MOUNT = 'ERR_BOOST_PARTIAL_MOUNT'
  * (there is no service probe — the module is reached by `import()` only).
  */
 const ERR_HOST_NO_SPILL_NOTICE = 'ERR_HOST_NO_SPILL_NOTICE'
+const ERR_HOST_SPILL_FAILING = 'ERR_HOST_SPILL_FAILING'
 const ERR_HOST_NO_TOKENMETER = 'ERR_HOST_NO_TOKENMETER'
 const ERR_HOST_NO_ESTIMATOR = 'ERR_HOST_NO_ESTIMATOR'
 const ERR_HOST_PLATFORM_UNSUPPORTED = 'ERR_HOST_PLATFORM_UNSUPPORTED'
@@ -179,15 +180,20 @@ const ERR_HOST_COMPLETE_SECTION = 'ERR_HOST_COMPLETE_SECTION'
  *
  * `projection-skipped:spill-failed` and `projection-skipped:footer-failed` are
  * the same two degradations at the point of use: the backend exists but
- * `saveText` rejected, or the renderer exists but threw. They share the stable
- * codes because the operator's action is the same (repair the host spill path);
- * the receipt code keeps the distinction in `counts`. Without these two rows a
+ * `saveText` rejected, or the renderer exists but threw. Without these rows a
  * present-but-broken store skipped 100% of projections while `degraded` stayed
  * empty (review row 31).
+ *
+ * `spill-failed` gets its **own** code rather than reusing `ERR_HOST_NO_SPILL`:
+ * a backend that rejects every write is not an absent backend, and telling an
+ * operator to "restore the spill package" when the package is installed and
+ * failing sends them to the wrong place. `footer-failed` stays with
+ * `ERR_HOST_NO_SPILL_NOTICE` because both mean the same thing at the point of
+ * use — the footer cannot be produced.
  */
 const RECEIPT_DEGRADATION: ReadonlyArray<{ readonly code: string; readonly degraded: string }> = [
   { code: 'projection-skipped:no-spill', degraded: ERR_HOST_NO_SPILL },
-  { code: 'projection-skipped:spill-failed', degraded: ERR_HOST_NO_SPILL },
+  { code: 'projection-skipped:spill-failed', degraded: ERR_HOST_SPILL_FAILING },
   { code: 'projection-skipped:no-footer', degraded: ERR_HOST_NO_SPILL_NOTICE },
   { code: 'projection-skipped:footer-failed', degraded: ERR_HOST_NO_SPILL_NOTICE },
   // The substitution refusal writes the stable code itself, so a status built

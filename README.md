@@ -363,6 +363,7 @@ horizon 重放，并计入 `projection_horizon_reestimated`；`projection_horizo
 | `tokenMeter` | 软（`ctx.get('tokenMeter')`） | 拒绝替换；投影仍可用，投影账记 `unknown`（不伪造数字）；`status.degraded` 带 `ERR_HOST_NO_TOKENMETER` |
 | `spillStore` | 软（`ctx.get('spillStore')`） | `projection: 'on'` 时超限回执不投影（保住证据），收据记 `projection-skipped:no-spill`；`status.degraded` 带 `ERR_HOST_NO_SPILL`（实时探测只在 on 模式；历史收据在任何模式下都会让它出现） |
 | `@deepseek-ai/dsh-spill-policy/notice` | 软（动态 import） | spill 后端在，但页脚渲染器 `formatSpillNotice` 加载不到/不存在：apply 模式无法拼页脚，逐条跳过（收据 `projection-skipped:no-footer`），`status.degraded` 带 `ERR_HOST_NO_SPILL_NOTICE`。这与「没有 spill 后端」的 `ERR_HOST_NO_SPILL` 是两件事 |
+| （spill 后端存在但写失败） | — | 每次 `saveText` 被拒：收据 `projection-skipped:spill-failed`，`status.degraded` 带 **`ERR_HOST_SPILL_FAILING`**。这是**第三种**状态，既不是「没有后端」也不是「没有页脚渲染器」——让操作者去「恢复 spill 包」会把一个已装好却报错的包当成没装 |
 | `@deepseek-ai/dsh-token-meter/estimate` | 软（动态 import） | 固定开销无法测量，`fixedOverheadTokens` 为 `'unknown'`；`status.degraded` 带 `ERR_HOST_NO_ESTIMATOR` |
 | `win32` 平台 | 运行时检查 `isPosixOnly()` | 拒绝替换，投影照常；`status.degraded` 带 `ERR_HOST_PLATFORM_UNSUPPORTED` |
 | 宿主版本线 | 启动时读 `@deepseek-ai/dsh-app-boot` 的版本 | 不是 `0.2.2-rc.4` 时日志警告 `ERR_HOST_VERSION_MISMATCH`，插件照常加载（advisory，不是 `status.degraded` 码）；版本读不到时只记 info，不发码 |

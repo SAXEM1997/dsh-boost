@@ -295,6 +295,7 @@ deprecation 元数据，不改 `latest`、不影响 `^0.1.0` 的解析；本文�
 | `ERR_HOST_NO_ESTIMATOR` | `status.degraded` | `fixedOverheadTokens` 为 `'unknown'` | 宿主树缺 `@deepseek-ai/dsh-token-meter/estimate`；与上一行是两件事 |
 | `ERR_HOST_NO_SPILL` | `status.degraded`（收据映射在任何模式；宿主探针仅 `projection:'on'`） | 超限回执不投影，`projection-skipped:no-spill` | 恢复/检查的是 spill **后端**（`dsh-spill-local`，§2.2） |
 | `ERR_HOST_NO_SPILL_NOTICE` | `status.degraded`（收据映射） | spill 后端在，但页脚模块解析不到 `formatSpillNotice`；投影全部跳过，收据 `projection-skipped:no-footer`，原文保留 | 恢复宿主树里的 `@deepseek-ai/dsh-spill-policy/notice`；这是与 no-spill 不同的门（§2.2 末行） |
+| `ERR_HOST_SPILL_FAILING` | `status.degraded`（收据映射） | spill 后端**在**，但 `saveText` 每次都被拒；投影全部跳过，收据 `projection-skipped:spill-failed`，原文保留。与 `ERR_HOST_NO_SPILL`（后端缺失）是两种状态，修法不同 | 查后端写权限/磁盘/路径；`ERR_HOST_NO_SPILL` 那条的处置会把人引向「重装 spill 包」，在这里是错的 |
 | `ERR_HOST_PLATFORM_UNSUPPORTED` | `status.degraded` | win32 上替换拒绝，投影不受影响 | 平台限制，无需处置 |
 | `ERR_HOST_COMPLETE_SECTION` | `status.degraded` | 宿主的 `complete: true` 提示段在装配瀑布之后替换了整个系统提示，协议段没有到达出站请求；受影响请求上替换与投影 fail-closed（会话被判不可见），工作区明明可见插件却不动作 | 找出宿主提示配置里覆盖瀑布装配的 complete 段（通常属于另一个插件）；移除它，或接受这些请求上替换/投影不可用 |
 | `ERR_RECEIPTS_TRUNCATED` | `status.degraded` | 收据分片超过 256 个；`status` 只聚合按名排序的前 256 个，`counts` 与两账因此都是**下界**，不是漏算就是少算——方向安全但数字偏小 | 归档或清理旧分片，重跑 `status`；要全量就分批统计 |
@@ -397,6 +398,9 @@ pi-ai `transformMessages` 会丢掉 thinking 块。
 ## 5. 影子周与统计复算
 
 ### 5.1 影子报告（收据）
+
+> 路径以组装日志里打印的 `root=` 为准。设置了 `config.dshHome` 时它**优先于** `$DSH_HOME`，
+> 照本节字面写 `$DSH_HOME/...` 会读到一个空目录并拿到四项零值（不是「没有收据」的证据）。
 
 ```bash
 node scripts/shadow-report.mjs --dir "$DSH_HOME/boost/receipts"

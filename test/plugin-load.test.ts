@@ -508,10 +508,11 @@ test('row 31: 坏掉的 spill store 首次失败后会重新解析服务', async
   assert.ok(codes.includes('projected'), JSON.stringify(codes))
 
   // The present-but-broken store must be visible even though `hasSpill` is
-  // true: the failed write left `projection-skipped:spill-failed` behind.
+  // true: the failed write left `projection-skipped:spill-failed` behind. The
+  // code is its own — a store that rejects writes is not an absent store.
   const status = await statusOf(app.host)
   assert.equal(status.counts.projected, 1)
-  assert.ok(status.degraded.includes('ERR_HOST_NO_SPILL'), JSON.stringify(status.degraded))
+  assert.ok(status.degraded.includes('ERR_HOST_SPILL_FAILING'), JSON.stringify(status.degraded))
 })
 
 test('row 34: build 元数据不触发 ERR_HOST_VERSION_MISMATCH', () => {

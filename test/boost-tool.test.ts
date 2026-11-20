@@ -916,7 +916,7 @@ test('status 把 projection-skipped:no-footer 映射为 ERR_HOST_NO_SPILL_NOTICE
   )
 })
 
-test('status 把 projection-skipped:spill-failed 映射为 ERR_HOST_NO_SPILL', async () => {
+test('status 把 projection-skipped:spill-failed 映射为 ERR_HOST_SPILL_FAILING', async () => {
   const d = await deps()
   await d.receipts.append({
     version: 1,
@@ -932,7 +932,14 @@ test('status 把 projection-skipped:spill-failed 映射为 ERR_HOST_NO_SPILL', a
   assert.equal(status.counts['projection-skipped:spill-failed'], 1)
   // The store exists (`hasSpill` is true) but every write fails: without this
   // mapping 100% of projections could be skipped while `degraded` stayed empty.
-  assert.ok(status.degraded.includes('ERR_HOST_NO_SPILL'), JSON.stringify(status.degraded))
+  // The code is its own, not `ERR_HOST_NO_SPILL`: a store that rejects every
+  // write is not an absent store, and the two need different repairs.
+  assert.ok(status.degraded.includes('ERR_HOST_SPILL_FAILING'), JSON.stringify(status.degraded))
+  assert.equal(
+    status.degraded.includes('ERR_HOST_NO_SPILL'),
+    false,
+    'a failing store must not be reported as an absent one',
+  )
   assert.equal(
     status.degraded.some((code) => code.startsWith('projection-skipped:')),
     false,
