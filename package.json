@@ -4,14 +4,7 @@
   "description": "Cut DSH token usage by projecting tool receipts and skipping deterministic read-only calls. Install as dsh-boost@^0.1.0: the registry latest tag still points at the incompatible 0.0.1-rc.1.",
   "type": "module",
   "license": "Apache-2.0",
-  "keywords": [
-    "dsh",
-    "dsh-plugin",
-    "token-efficiency",
-    "prompt-cache",
-    "tool-receipt",
-    "delegation"
-  ],
+  "keywords": ["dsh", "dsh-plugin", "token-efficiency", "prompt-cache", "tool-receipt", "delegation"],
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
   "exports": {
@@ -25,12 +18,15 @@
     "./locale/*.json": "./locale/*.json"
   },
   "scripts": {
-    "build": "tsc -p tsconfig.json",
+    "clean": "node scripts/clean.mjs",
+    "build": "node scripts/clean.mjs && tsc -p tsconfig.json",
     "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.test.json",
     "test": "node --import tsx --test \"test/**/*.test.ts\"",
     "stats": "node scripts/session-stats.mjs",
-    "prepack": "npm run build",
-    "prepublishOnly": "npm run build && npm pack --dry-run && test -f dist/index.js && test -f dist/index.d.ts"
+    "ci": "npm run typecheck && npm test && npm run build",
+    "verify:package": "node scripts/verify-package.mjs",
+    "prepare": "npm run build",
+    "prepublishOnly": "npm run ci && npm run verify:package"
   },
   "devDependencies": {
     "@deepseek-ai/dsh-llm": "0.2.2-rc.4",
@@ -41,25 +37,8 @@
     "tsx": "^4.19.0",
     "typescript": "^5.6.0"
   },
-  "publishConfig": {
-    "access": "public"
-  },
-  "engines": {
-    "node": ">=24.9.0",
-    "dsh": ">=0.2.2-rc.1 <0.3.0-0"
-  },
-  "dsh": {
-    "bundle": {
-      "patch": "./cordis.patch.yml"
-    }
-  },
-  "files": [
-    "dist",
-    "locale",
-    "cordis.patch.yml",
-    "README.md",
-    "README.en.md",
-    "LICENSE",
-    "NOTICE"
-  ]
+  "publishConfig": { "access": "public" },
+  "engines": { "node": ">=24.9.0", "dsh": ">=0.2.2-rc.1 <0.3.0-0" },
+  "dsh": { "bundle": { "patch": "./cordis.patch.yml" } },
+  "files": ["dist", "locale", "cordis.patch.yml", "README.md", "README.en.md", "LICENSE", "NOTICE"]
 }
