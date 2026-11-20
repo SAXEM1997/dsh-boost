@@ -35,8 +35,7 @@
  * byte-identical to the `argumentsDelta` that streamed it.
  *
  * The generator is pure over `e`: it reads no clock, no queue, and no I/O, so
- * the same entry always produces the same chunks. `createdAt` is deliberately
- * not consulted.
+ * the same entry always produces the same chunks.
  *
  * @module dsh-boost/hooks/synthesize
  */
@@ -54,7 +53,7 @@ const UNSERIALISABLE_ARGS_CODE = 'BOOST_ARGS_UNSERIALISABLE'
  * constant because the block is replayed on every later request and rendered in
  * the transcript, so naming the tool and candidate here would cost tokens on
  * every turn to repeat what the adjacent `tool-call` block already says. It
- * never reads `createdAt` or any other clock value.
+ * never reads a clock value.
  */
 function reasoningText(): string {
   return 'Deterministic substitution.'

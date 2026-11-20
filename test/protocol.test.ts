@@ -25,40 +25,38 @@ test('协议段不含模板占位符（interpolate:false 的前提）', () => {
   assert.equal(PROTOCOL_TEXT.includes('{{'), false)
 })
 
-test('时钟按 host turn 切回合，同回合的请求不重置步数', () => {
+test('时钟按 host turn 切回合，新回合复位 host step', () => {
   const c = new TurnClock()
   assert.equal(c.turn(), 0)
-  assert.equal(c.stepsThisTurn(), 0)
-  c.takeStep(); c.takeStep()
-  assert.equal(c.stepsThisTurn(), 2)
-  c.onModelRequest(1)
+  assert.equal(c.step(), 0)
+  c.onModelRequest(1, 2)
   assert.equal(c.turn(), 1)
-  assert.equal(c.stepsThisTurn(), 0)
-  c.takeStep()
+  assert.equal(c.step(), 2)
   // DSH 的一个 turn 含多次 model request：同一 host turn 的第二个请求不得清零。
-  c.onModelRequest(1)
+  c.onModelRequest(1, 3)
   assert.equal(c.turn(), 1)
-  assert.equal(c.stepsThisTurn(), 1)
-  c.onModelRequest(2)
+  assert.equal(c.step(), 3)
+  c.onModelRequest(2, 0)
   assert.equal(c.turn(), 2)
-  assert.equal(c.stepsThisTurn(), 0)
+  assert.equal(c.step(), 0)
 })
 
 test('时钟忽略 NaN 与倒退的 host turn', () => {
   const c = new TurnClock()
-  c.onModelRequest(2)
-  c.takeStep()
-  c.onModelRequest(NaN)
+  c.onModelRequest(2, 4)
+  // A non-finite turn is ignored; the host step is still copied forward because
+  // it is the host's number, not a plugin count.
+  c.onModelRequest(NaN, 5)
   assert.equal(c.turn(), 2)
-  assert.equal(c.stepsThisTurn(), 1)
-  c.onModelRequest(1)
-  assert.equal(c.turn(), 2)
-  assert.equal(c.stepsThisTurn(), 1)
+  assert.equal(c.step(), 5)
+  c.onModelRequest(1, 1)
+  assert.equal(c.turn(), 2, 'a backwards turn must not move the clock back')
+  assert.equal(c.step(), 5, 'nor may its step index move back')
 
   const fresh = new TurnClock()
   fresh.onModelRequest(NaN)
   assert.equal(fresh.turn(), 0)
-  assert.equal(fresh.stepsThisTurn(), 0)
+  assert.equal(fresh.step(), 0)
 })
 
 test('协议段注册名与顺序固定', () => {

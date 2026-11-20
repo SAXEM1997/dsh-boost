@@ -134,7 +134,6 @@ function mount(pending?: { name: string; args: Record<string, unknown> }): any {
       args: pending.args,
       turn: 1,
       step: 0,
-      createdAt: 0,
     })
   }
   registerHooks(host, {

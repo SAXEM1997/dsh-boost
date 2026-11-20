@@ -58,11 +58,24 @@
  * session's substitution with another session's request. `SessionRuntime`
  * (exported here) keys all three by `sessionId`; `HookDeps.sessions` accepts it,
  * and when present it is authoritative for both this hook and Task 23b's
- * helpers. The shipped wiring lives in `wireSessionEvents` (`src/index.ts`):
+ * helpers. The shipped wiring lives in `wireSessionEvents` (`src/index.ts`)
+ * and is deliberately **two** listeners, not one:
  *
  * ```ts
  * const sessions = new SessionRuntime(cfg.stepsPerTurn)
  * registerHooks(ctx, { ...deps, sessions })
+ *
+ * // agent/pre-step: the non-deprecated clock seam. It fires once per proposed
+ * // step, before prompt assembly, and copies the host turn/step.
+ * ctx.on('agent/pre-step', (payload, next) => {
+ *   sessions.onModelRequest(sessionId, payload.turn, payload.step)
+ *   horizon.observe(sessionId, payload.turn, payload.step)
+ *   return next()
+ * })
+ *
+ * // agent/request: deprecated, kept for what the request waterfall alone
+ * // yields: the resolved provider/model the selector inherits (after next()),
+ * // the async visibility warm, and a clock fallback.
  * ctx.on('agent/request', async (payload, next) => {
  *   sessions.onModelRequest(sessionId, payload.turn, payload.step)
  *   await warmVisibility(scope, registry, payload.agent, sessionId, workspaces)
@@ -70,12 +83,15 @@
  *   rememberRoute(routes, sessionId, config)
  *   return config
  * })
+ *
  * ctx.on('session/disposed', (session) => clearSession(deps, sessionId))
  * ```
  *
- * The visibility warm and the selector-route capture are part of the same
- * listener: a clock-only snippet would leave the scope judgement cold and the
- * selector without the boundary request's route.
+ * The split is intentional: `agent/pre-step` is the seam the host documents for
+ * turn/step, while the selector's effective route is only available from the
+ * request waterfall's resolved config. Both listeners copy the clock so a host
+ * that drops the deprecated event still advances turns; only `agent/request`
+ * warms the scope judgement and records the route today.
  *
  * `onModelRequest` copies the host turn/step (never a plugin count) and resets
  * that session's budget only when its turn changes. `notePlanTurn` is the
@@ -516,7 +532,18 @@ interface AbandonPlan {
 
 /** What one request is going to do, decided synchronously. */
 type StreamPlan =
-  | { kind: 'pass'; sessionId: string | undefined; abandon?: AbandonPlan }
+  | {
+      kind: 'pass'
+      sessionId: string | undefined
+      abandon?: AbandonPlan
+      /**
+       * Discard the session's decision-time usage mark even when no queue entry
+       * is left to abandon. A stopped store passes every request through, so
+       * the decision will never be synthesized and its mark must not settle a
+       * later real request as if it had run.
+       */
+      discardMark?: boolean
+    }
   | { kind: 'synthesize'; sessionId: string; entry: PendingEntry }
 
 /**
@@ -537,7 +564,11 @@ function resolveStreamPlan(
   // even be observed, so it cannot become a plan.
 
   if (receiptsStopped(deps)) {
-    return passPlan(deps, sessionId, { clearQueue: false, clearAnchors: false })
+    // Fail-closed: the decision cannot be recorded, so it will never be
+    // synthesized. Empty the queue and settle the decision-time mark even when
+    // the queue entry is already gone (the dispatch side may have consumed it);
+    // otherwise the mark would settle a later real request as a substitution.
+    return passPlan(deps, sessionId, { clearQueue: true, clearAnchors: false }, true)
   }
 
   if (sessionId === undefined) return { kind: 'pass', sessionId }
@@ -590,16 +621,28 @@ function resolveStreamPlan(
   return { kind: 'synthesize', sessionId, entry }
 }
 
-/** A pass plan that abandons the session's pending entry, when one exists. */
+/**
+ * A pass plan that abandons the session's pending entry, when one exists.
+ *
+ * `discardMark` makes the plan settle the usage mark even when no entry is
+ * left; the stopped-store branch needs that because the dispatch side may
+ * already have consumed the entry.
+ */
 function passPlan(
   deps: HookDeps,
   sessionId: string | undefined,
   abandons: { clearQueue: boolean; clearAnchors: boolean },
+  discardMark = false,
 ): StreamPlan {
   if (sessionId === undefined) return { kind: 'pass', sessionId }
   const entry = peekPending(deps, sessionId)
-  if (entry === undefined) return { kind: 'pass', sessionId }
-  return { kind: 'pass', sessionId, abandon: { entry, ...abandons } }
+  if (entry === undefined) return { kind: 'pass', sessionId, ...(discardMark ? { discardMark } : {}) }
+  return {
+    kind: 'pass',
+    sessionId,
+    abandon: { entry, ...abandons },
+    ...(discardMark ? { discardMark } : {}),
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -614,7 +657,7 @@ function passPlan(
  * (obligation 5). `settle()` here is the discard, not a measurement. The parked
  * plan evidence goes with the mark: nothing will ever write its receipt.
  */
-function settleDiscarded(deps: HookDeps, sessionId: string): void {
+export function settleDiscarded(deps: HookDeps, sessionId: string): void {
   try {
     sessionUsage(deps, sessionId)?.settle()
   } catch {
@@ -916,8 +959,12 @@ export function streamHook(
     // returned generator only delays consumption, not the waterfall step.
     const upstream = next()
     const observed = async function* (): AsyncGenerator<StreamChunk> {
-      if (plan.abandon !== undefined && plan.sessionId !== undefined) {
-        await applyAbandon(deps, plan.sessionId, plan.abandon)
+      if (plan.sessionId !== undefined) {
+        // Order matters only for evidence: the discard drops the parked
+        // plan/guards, and `applyAbandon` then clears the rest. Both settle
+        // calls are idempotent.
+        if (plan.discardMark === true) settleDiscarded(deps, plan.sessionId)
+        if (plan.abandon !== undefined) await applyAbandon(deps, plan.sessionId, plan.abandon)
       }
       yield* observeBranch(deps, plan.sessionId, upstream)
     }

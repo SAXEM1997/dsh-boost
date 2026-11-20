@@ -13,7 +13,6 @@ function entry(overrides: Partial<PendingEntry> = {}): PendingEntry {
     args: { path: '/tmp/example.txt', limit: 10 },
     turn: 3,
     step: 0,
-    createdAt: 1_700_000_000_000,
     ...overrides,
   }
 }
@@ -235,9 +234,9 @@ test('tool-call block 只含 type/id/name/arguments 四个字段', async () => {
 // 规则 6/7：纯生成、坏输入不抛出
 // ---------------------------------------------------------------------------
 
-test('同一 entry 两次生成逐块相同，且 createdAt 不参与输出（不读时钟）', async () => {
-  const first = await collect(entry({ createdAt: 1 }))
-  const second = await collect(entry({ createdAt: 999_999_999_999 }))
+test('同一 entry 两次生成逐块相同，turn/step 不参与输出（不读时钟）', async () => {
+  const first = await collect(entry())
+  const second = await collect(entry({ turn: 9, step: 42 }))
   assert.deepEqual(first, second)
 })
 

@@ -558,7 +558,6 @@ const SYNTH_ENTRY: PendingEntry = {
   args: { file_path: 'BOUND-ARGS' },
   turn: 1,
   step: 0,
-  createdAt: 0,
 }
 
 async function assembleSynthesis(entry: PendingEntry): Promise<{ assembler: BlockAssembler; message: Any }> {

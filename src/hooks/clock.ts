@@ -13,13 +13,9 @@
  * host's **step index** (`step()`) is what a derived tool-call id is built
  * from: two substitutions of one candidate inside a turn must not share an id.
  * The per-turn substitution cap is not this class: it is `StepBudget`
- * (`admission/ledger.ts`), keyed per session by `SessionRuntime`. The
- * plugin-side counter below (`takeStep()`/`stepsThisTurn()`) is retained only
- * because the clock tests still pin the turn-rollover rule and the fact that
- * the counter cannot reach a call id (`test/protocol.test.ts`, obligation 1 in
- * `test/hooks-post.test.ts`); no production path calls it, and it must never
- * feed `stepId` or `callId`. Deleting it belongs to the change that also
- * deletes that coverage.
+ * (`admission/ledger.ts`), keyed per session by `SessionRuntime`. The class
+ * keeps only the host's numbers; a plugin-side counter would be a second,
+ * fabricated source of step identity and must never feed `stepId` or `callId`.
  *
  * The class is deliberately bare — no timers, no host calls, no I/O — so it is
  * testable without a host and cannot advance on wall time.
@@ -33,19 +29,10 @@
  * @module dsh-boost/hooks/clock
  */
 
-/** Copies the host turn/step and keeps the retired plugin-side step count. */
+/** Copies the host turn/step; nothing is derived from a request count. */
 export class TurnClock {
   /** Current host turn; 0 before the first request. */
   private turnCount = 0
-
-  /**
-   * Deprecated plugin-side step count.
-   *
-   * Not the host step and not the per-turn cap: `StepBudget` owns the cap and
-   * `hostStep` owns step identity. Kept only for the turn-rollover coverage in
-   * `test/protocol.test.ts`.
-   */
-  private steps = 0
 
   /**
    * The host's step index within the current turn; 0 before the first event.
@@ -54,8 +41,7 @@ export class TurnClock {
    * derived tool-call id must be unique per step: two substitutions of one
    * candidate inside one turn must not share an id, or the host persists two
    * assistant `tool_use` blocks with one id and Anthropic-style providers
-   * reject the request. `stepsThisTurn()` is the retired plugin counter and
-   * must never be used for this (design §5.3, T23a/T23b).
+   * reject the request (design §5.3, T23a/T23b).
    */
   private hostStep = 0
 
@@ -84,7 +70,6 @@ export class TurnClock {
       return
     }
     this.turnCount = hostTurn
-    this.steps = 0
     this.hostStep = nextStep !== undefined && nextStep >= 0 ? nextStep : 0
   }
 
@@ -96,27 +81,5 @@ export class TurnClock {
   /** The host step index within the current turn; 0 before the first event. */
   step(): number {
     return this.hostStep
-  }
-
-  /**
-   * Count one tool step in the current turn.
-   *
-   * @deprecated No production caller: the per-turn cap moved to `StepBudget`.
-   * Never feed it to `stepId`/`callId`; `callIdFor` takes `step()`. Retained
-   * only because the clock tests pin turn-rollover through it.
-   */
-  takeStep(): void {
-    this.steps += 1
-  }
-
-  /**
-   * The deprecated plugin-side count of steps in the current turn.
-   *
-   * @deprecated Not `step()` and not the substitution cap. The step budget is
-   * `StepBudget` in `admission/ledger.ts`; this value has no production
-   * consumer.
-   */
-  stepsThisTurn(): number {
-    return this.steps
   }
 }

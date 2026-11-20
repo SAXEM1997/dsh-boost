@@ -94,13 +94,20 @@ import type { ReceiptStore } from '../receipts/store.js'
 import { DEFAULT_SCOPE, isVisible } from '../scope/doc.js'
 import type { ScopeDoc } from '../scope/doc.js'
 import type { ScopeStore } from '../scope/store.js'
-import { choose } from '../selector/jev.js'
+import { SELECTOR_SYSTEM_PROMPT, choose, selectorPromptText } from '../selector/jev.js'
 import type { LlmLike } from '../selector/jev.js'
 import { familyOf } from '../tools/family.js'
 import type { AgentLike, BoostConfig, PluginContext } from '../types.js'
 import type { TurnClock } from './clock.js'
 import { rejectIfTampered } from './execute.js'
-import { receiptsStopped, sessionBudget, sessionClock, sessionUsage, streamHook } from './llm-stream.js'
+import {
+  receiptsStopped,
+  sessionBudget,
+  sessionClock,
+  sessionUsage,
+  settleDiscarded,
+  streamHook,
+} from './llm-stream.js'
 import type { SessionRuntime } from './llm-stream.js'
 import { callIdFor } from './pending.js'
 import type { PendingEntry, PendingQueue } from './pending.js'
@@ -453,10 +460,14 @@ function ledgerEntry(
  * auditor sees what ran but not why it was legitimate. The plan is
  * model-written text though, and a receipt is one line: 256 code points of
  * goal (the same order as `preview`), at most 8 guards, and at most 300 code
- * points per guard. A pathological plan therefore contributes ~2.7 KB at
- * worst and never inflates the ledger. Truncation is always visible: the goal
- * ends in `…`, an oversized guard becomes `{truncated_json: "…"}`, and
- * `guards_total` is present whenever guards were left out.
+ * points per guard. The bound is a *code-point* cap, not a byte cap: one
+ * pathological plan can contribute up to ~9.6 KB from the guards alone
+ * (8 × 300 code points × 4 UTF-8 bytes for 4-byte characters) plus up to
+ * ~1 KB from the 256-code-point goal. That is bounded and auditable, but a
+ * receipt line can exceed 10 KB — status and readers must not assume 2.7 KB.
+ * Truncation is always visible: the goal ends in `…`, an oversized guard
+ * becomes `{truncated_json: "…"}`, and `guards_total` is present whenever
+ * guards were left out.
  */
 const MAX_RECEIPT_PLAN_CODE_POINTS = 256
 const MAX_RECEIPT_GUARDS = 8
@@ -575,6 +586,12 @@ async function appendResetReceipt(
  * body is never read (design §5.2-7). Clearing happens before the receipt write
  * so a stalled store cannot leave the stale anchors in place; both steps are
  * contained so the tool result survives.
+ *
+ * The decision-time usage mark is settled **without** a settlement receipt
+ * first, exactly like `applyAbandon`: the substitution was never synthesized,
+ * so there is no saving to report. Leaving the mark would let the next real
+ * request pair itself with it and write a `substitute-settled` line for a
+ * substitution that never ran (row 1).
  */
 async function resetInvalidatedPending(
   deps: HookDeps,
@@ -588,6 +605,7 @@ async function resetInvalidatedPending(
   // queued substitution can fire from anchors that no longer name live text. The
   // plan is dropped too: it was written for the invalidated receipt, and leaving
   // it would let it fire against a later one.
+  settleDiscarded(deps, sessionId)
   clearAnchors(deps, sessionId)
   clearPending(deps, sessionId)
   clearPlan(deps, sessionId)
@@ -884,6 +902,24 @@ function admittedFor(
   }
 }
 
+/**
+ * Whether the session's turn budget is already empty, without consuming it.
+ *
+ * A selector call is real spend, so this check runs before the selector is
+ * priced or called; the consuming `takeBudget` stays at the commit point.
+ * A missing or foreign budget means "not exhausted", matching `takeBudget`'s
+ * no-cap contract. Shadow mode never calls this: it spends no step.
+ */
+function budgetExhausted(deps: HookDeps, sessionId: string): boolean {
+  try {
+    const budget = sessionBudget(deps, sessionId)
+    if (budget == null || typeof budget.exhausted !== 'function') return false
+    return budget.exhausted() === true
+  } catch {
+    return false
+  }
+}
+
 /** Claim one budget step; no budget wired means no cap is applied. */
 function takeBudget(deps: HookDeps, sessionId: string): boolean {
   try {
@@ -1041,11 +1077,6 @@ function selectorMaxTokens(deps: HookDeps): number {
   return Math.floor(raw)
 }
 
-/** The candidate list exactly as `choose` renders it, for pricing the input. */
-function selectorCandidateList(candidates: readonly Candidate[]): string {
-  return candidates.map((candidate) => `${candidate.id}: ${selectorSummary(candidate)}`).join('\n')
-}
-
 /** The route the selector call would inherit, or `undefined` when it cannot run. */
 function selectorRouteOf(deps: HookDeps, sessionId: string): SelectorRoute | undefined {
   try {
@@ -1072,9 +1103,12 @@ function selectorSeamUnavailable(deps: HookDeps, ctx: DecisionContext): boolean 
 /**
  * The selector's fast upper bound: its output cap plus the estimated input.
  *
- * `maxTokens` bounds only the output; the receipt and candidate summaries are
- * input. Charging a flat 512 would under-count the input by hundreds of tokens
- * and make admission optimistic exactly where it decides whether to call.
+ * `maxTokens` bounds only the output; everything the request sends is input:
+ * the system prompt, the user template, the candidate list and the receipt.
+ * Charging only the receipt and the candidates under-counts the call by the
+ * prompt (about 60–70 tokens) and makes admission optimistic exactly where it
+ * decides whether to call. The priced string is built with the selector's own
+ * exported template, so the estimate cannot drift from the request (row 36).
  * `undefined` means the caller cannot price the call; it must not guess.
  */
 function selectorChargeOf(
@@ -1084,10 +1118,14 @@ function selectorChargeOf(
 ): number | undefined {
   const estimate = deps.estimateText
   if (typeof estimate !== 'function') return undefined
-  const input = safeEstimate(
-    estimate,
-    `${receiptText}\n${selectorCandidateList(candidates)}`,
-  )
+  const prompt = selectorPromptText({
+    candidates: candidates.map((candidate) => ({
+      id: candidate.id,
+      summary: selectorSummary(candidate),
+    })),
+    receiptText,
+  })
+  const input = safeEstimate(estimate, `${SELECTOR_SYSTEM_PROMPT}\n${prompt}`)
   if (input === undefined || input < 0) return undefined
   return selectorMaxTokens(deps) + input
 }
@@ -1278,6 +1316,14 @@ async function decideSubstitution(
   let selectorOverhead = 0
   let selectorReceiptText = ''
   if (decision.kind === 'ask-selector') {
+    // Row 2: the budget is checked before the selector is paid for. Without
+    // this, an exhausted step would still send a real model request and then
+    // record `steps-exhausted` after the money was spent. Shadow mode is
+    // record-only and takes no step, so it keeps measuring.
+    if (!ctx.doc.shadow && budgetExhausted(deps, ctx.sessionId)) {
+      await appendReceipt(deps, ledgerEntry(ctx, 'skip', 'steps-exhausted', { stepId: 'root' }))
+      return
+    }
     // Availability is checked before pricing: a missing LLM/route is the
     // `selector-unavailable` degradation, not an admission decision.
     if (selectorSeamUnavailable(deps, ctx)) {
@@ -1395,7 +1441,6 @@ async function decideSubstitution(
     args: boundArgs,
     turn: ctx.turn,
     step,
-    createdAt: Date.now(),
     // The plan is one-shot (cleared above), so the evidence must travel with
     // the entry: the synth-time receipt is written after this turn's plan is
     // gone, and the settled receipt only knows the candidate id.

@@ -104,9 +104,6 @@ test('O1 commit 的 step/turn 取自 clock，callId 可用 clock 值复算', asy
   const env = setup()
   env.plans.set(SESSION, { goal: 'g', steps: [candidate('A', 'TRIGGER')] })
   env.clock.onModelRequest(2, 7)
-  // A plugin-side counter would have been advanced here; it must not reach the call id.
-  env.clock.takeStep()
-  env.clock.takeStep()
 
   await runPost(env.host, 'TRIGGER here')
 
@@ -475,7 +472,6 @@ test('O6 预算耗尽：不覆盖已有条目，写 steps-exhausted', async () =
     args: { file_path: '/live' },
     turn: 1,
     step: 0,
-    createdAt: 0,
   })
 
   await runPost(env.host, 'TRIGGER')
@@ -510,7 +506,6 @@ test('O6 fallback 不清空另一调用的 pending 条目（F2）', async () => 
     args: { file_path: '/live' },
     turn: 1,
     step: 0,
-    createdAt: 0,
   })
   // A plan whose only guard fails: decide returns no-candidate (a fallback).
   env.plans.set(SESSION, { goal: 'g', steps: [candidate('A', 'IMPOSSIBLE')] })
@@ -535,7 +530,6 @@ test('O7 callId 不同是普通调用：直通、不写收据、条目保留（F
     args: { file_path: '/a' },
     turn: 1,
     step: 0,
-    createdAt: 0,
   })
   let dispatched = 0
   const out: Any = await env.host.callHook(
@@ -563,7 +557,6 @@ test('O7 名/参不符走 rejectIfTampered，且同样清队列', async () => {
     args: { file_path: '/a' },
     turn: 1,
     step: 0,
-    createdAt: 0,
   })
   const out: Any = await env.host.callHook(
     'tools/execute',
@@ -592,7 +585,6 @@ test('O7 accept 路径清队列（条目完成使命后不得残留）', async (
     args: { file_path: '/a' },
     turn: 1,
     step: 0,
-    createdAt: 0,
   })
 
   const first = await env.host.callHook(
@@ -792,6 +784,146 @@ test('F2 重置清空 pending 条目并写真实 turn（设计 §5.2-7）', asyn
   const reset = env.receipts.find((r) => r.kind === 'reset')
   assert.equal(reset?.code, 'pruned-reset')
   assert.equal(reset?.turn, 1, 'the reset receipt carries the clock turn')
+})
+
+// ---------------------------------------------------------------------------
+// Row 1 (P0): an invalidated decision settles its usage mark
+// ---------------------------------------------------------------------------
+
+test('P0 reset 结算决策期的 usage mark：下一条真实请求不写 substitute-settled', async () => {
+  const env = setup()
+  env.plans.set(SESSION, { goal: 'g', steps: [candidate('A', 'TRIGGER')] })
+
+  await runPost(env.host, 'TRIGGER')
+  assert.equal(env.usage.pendingCandidateId(), 'A', 'the commit marked the usage pairing')
+
+  // A later receipt carrying the pruner literal triggers the reset path.
+  await runPost(env.host, `head${PRUNE_MARKER}tail`)
+  assert.equal(env.queue.peek(SESSION), undefined, 'the reset emptied pending')
+  assert.equal(
+    env.usage.pendingCandidateId(),
+    undefined,
+    'the abandoned decision must settle its mark, like applyAbandon',
+  )
+
+  // The next real request must not report a saving for a substitution that
+  // never ran.
+  for await (const _chunk of env.host.stream(SESSION)) {
+    // drain
+  }
+  assert.equal(
+    env.receipts.some((r) => r.kind === 'substitute-settled'),
+    false,
+    'a reset is not a measurement',
+  )
+})
+
+// ---------------------------------------------------------------------------
+// Rows 2 and 36: the selector is paid for only when it is affordable and the
+// admission charge covers everything the call sends
+// ---------------------------------------------------------------------------
+
+test('row 2：预算耗尽时先记 steps-exhausted，选择器一次也不调用', async () => {
+  let selectorCalls = 0
+  const env = setup({
+    deps: {
+      budget: new StepBudget(0),
+      llm: {
+        stream: async function* () {
+          selectorCalls += 1
+          yield { type: 'finish', reason: { kind: 'stop' } }
+        },
+      },
+      selectorRoute: () => ({ provider: 'p', model: 'm' }),
+    },
+  })
+  env.plans.set(SESSION, {
+    goal: 'g',
+    steps: [candidate('A', 'TRIGGER'), candidate('B', 'TRIGGER')],
+  })
+
+  await runPost(env.host, 'TRIGGER')
+
+  assert.equal(selectorCalls, 0, 'an exhausted budget must not pay for a selector call')
+  assert.ok(env.receipts.some((r) => r.code === 'steps-exhausted'))
+  assert.equal(env.queue.peek(SESSION), undefined)
+  assert.equal(env.receipts.some((r) => r.code.startsWith('selector-')), false)
+})
+
+test('row 36：选择器准入按它真正发送的 system prompt 与模板计价', async () => {
+  const priced: string[] = []
+  const env = setup({
+    deps: {
+      estimateText: (text: string) => {
+        priced.push(text)
+        return Math.ceil(text.length / 4)
+      },
+      llm: {
+        stream: async function* () {
+          yield { type: 'finish', reason: { kind: 'stop' } }
+        },
+      },
+      selectorRoute: () => ({ provider: 'p', model: 'm' }),
+    },
+  })
+  env.plans.set(SESSION, {
+    goal: 'g',
+    steps: [candidate('A', 'TRIGGER'), candidate('B', 'TRIGGER')],
+  })
+
+  await runPost(env.host, 'TRIGGER')
+
+  const selectorText = priced.find((text) => text.includes('Candidates:'))
+  assert.ok(selectorText, 'the selector input must be priced before the call')
+  assert.ok(selectorText.includes('You are a selector'), 'the system prompt is input too')
+  assert.ok(selectorText.includes('Latest receipt:'), 'the user template is input too')
+  assert.ok(selectorText.includes('TRIGGER'), 'the receipt text is input too')
+  assert.ok(selectorText.includes('A: read'), 'the candidate list is input too')
+})
+
+test('row 73 下游 decision 已带 spill footer：二次投影守卫必须拦下投影', async () => {
+  const big = 'x'.repeat(4000)
+  const downstream = `SPILLED-NOTICE ${big}`
+  const env = setup({
+    doc: doc({ projection: 'on' }),
+    deps: {
+      estimateText: (text: string) => Math.ceil(text.length / 4),
+      hasSpillNotice: (text: string) => text.includes('SPILLED-NOTICE'),
+      spill: {
+        saveText: async () => ({ locator: '/spill/x', retrievalHint: 'read it' }),
+      },
+    },
+  })
+  const decision = { kind: 'accept', content: [{ type: 'text', text: downstream }] }
+
+  // The receiver is clean; only the downstream decision carries the footer an
+  // inner listener already wrote. A second projection would hide it twice.
+  const res = await runPost(env.host, 'original receipt', decision)
+
+  assert.equal(res.content[0].text, downstream, 'the downstream decision is returned untouched')
+  assert.equal(
+    env.receipts.some((r) => r.kind === 'projection'),
+    false,
+    'the downstream double-projection check must stop the projection',
+  )
+})
+
+test('row 74 savedTokensOf 拒绝非有限/负样本：不得把 Infinity 当节省', async () => {
+  const env = setup()
+  // A finite-looking request sample containing a non-finite count must not be
+  // admitted: without the guard, input+cacheRead is Infinity and clears any
+  // threshold.
+  env.usage.request({ input: -1, cacheRead: Number.POSITIVE_INFINITY, output: 0 })
+  env.plans.set(SESSION, {
+    goal: 'g',
+    // Two steps: not the deterministic-single exemption, so the threshold runs.
+    steps: [candidate('A', 'TRIGGER'), candidate('B', 'NEVER')],
+  })
+
+  await runPost(env.host, 'TRIGGER')
+
+  assert.equal(env.queue.peek(SESSION), undefined, 'an unusable sample saves nothing')
+  assert.ok(env.receipts.some((r) => r.code === 'not-admitted'))
 })
 
 // ---------------------------------------------------------------------------

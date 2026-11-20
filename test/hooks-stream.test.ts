@@ -167,7 +167,6 @@ function seedPending(
     args: { file_path: '/x' },
     turn: 1,
     step: 0,
-    createdAt: 0,
     ...over,
   }
   env.queue.set(SESSION, entry)
@@ -267,6 +266,77 @@ test("C1 purpose='session-title' 同样透传：合成后再出现的辅助调�
   assert.equal(ledger.pendingCandidateId(), 'A', 'the next real request still owns the settlement')
   assert.equal(env.receipts.length, 0)
   assert.deepEqual(chunks, [{ type: 'usage', usage }, { type: 'finish', reason: { kind: 'stop' } }])
+})
+
+test('P0 收据停写直通也结算决策期标记：之后的真实请求不写 substitute-settled', async () => {
+  const env = setup({ chunks: [{ type: 'finish', reason: { kind: 'stop' } }] })
+  env.runtime.onModelRequest(SESSION, 1, 0)
+  // The mark is written at decision time; no queue entry is left (the dispatch
+  // already consumed it), and the store now reports that it stopped. A
+  // pass-through that returns without an abandon used to keep the mark alive.
+  const ledger = env.runtime.usageFor(SESSION)
+  ledger.markSubstituted('A')
+  const append = env.deps.receipts.append
+  env.deps.receipts = { append, stopped: () => true }
+
+  await streamOnce(env)
+  assert.equal(env.host.nextCalls, 1, 'a stopped store passes through to the real model')
+  assert.equal(ledger.pendingCandidateId(), undefined, 'the pass-through must discard the mark')
+
+  // A later healthy request must not turn the decision-time mark into a saving.
+  env.deps.receipts = { append, stopped: () => false }
+  await streamOnce(env, {
+    messages: [
+      {
+        role: 'tool',
+        content: [{ type: 'text', text: 'some unrelated tool result' }],
+      },
+    ],
+  })
+  assert.equal(
+    env.receipts.some((r) => r.kind === 'substitute-settled'),
+    false,
+    'the decision was never synthesized, so no settlement exists',
+  )
+})
+
+// ---------------------------------------------------------------------------
+// Rows 71-72: anchor detection mutation survivors
+// ---------------------------------------------------------------------------
+
+test('row 71 锚点自身含 pruner marker：直接判 pruned-reset（marker 扫描捷径）', async () => {
+  const env = setup()
+  env.runtime.onModelRequest(SESSION, 1, 0)
+  seedPending(env)
+  // An anchored receipt whose own text already contains the pruner literal: the
+  // short-circuit must classify it as pruned even when no message carries it.
+  env.anchors.set(SESSION, { stepId: 'root', anchors: { root: `head${PRUNE_MARKER}tail` } })
+
+  await streamOnce(env, { messages: messagesWith('a body that carries no anchor at all') })
+
+  const reset = env.receipts.find((r) => r.kind === 'reset')
+  assert.equal(reset?.code, 'pruned-reset')
+  assert.equal(env.queue.peek(SESSION), undefined, 'a reset abandons the decision')
+})
+
+test('row 72 tail 必须出现在 head 之后：tail 在前不算承载', async () => {
+  const env = setup()
+  env.runtime.onModelRequest(SESSION, 1, 0)
+  seedPending(env)
+  // The probe windows default to 32 code points; the anchor is long enough for
+  // both probes to be proper windows.
+  const head = 'h'.repeat(32)
+  const tail = 't'.repeat(32)
+  const anchor = `${head}${'m'.repeat(20)}${tail}`
+  env.anchors.set(SESSION, { stepId: 'root', anchors: { root: anchor } })
+
+  // Both probes are present, but the tail precedes the head.
+  const body = `${tail} middle ${head}`
+  const chunks = await streamOnce(env, { messages: messagesWith(body) })
+
+  assert.equal(chunks.some((c) => c.type === 'tool-call-delta'), false, 'not synthesized')
+  const reset = env.receipts.find((r) => r.kind === 'reset')
+  assert.equal(reset?.code, 'compaction-reset', 'the ordered probe must not accept a tail-first body')
 })
 
 // ---------------------------------------------------------------------------

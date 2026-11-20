@@ -34,11 +34,10 @@ import { createHash } from 'node:crypto'
 /**
  * One decided substitution waiting for the model turn that will carry it.
  *
- * `args` is the already-validated argument tree the tool must receive;
- * `createdAt` is evidence for a receipt and is never read by this module or by
- * {@link synthesizeTurn}. `turn` and `step` accept number or string because the
- * host carries numeric indexes while receipts often use strings; the JSON array
- * in `callIdFor` normalises both forms of the same value to one identity.
+ * `args` is the already-validated argument tree the tool must receive. `turn`
+ * and `step` accept number or string because the host carries numeric indexes
+ * while receipts often use strings; the JSON array in `callIdFor` normalises
+ * both forms of the same value to one identity.
  *
  * Treat an entry as immutable once it is queued. The queue hands out the stored
  * object by reference, and mutating `args` after the decision would make the
@@ -57,8 +56,6 @@ export interface PendingEntry {
   turn: number | string
   /** Host step within `turn` (number or already-stringified form); part of the call id. */
   step: number | string
-  /** Wall-clock millis at decision time, for receipts only. */
-  createdAt: number
 }
 
 /**
