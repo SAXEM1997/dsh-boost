@@ -593,9 +593,23 @@ function receiptsStopped(store: BoostDeps['receipts']): boolean {
 /** Whether the last whole-store scan stopped at the shard cap, never thrown. */
 function receiptsTruncatedOf(deps: BoostDeps): boolean {
   try {
-    return deps.receiptsTruncated?.() === true
+    if (deps.receiptsTruncated !== undefined) return deps.receiptsTruncated() === true
+    // The store owns the fact; the override exists for a fake counter. Reading
+    // the store directly keeps a hand-built `runBoost` (no measured deps) from
+    // silently losing the code.
+    return deps.receipts.scanTruncated() === true
   } catch {
     return false
+  }
+}
+
+/** Skipped shard reads, from the override or the store's own reading. */
+function receiptReadErrorsOf(deps: BoostDeps): number {
+  if (deps.receiptReadErrors !== undefined) return counterOf(deps.receiptReadErrors)
+  try {
+    return counterOf(() => deps.receipts.readErrors())
+  } catch {
+    return 0
   }
 }
 
@@ -683,7 +697,7 @@ async function statusCommand(deps: BoostDeps): Promise<BoostResult> {
   // ledger is incomplete. `readErrors()` is the only producer; it counts skips
   // since the last fully readable whole-store scan, so a repaired shard clears
   // the code.
-  if (counterOf(deps.receiptReadErrors) > 0 && !degraded.includes(ERR_RECEIPTS_UNREADABLE)) {
+  if (receiptReadErrorsOf(deps) > 0 && !degraded.includes(ERR_RECEIPTS_UNREADABLE)) {
     degraded.push(ERR_RECEIPTS_UNREADABLE)
   }
   // The scan cap makes every figure a lower bound over the first 256 sorted

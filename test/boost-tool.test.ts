@@ -845,6 +845,12 @@ test('D3: status 在 256 分片上限命中时报 ERR_RECEIPTS_TRUNCATED', async
     'the figures cover only the first 256 sorted shards',
   )
 
+  // A hand-built runBoost without the instrumented deps reads the flag from the
+  // store itself, so the code cannot silently disappear outside `apply`.
+  const bare = await runBoost({ args: { cmd: 'status' }, scope: d.scope, receipts: d.receipts })
+  assert.equal(bare.ok, true, JSON.stringify(bare))
+  if (bare.ok) assert.ok((bare.data as BoostStatus).degraded.includes('ERR_RECEIPTS_TRUNCATED'))
+
   // The flag describes the scan, not the process: one shard fewer fits and the
   // code clears.
   await rm(join(receipts, 's256.jsonl'))
