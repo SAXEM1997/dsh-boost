@@ -49,14 +49,20 @@ fi
 test "$(printf '%s\n' "$actual" | grep -c .)" -eq 5
 ```
 
-`[ "$actual" != "$required" ]` 是集合相等判定：少一项、多一项、顺序不同都会失败；最后的计数把
-“五行都在”写成显式断言。`test -f dist/index.js` / `dist/index.d.ts` 仍建议保留，但它们是本地
-构建目录的检查，不能证明 tarball 里有这两项。
+`[ "$actual" != "$required" ]` 能抓的只有**缺项**：`actual` 由只放行五个模式的 `grep -E` 过滤
+而来，tarball 里**多出的任何其他文件根本不会出现在 `actual` 里**，这个检查对它失明（顺序
+不同也不影响，两侧都经过 `sort`）；最后的计数同样只断言“五行都在”。要抓多余文件，必须另做
+完整清单比较，例如 `diff <(tar -tzf dsh-boost-0.1.0.tgz | sed '/^package\/$/d' | sort) <(…预期的
+完整文件清单…)`，或人工 review `npm pack --dry-run` 的完整输出。`test -f dist/index.js` /
+`dist/index.d.ts` 仍建议保留，但它们是本地构建目录的检查，不能证明 tarball 里有这两项。
 
 验收前的硬约束（设计 §11）：
 
-- `package.json` 的 `name`、`cordis.patch.yml` 行的 `id`、行的 `name`、导出插件的 `name` 四者完全一致；
-  宿主按 `row.id == entry.options.id && row.name == entry.options.name` 判定"已装配"，缺一个会被**静默跳过**。
+- `package.json` 的 `name`、`cordis.patch.yml` 行的 `id`、行的 `name`、导出插件的 `name` 四者完全一致。
+  注意：顶层 `insert` 行在装配时**不做** id/name 匹配（加载器直接 push），等式
+  `row.id == entry.options.id && row.name == entry.options.name` 是 plugin manager 的 in-use /
+  可寻址归属判定——不一致时行照常装配，但会在管理面变成不可寻址、移除判定失灵；`name` 指向
+  不存在的包则加载**响亮失败**。四名一致是为了保住管理面的可寻址性。
 - `version` 必须存在，否则 `npm pack` 在第一步就报 `Invalid package, must have name and version`。
 - `files` 与实际布局一致：`scripts/` 与 `test/` 是 dev-only，**不**进包；`dist/` 由 `prepack` 构建。
 
@@ -143,19 +149,38 @@ for (const [id, w] of Object.entries(s.tables.workspaces)) console.log(id, w.pat
 投影账（投影账为净额并附 `projection_retrievals`）、实测固定开销 token，以及稳定降级码。插件本身不说话，
 **不要**用"我记得开了"代替 status。
 
-### 2.1 卸载 `@deepseek-ai/dsh-token-meter`
+### 2.1 降级门：`@deepseek-ai/dsh-token-meter`（先装、验健康，再卸、验降级）
+
+`dsh-token-meter` 是 **optional peer**（`peerDependenciesMeta`），npm 在隔离项目里**不会**自动
+安装它，profile 里初始也没有——直接 `npm uninstall` 是 **no-op**：什么都没移除，降级状态
+在测试开始前就存在，这样的“门”永远绿。这个门必须**先构造被测状态**：
 
 ```bash
-# 二选一：宿主从 isolated 项目解析，或从 profile 解析（§2 的 dsh plugin 布局）。
+# 1) 先把 peer 装进宿主实际解析的那棵树（二选一）。
+# isolated 项目布局：
+cd /tmp/dsh-boost-accept
+npm install @deepseek-ai/dsh-token-meter@0.2.2-rc.4
+npm ls @deepseek-ai/dsh-token-meter          # 必须确认真的存在
+# profile 布局（§2 的 dsh plugin 布局）：
+dsh plugin --profile accept add @deepseek-ai/dsh-token-meter
+find "$DSH_HOME/profiles/accept/node_modules" -maxdepth 4 -name 'dsh-token-meter' -print
+
+# 2) 【前置断言】重启宿主后先验健康：agent 会话里 boost status 必须显示
+#    degraded 不含 ERR_HOST_NO_TOKENMETER、estimate_kind 为 "host"、fixedOverheadTokens 是数字。
+#    验不到健康态，后面的“降级”就无从谈起——门在此处就该判失败。
+
+# 3) 再从同一棵树移除（isolated 布局用 npm，profile 布局用 dsh plugin remove）。
 cd /tmp/dsh-boost-accept
 npm uninstall @deepseek-ai/dsh-token-meter
 npm ls @deepseek-ai/dsh-token-meter || true   # 必须确认真的不存在
-# profile 布局：
 dsh plugin --profile accept remove @deepseek-ai/dsh-token-meter || true
 find "$DSH_HOME/profiles/accept/node_modules" -maxdepth 4 -name 'dsh-token-meter' -print
+
+# 4) 重启宿主，按下表验降级。
 ```
 
-以宿主实际解析的那棵树里的 `npm ls` / `find` 结果为准；另一棵树的“已卸载”不算证据。
+以宿主实际解析的那棵树里的 `npm ls` / `find` 结果为准；另一棵树的“已卸载”不算证据。**没有
+第 1、2 步的安装与健康验证，这个门什么都没测**——降级状态先于测试存在，第 3 步是空跑。
 
 预期（设计 §9 / §11）：
 
@@ -169,28 +194,34 @@ find "$DSH_HOME/profiles/accept/node_modules" -maxdepth 4 -name 'dsh-token-meter
 | 收据 | 每个被拒的替换决策有 `skip` / `ERR_HOST_NO_TOKENMETER`（代码里也写稳定码本身） |
 | 失败形态 | **不是** `ERR_MODULE_NOT_FOUND`。若看到它，说明代码里出现了对可选 peer 的静态 import，回到 isolated 环境排查 |
 
-### 2.2 卸载 `@deepseek-ai/dsh-spill-policy`
+### 2.2 降级门：spill 后端（卸错包什么都验不到）
+
+**`spillStore` 服务由 `@deepseek-ai/dsh-spill-local` 提供**（`@deepseek-ai/dsh-spill` 定义的
+`SpillStore` 抽象服务的本地实现）；`@deepseek-ai/dsh-spill-policy` **只是页脚格式化器**
+（消费 `ctx.get('spillStore')`，提供 `formatSpillNotice`），卸它得到的是
+`projection-skipped:no-footer`（见本节末行），**永远得不到** `ERR_HOST_NO_SPILL`。要验
+no-spill 降级，必须移除的是**后端**：
 
 ```bash
-# 与 2.1 相同，先确认宿主从哪棵树解析。
-cd /tmp/dsh-boost-accept
-npm uninstall @deepseek-ai/dsh-spill-policy
-npm ls @deepseek-ai/dsh-spill-policy || true
-dsh plugin --profile accept remove @deepseek-ai/dsh-spill-policy || true
-find "$DSH_HOME/profiles/accept/node_modules" -maxdepth 4 -name 'dsh-spill-policy' -print
+# dsh-spill-local 是宿主 dsh-base 的依赖，不是本包的 peer，通常不在 profile 顶层。
+# 在一次性 DSH_HOME 里先定位宿主实际解析到的那份：
+find "$DSH_HOME" /path/to/dsh/install -maxdepth 6 -type d -name 'dsh-spill-local' -print
+# 验收沙箱里直接把解析到的那份目录改名/删除，再重启宿主：
+# mv <上面找到的目录> <同路径>.removed
+# （若它被直接装进了 profile，则 dsh plugin --profile accept remove @deepseek-ai/dsh-spill-local）
 ```
 
-预期（设计 §5.4 / §11）：
+预期（设计 §5.4 / §11；移除的是 spill **后端**）：
 
 | 观察点 | 期望 |
 |---|---|
 | 插件加载 | **成功**。`spillStore` 是软依赖 |
 | `projection: 'on'` + 超限回执 | **不投影**，原文原样进入历史（保证据） |
-| 收据 | `projection-skipped:no-spill` |
+| 收据 | `projection-skipped:no-spill`（`src/projection/apply.ts`：`spill` 缺失走 `no-spill` 分支） |
 | `boost status` 的 `degraded` | 含稳定码 `ERR_HOST_NO_SPILL` |
 | `projection: 'shadow'` | 不受影响：影子只记投影前后 token，不落盘、不改 content |
 | 替换 | 不受影响（替换不依赖 spill 后端） |
-| 失败形态 | 同样不应是 `ERR_MODULE_NOT_FOUND`；页脚格式化器缺失时只能降级为 `projection-skipped:no-footer`，不能抛到工具结果上 |
+| 失败形态 | 不应是 `ERR_MODULE_NOT_FOUND`（`spillStore` 经 `ctx.get` 动态获取）；注意与另一条降级区分——**若只卸 `dsh-spill-policy`（页脚格式化器、本包的 optional peer），得到的是 `projection-skipped:no-footer`，`ERR_HOST_NO_SPILL` 不会出现**；那条路径同样可验，但它是另一个门 |
 
 ### 2.3 两条路径都要留证据
 
@@ -272,7 +303,9 @@ agent 会话里由模型调用 `boost` 才能观察（步骤已在 §2.0 给出�
 assistant 的 `tool_use` 必须带兄弟 `thinking` 块。我们的合成回合目前没有 `replayState`，真实的
 pi-ai `transformMessages` 会丢掉 thinking 块。
 
-**影子周不能验证这条。** 影子期 `decideSubstitution` 返回 `shadowCommitted`，`projectDecision`
+**影子周不能验证这条。** 影子期 `decideSubstitution` 走 record-only 分支：写一条
+`{kind:'shadow', decision:'commit'}` 收据后直接返回（`ctx.doc.shadow` 分支，
+`src/hooks/post-execute.ts`；代码里**没有** `shadowCommitted` 这个返回值），`projectDecision`
 只记录、不改写 content，整个影子周不会合成任何回合；因此 `content[].thinking` 的 400 在结构上
 不可能出现。在影子周检查只会永远读到“未见”，再被记成通过，随后可能在没有任何检查的情况下开启
 替换。这条检查必须放到**第一次开启替换的真实回合**：把 `shadow` 设为 `false` 后
@@ -307,13 +340,13 @@ node scripts/shadow-report.mjs --dir "$DSH_HOME/boost/receipts"
 |---|---|
 | `saveableRatio` | 只读白名单真正能兑现的替换比例：`whitelisted` 影子提交 / 全部替换决策 |
 | `byFamily` | 按**候选工具族**的命中率：`commits / decisions`。键是收据里的 `candidateTool`（门决定的族），不是刚执行的 `tool`；老收据没有该字段时回退到 `tool`。影子期绕过白名单，所以 bash/ssh 的潜力也计入 |
-| `candidateRecall` | 候选集召回：`commits / (commits + no-candidate)`，分母是**计划提出的候选集**；`guard-trivial` 不提出候选，不进分母 |
+| `candidateRecall` | 候选集召回：`commits / (commits + no-candidate)`，分母是**到达绑定/守卫判定的替换决策数**（`commit` 与 `no-candidate` 两种结局各计一次，一次决策一条，**不是**候选条数——同一决策可有多个候选）；`guard-trivial` 不提出候选，不进分母 |
 | `retrievalUpperBound` | 取回率上界：取回调用数 / 已应用投影回执数（取回回执本身不计入分母）。**只在 `projection: 'on'` 成立**：影子期只写 `kind:'shadow'` / `code:'projection-shadow'`，没有 `kind:'projection'` 回执，所以影子账上它按结构恒为 `0`，不能用它约束影子期取回损害 |
 
 脚本读的是 `ReceiptStore` 写的同一套字段，只读完整行；尾部半行与坏行跳过；`kind:'projection'`
 但缺 `unit:'raw'` 的 pre-schema 回执也会跳过，并在 stderr 打印跳过计数。它不需要 `src/` 或构建产物。
 
-### 5.2 §2.1 统计与快照
+### 5.2 统计与快照（对应设计稿 §2.1 的口径）
 
 `scripts/session-snapshot.json` 是一个**聚合**，不含任何会话正文：
 
@@ -373,9 +406,9 @@ tool share 变动约 ±1.3pp。这是选择边界差，不是公式差；设计�
 - [ ] `import.meta.resolve('dsh-boost/package.json')` 与 `…/locale/en.json` 均可解析（M3）
 - [ ] `dsh plugin --profile <name> add <path>` 成功，`--dump-config` 里有 `id: dsh-boost` 行
 - [ ] 测试工作区已写入 `scope.workspaceIds`，`shadow: true`、`projection: 'on'` 经 `boost status` 确认
-- [ ] 卸 `dsh-token-meter`：替换拒绝、投影可用、`ERR_HOST_NO_TOKENMETER`、账目 `unknown`
-- [ ] 卸 `dsh-spill-policy`：超限回执不投影、`projection-skipped:no-spill`、`ERR_HOST_NO_SPILL`
+- [ ] no-tokenmeter 门按 §2.1 完整跑过：**先装 peer、验健康态（无 `ERR_HOST_NO_TOKENMETER`）**，再卸、验降级（替换拒绝、投影可用、账目 `unknown`）
+- [ ] no-spill 门按 §2.2 完整跑过：移除的是 spill **后端**（`dsh-spill-local`），观察到超限回执不投影、`projection-skipped:no-spill`、`ERR_HOST_NO_SPILL`；只卸 `dsh-spill-policy` 的话只能验到 `projection-skipped:no-footer`
 - [ ] 两条降级路径都在宿主实际解析的依赖树里验证，并保留 status/收据证据
 - [ ] 20 任务门按 §3 跑过，pass 谓词逐字对照，结论只有"过门/未过门"
 - [ ] 第一次开启替换的真实回合检查 `content[].thinking` 400（不是影子周）；若有，替换在该路由关闭
-- [ ] `npm run stats` 在干净 clone 上可复算 §2.1 聚合
+- [ ] `npm run stats` 在干净 clone 上可复算 §5.2 的聚合（口径对应设计稿 §2.1）
