@@ -14,15 +14,21 @@
  * @module dsh-boost/host/root
  */
 import { homedir } from 'node:os'
-import { join } from 'node:path'
+import { join, resolve } from 'node:path'
 
 /**
  * `<DSH_HOME>/boost`, falling back to `<homedir>/.dsh/boost`.
  *
  * A blank value is treated as unset: `join('', 'boost')` would otherwise put
  * state in the process's working directory, which is not a home directory.
+ *
+ * A relative `$DSH_HOME` is resolved against the current cwd **once**, here.
+ * Passing it through would leave the stores resolving it again on every read,
+ * so a later `chdir` would silently move the state root mid-session (review
+ * minor).
  */
 export function resolveBoostRoot(): string {
   const configured = process.env.DSH_HOME?.trim()
-  return join(configured ? configured : join(homedir(), '.dsh'), 'boost')
+  const home = configured ? resolve(configured) : join(homedir(), '.dsh')
+  return join(home, 'boost')
 }

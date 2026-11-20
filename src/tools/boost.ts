@@ -33,12 +33,15 @@
  *   `ERR_SCOPE_*`). The scope store's internal `scope-degraded` label and the
  *   receipt stream's `projection-skipped:*` are inputs, not output: a receipt
  *   code is mapped to `ERR_HOST_NO_SPILL`, and a degraded scope read passes its
- *   `ERR_SCOPE_*` code through. `ERR_HOST_NO_TOKENMETER` comes from the host
- *   probe (`apply` measures whether the synchronous token meter exists) and,
- *   independently, from the fixed-cost measurement being `'unknown'`;
+ *   `ERR_SCOPE_*` code through. The two estimator absences are separate codes:
+ *   `ERR_HOST_NO_TOKENMETER` is the host service probe (`apply` records whether
+ *   the synchronous token meter exists), while `ERR_HOST_NO_ESTIMATOR` is the
+ *   pure fixed-cost package being unreachable. One can exist without the other,
+ *   and merging them sent the operator to the wrong host.
  *   `ERR_HOST_PLATFORM_UNSUPPORTED` is `isPosixOnly()` being false.
- * - The fixed overhead is measured **once at startup** (`protocolFixedCost`)
- *   and awaited by `status`; it is never on a request path (design §6.1).
+ * - The fixed overhead is measured **once at startup**
+ *   (`measureBoostFixedOverhead`: protocol section + tool schema) and awaited
+ *   by `status`; it is never on a request path (design §6.1).
  * - `runBoost` is pure orchestration over the two stores plus the host facts
  *   `apply` hands it: no `ctx`, no host calls beyond the one measurement. The
  *   tool definition is therefore testable without a host, and the host probe
@@ -50,7 +53,9 @@
  * @module dsh-boost/tools/boost
  */
 import type { JsonSchemaNode } from '@deepseek-ai/dsh-tools'
-import { protocolFixedCost } from '../admission/fixed-cost.js'
+import { measureFixedOverhead } from '../admission/fixed-cost.js'
+import type { FixedOverheadMeasurement } from '../admission/fixed-cost.js'
+import { DEFAULT_CONFIG } from '../config.js'
 import { isPosixOnly } from '../host/platform.js'
 import type { ProjectionMode } from '../projection/apply.js'
 import {
@@ -90,6 +95,7 @@ const SCOPE_CODES: ReadonlySet<string> = new Set([
 /** Stable host degradation codes (design §9; the frozen set `status` reports). */
 const ERR_HOST_NO_SPILL = 'ERR_HOST_NO_SPILL'
 const ERR_HOST_NO_TOKENMETER = 'ERR_HOST_NO_TOKENMETER'
+const ERR_HOST_NO_ESTIMATOR = 'ERR_HOST_NO_ESTIMATOR'
 const ERR_HOST_PLATFORM_UNSUPPORTED = 'ERR_HOST_PLATFORM_UNSUPPORTED'
 const ERR_HOST_NO_STEP_WHEN = 'ERR_HOST_NO_STEP_WHEN'
 
@@ -104,6 +110,9 @@ const ERR_HOST_NO_STEP_WHEN = 'ERR_HOST_NO_STEP_WHEN'
  */
 const RECEIPT_DEGRADATION: ReadonlyArray<{ readonly code: string; readonly degraded: string }> = [
   { code: 'projection-skipped:no-spill', degraded: ERR_HOST_NO_SPILL },
+  // The substitution refusal writes the stable code itself, so a status built
+  // without host facts still reports the reason the decision path recorded.
+  { code: ERR_HOST_NO_TOKENMETER, degraded: ERR_HOST_NO_TOKENMETER },
 ]
 
 /**
@@ -135,7 +144,23 @@ export interface BoostDeps {
    * A function rather than a promise so `status` can await it lazily; the
    * default reuses the module-level memoised measurement.
    */
-  fixedOverhead?: () => Promise<number | 'unknown'>
+  fixedOverhead?: () => Promise<FixedOverheadMeasurement | 'unknown'>
+  /**
+   * Which estimator priced this assembly's figures.
+   *
+   * `host` means the synchronous host meter; `chars/4` is only reachable from a
+   * test-injected fallback; `unknown` means no token meter and no fabricated
+   * numbers (design §9).
+   */
+  estimateKind?: 'host' | 'chars/4' | 'unknown'
+  /** Replay horizon used by the net formula; defaults to the design's 20. */
+  horizonSteps?: number
+  /** Locators evicted by the per-session cap; status-time read. */
+  locatorEvictions?: () => number
+  /** Calls skipped because no family matched; status-time read. */
+  unknownFamilies?: () => number
+  /** Retained unmapped tool names; status-time read. */
+  unknownTools?: () => Record<string, number>
 }
 
 /** The scope document's caller-writable fields. Everything else is store-owned. */
@@ -172,7 +197,12 @@ export interface BoostStatus {
      * `unit:'raw'`.
      */
     projectionGross: number
-    /** `projectionGross` minus the recorded `retrievalCost` of retrieved receipts. */
+    /**
+     * `(projectionGross − Σ retrieval_tokens) × (1 + horizon)`.
+     *
+     * One replay factor on both per-receipt sides; see
+     * {@link BoostStatus.projection_net_tokens}.
+     */
     projectionNet: number
     /** Number of `kind:'projection'` receipts marked `retrieved: true`. */
     retrievals: number
@@ -182,13 +212,29 @@ export interface BoostStatus {
   /** Stable degradation codes actually observed. */
   degraded: string[]
   /**
-   * The protocol section's measured per-request cost.
+   * The measured per-request fixed cost: protocol section + tool schema.
    *
    * `'unknown'` when the host estimator is unreachable: the measurement is
    * never fabricated (design §9). Status-time only; see
    * `src/admission/fixed-cost.ts`.
    */
   fixedOverheadTokens: number | 'unknown'
+  /** The two components behind {@link fixedOverheadTokens}. */
+  fixedOverhead: FixedOverheadMeasurement | 'unknown'
+  /**
+   * Whether the ledger figures are provider-metered or estimates.
+   *
+   * `unknown` means no token meter: projection still clips, but its receipts
+   * carry `'unknown'` rather than invented numbers, and substitution is
+   * refused (design §9).
+   */
+  estimate_kind: 'host' | 'chars/4' | 'unknown'
+  /** The `(1 + horizon)` replay factor the net formula applies to both sides. */
+  projection_horizon_steps: number
+  /** Σ one-time `saved_projection_tokens` over applied projections. */
+  projection_gross_tokens: number
+  /** Σ one-time `retrieval_tokens` over counted retrievals. */
+  projection_retrieval_tokens: number
   /**
    * The design's receipt-field spelling of `saved.retrievals`.
    *
@@ -198,8 +244,20 @@ export interface BoostStatus {
    * aggregation, so they cannot drift.
    */
   projection_retrievals: number
-  /** The design's receipt-field spelling of `saved.projectionNet`. */
+  /**
+   * `(gross − retrieval) × (1 + horizon)`.
+   *
+   * The saving and the cost are both per-receipt figures, so the same replay
+   * factor is applied to both; applying it to only one side flips the sign and
+   * makes a cheap partial re-read look like a loss.
+   */
   projection_net_tokens: number
+  /** Locators dropped by the per-session cap; a lossy ledger is visible. */
+  projection_locator_evictions: number
+  /** Calls skipped because no projection family matched. */
+  projection_unknown_families: number
+  /** Retained unmapped tool names (at most 32), for mapper-gap diagnosis. */
+  projection_unknown_tools: Record<string, number>
 }
 
 /** A validated scope patch: only the caller-writable fields survive. */
@@ -217,14 +275,17 @@ type ScopePatch = Partial<Pick<ScopeDoc, (typeof PATCH_FIELDS)[number]>>
  */
 async function aggregate(receipts: ReceiptStore): Promise<{
   counts: Record<string, number>
-  saved: BoostStatus['saved']
+  substitution: number
+  projectionGross: number
+  projectionRetrievalTokens: number
+  retrievals: number
   degraded: string[]
 }> {
   const counts: Record<string, number> = Object.create(null)
   let substitution = 0
   let projectionGross = 0
   let retrievals = 0
-  let retrievalCost = 0
+  let projectionRetrievalTokens = 0
 
   for await (const receipt of receipts.scan()) {
     // A receipt is untrusted text from a file: `counts` has no prototype so a
@@ -250,8 +311,11 @@ async function aggregate(receipts: ReceiptStore): Promise<{
     }
     if (receipt.retrieved === true) {
       retrievals += 1
-      const cost = receipt.retrievalCost
-      if (typeof cost === 'number' && Number.isFinite(cost)) retrievalCost += cost
+      // The receipt field is the **one-time** retrieval cost: the call block
+      // plus the content the model actually saw. The replay multiplier is
+      // applied once in `status`, to both sides of the net formula.
+      const tokens = receipt.retrieval_tokens
+      if (typeof tokens === 'number' && Number.isFinite(tokens)) projectionRetrievalTokens += tokens
     }
   }
 
@@ -260,32 +324,87 @@ async function aggregate(receipts: ReceiptStore): Promise<{
   )
   return {
     counts,
-    saved: {
-      substitution,
-      projectionGross,
-      projectionNet: projectionGross - retrievalCost,
-      retrievals,
-    },
+    substitution,
+    projectionGross,
+    projectionRetrievalTokens,
+    retrievals,
     degraded,
   }
 }
 
 /**
- * The protocol section's fixed cost, never a thrown status.
+ * The fixed overhead measurement, never a thrown status.
  *
  * The production deps carry the promise `apply` started at load; the default
  * is the same memoised measurement, so a direct `runBoost` (a unit test or a
- * host that built the tool itself) still reports a real number. A rejection is
- * `'unknown'`, for the same reason the estimator's own failure is.
+ * host that built the tool itself) still reports a real number. A rejection or
+ * an invalid breakdown is `'unknown'`, for the same reason the estimator's own
+ * failure is.
  */
-async function fixedOverheadOf(deps: BoostDeps): Promise<number | 'unknown'> {
+async function fixedOverheadOf(deps: BoostDeps): Promise<FixedOverheadMeasurement | 'unknown'> {
   try {
-    const measure = deps.fixedOverhead ?? protocolFixedCost
-    const value = await measure()
-    return typeof value === 'number' && Number.isFinite(value) ? value : 'unknown'
+    const value = await (deps.fixedOverhead ?? measureBoostFixedOverhead)()
+    if (value === 'unknown') return 'unknown'
+    const { protocolTokens, toolSchemaTokens, totalTokens } = value
+    if (
+      !Number.isFinite(protocolTokens) ||
+      !Number.isFinite(toolSchemaTokens) ||
+      !Number.isFinite(totalTokens) ||
+      protocolTokens < 0 ||
+      toolSchemaTokens < 0 ||
+      totalTokens !== protocolTokens + toolSchemaTokens
+    ) {
+      return 'unknown'
+    }
+    return value
   } catch {
     return 'unknown'
   }
+}
+
+/** The configured replay horizon, or the design default when absent/malformed. */
+function horizonOf(deps: BoostDeps): number {
+  const raw = deps.horizonSteps
+  return typeof raw === 'number' && Number.isFinite(raw) && raw >= 0
+    ? Math.floor(raw)
+    : DEFAULT_CONFIG.horizonSteps
+}
+
+/** The label for the assembly's estimator; unprobed is honestly `unknown`. */
+function estimateKindOf(deps: BoostDeps): BoostStatus['estimate_kind'] {
+  const kind = deps.estimateKind
+  return kind === 'host' || kind === 'chars/4' || kind === 'unknown' ? kind : 'unknown'
+}
+
+/** A monotonic status counter, never a thrown status. */
+function counterOf(read: (() => number) | undefined): number {
+  try {
+    const value = read?.()
+    return typeof value === 'number' && Number.isFinite(value) && value >= 0
+      ? Math.floor(value)
+      : 0
+  } catch {
+    return 0
+  }
+}
+
+/** A bounded unmapped-tool map, never a thrown status. */
+function toolCountsOf(read: (() => Record<string, number>) | undefined): Record<string, number> {
+  // Build through a Map: `counts['__proto__'] = n` on a plain object would
+  // mutate its prototype, and tool names come from the host. `fromEntries` is
+  // an own-property copy, so the returned object has the normal prototype and
+  // deep-equality consumers see a plain record.
+  const counts = new Map<string, number>()
+  try {
+    const value = read?.()
+    if (value === null || typeof value !== 'object') return {}
+    for (const [name, count] of Object.entries(value)) {
+      if (typeof count === 'number' && Number.isFinite(count) && count >= 0) counts.set(name, count)
+    }
+  } catch {
+    // A foreign counter is evidence, not a failure.
+  }
+  return Object.fromEntries(counts)
 }
 
 /**
@@ -297,23 +416,30 @@ async function fixedOverheadOf(deps: BoostDeps): Promise<number | 'unknown'> {
  * is stable codes only. Order is deterministic (receipts, scope, host) and the
  * result is deduplicated, so one condition observed through two channels
  * appears once.
+ *
+ * Two different absences stay distinct: `ERR_HOST_NO_TOKENMETER` is the
+ * **service** (`ctx.get('tokenMeter')`) being absent, which refuses
+ * substitution; `ERR_HOST_NO_ESTIMATOR` is the pure estimate package being
+ * unreachable, which makes the fixed-overhead figure `'unknown'`. A host with
+ * the package but no service reports the latter only.
+ *
+ * `ERR_HOST_NO_STEP_WHEN` is a host fact, but on exactly that host `apply` does
+ * not register the `boost` tool at all (design §5.5), so the code is normally
+ * observed in the registration warning rather than through `status`; it is
+ * still rendered when a fact reaches `runBoost` directly.
  */
 function degradationCodes(
   observed: readonly string[],
   read: Awaited<ReturnType<ScopeStore['read']>>,
   host: BoostHostFacts | undefined,
-  fixedOverheadTokens: number | 'unknown',
+  fixedOverhead: FixedOverheadMeasurement | 'unknown',
 ): string[] {
   const codes: string[] = [...observed]
   if (read.degraded !== undefined) codes.push(read.code ?? ERR_SCOPE_READ_FAILED)
 
   if (!isPosixOnly()) codes.push(ERR_HOST_PLATFORM_UNSUPPORTED)
-  // Two independent signals: the host service is absent, or the pure estimator
-  // package is unreachable, so the fixed cost cannot be priced. Either way the
-  // plugin cannot measure, which is exactly what the code tells the operator.
-  if (fixedOverheadTokens === 'unknown' || host?.hasTokenMeter === false) {
-    codes.push(ERR_HOST_NO_TOKENMETER)
-  }
+  if (host?.hasTokenMeter === false) codes.push(ERR_HOST_NO_TOKENMETER)
+  if (fixedOverhead === 'unknown') codes.push(ERR_HOST_NO_ESTIMATOR)
   // `spillStore` matters only in apply mode; shadow mode never touches it
   // (design §5.4), so reporting it while projection is `shadow` would be noise.
   if (host?.hasSpill === false && read.doc.projection === 'on') codes.push(ERR_HOST_NO_SPILL)
@@ -326,8 +452,19 @@ function degradationCodes(
 async function statusCommand(deps: BoostDeps): Promise<BoostResult> {
   const read = await deps.scope.read()
   const totals = await aggregate(deps.receipts)
-  const fixedOverheadTokens = await fixedOverheadOf(deps)
-  const degraded = degradationCodes(totals.degraded, read, deps.host, fixedOverheadTokens)
+  const fixedOverhead = await fixedOverheadOf(deps)
+  const degraded = degradationCodes(totals.degraded, read, deps.host, fixedOverhead)
+  const horizon = horizonOf(deps)
+  // Both sides are per-receipt figures; the same replay factor applies to the
+  // net. A partial re-read therefore cannot flip the sign (review C1).
+  const projectionNet =
+    (totals.projectionGross - totals.projectionRetrievalTokens) * (1 + horizon)
+  const saved: BoostStatus['saved'] = {
+    substitution: totals.substitution,
+    projectionGross: totals.projectionGross,
+    projectionNet,
+    retrievals: totals.retrievals,
+  }
   const data: BoostStatus = {
     scope: {
       mode: read.doc.mode,
@@ -336,12 +473,20 @@ async function statusCommand(deps: BoostDeps): Promise<BoostResult> {
     },
     shadow: read.doc.shadow,
     projection: read.doc.projection,
-    saved: totals.saved,
+    saved,
     counts: totals.counts,
     degraded,
-    fixedOverheadTokens,
-    projection_retrievals: totals.saved.retrievals,
-    projection_net_tokens: totals.saved.projectionNet,
+    fixedOverheadTokens: fixedOverhead === 'unknown' ? 'unknown' : fixedOverhead.totalTokens,
+    fixedOverhead,
+    estimate_kind: estimateKindOf(deps),
+    projection_horizon_steps: horizon,
+    projection_gross_tokens: totals.projectionGross,
+    projection_retrieval_tokens: totals.projectionRetrievalTokens,
+    projection_retrievals: totals.retrievals,
+    projection_net_tokens: projectionNet,
+    projection_locator_evictions: counterOf(deps.locatorEvictions),
+    projection_unknown_families: counterOf(deps.unknownFamilies),
+    projection_unknown_tools: toolCountsOf(deps.unknownTools),
   }
   return { ok: true, data }
 }
@@ -536,6 +681,31 @@ const PARAMETERS: Record<string, unknown> = {
   },
   required: ['cmd'],
   additionalProperties: false,
+}
+
+/**
+ * The model-visible part of the `boost` tool definition.
+ *
+ * This is the second half of the fixed-overhead budget: `estimateToolsTokens`
+ * prices the schema the model receives every request. `output` is a host-side
+ * envelope and is not part of the request's tool list, so it is excluded.
+ */
+function boostSchema(): { name: 'boost'; description: string; parameters: Record<string, unknown> } {
+  return { name: 'boost', description: DESCRIPTION, parameters: PARAMETERS }
+}
+
+/** The one memoised protocol + schema measurement, shared by startup and status. */
+let boostFixedOverhead: Promise<FixedOverheadMeasurement | 'unknown'> | undefined
+
+/**
+ * The startup probe `apply` fires once and `status` awaits.
+ *
+ * Memoised per process: a status call must report the same number the startup
+ * measured, and must not re-import or re-price the schema.
+ */
+export function measureBoostFixedOverhead(): Promise<FixedOverheadMeasurement | 'unknown'> {
+  boostFixedOverhead ??= measureFixedOverhead(boostSchema())
+  return boostFixedOverhead
 }
 
 /**

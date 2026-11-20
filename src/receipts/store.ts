@@ -275,7 +275,9 @@ async function readShard(path: string): Promise<Receipt[]> {
   try {
     data = await readFile(path)
   } catch (error) {
-    if (errorCode(error) === 'ENOENT') return []
+    // ENOTDIR is the file-valued `$DSH_HOME` shape: the shard cannot exist.
+    const code = errorCode(error)
+    if (code === 'ENOENT' || code === 'ENOTDIR') return []
     throw error
   }
 
@@ -549,7 +551,11 @@ export class ReceiptStore {
     try {
       entries = await readdir(join(this.root, RECEIPTS_DIR))
     } catch (error) {
-      if (errorCode(error) === 'ENOENT') return []
+      // ENOTDIR: `$DSH_HOME` (or the boost root) names a file, so `<root>/receipts`
+      // cannot be a directory. That is an empty ledger, not an internal failure;
+      // `boost status` must still answer (review I5).
+      const code = errorCode(error)
+      if (code === 'ENOENT' || code === 'ENOTDIR') return []
       throw error
     }
     const names = new Set<string>()

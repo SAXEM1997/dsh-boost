@@ -147,15 +147,25 @@ async function createAssembly(options: { spill?: Any; tokenMeter?: Any; config?:
     tokenMeterCalls: 0,
   }
   const registry = { list: () => [{ id: WORKSPACE, path: CWD }] }
+  // A host with `dsh-token-meter` is the realistic production shape, and the
+  // meter is now a substitution prerequisite (design §9). `tokenMeter: null`
+  // opts out so the degradation path can be exercised explicitly.
   const tokenMeter =
-    options.tokenMeter === undefined
+    options.tokenMeter === null
       ? undefined
-      : {
-          estimateMessage(message: Any): number {
-            state.tokenMeterCalls += 1
-            return options.tokenMeter.estimateMessage(message)
-          },
-        }
+      : options.tokenMeter === undefined
+        ? {
+            estimateMessage(message: Any): number {
+              state.tokenMeterCalls += 1
+              return Math.ceil(String(message.content[0].text).length / 4) + 8
+            },
+          }
+        : {
+            estimateMessage(message: Any): number {
+              state.tokenMeterCalls += 1
+              return options.tokenMeter.estimateMessage(message)
+            },
+          }
   const host = fakeHost({
     get(name: string) {
       if (name === 'workspaceRegistry') return registry
@@ -734,7 +744,9 @@ test('hoisted deps: session end drops the receipt state registerHooks published'
 
 test('real apply projects an apply-mode receipt through the host spill backend', async (t) => {
   const spill = recordingSpill()
-  const a = await createAssembly({ spill })
+  // No meter: clipping still runs, but the ledger records `unknown` rather
+  // than fabricating token numbers (design §9).
+  const a = await createAssembly({ spill, tokenMeter: null })
   t.after(() => a.dispose())
 
   await a.setScope({ ...scopeDoc(1), projection: 'on' })
@@ -761,7 +773,10 @@ test('real apply projects an apply-mode receipt through the host spill backend',
   const receipts = await receiptsOf(a)
   const projection = receipts.find((receipt) => receipt.kind === 'projection')
   assert.ok(projection, 'apply mode must write a projection receipt')
-  assert.equal(projection.estimate, 'chars/4', 'the fallback estimator must be labelled')
+  assert.equal(projection.estimate, 'unknown', 'no meter must never fabricate a token count')
+  assert.equal(Object.hasOwn(projection, 'before'), false)
+  assert.equal(Object.hasOwn(projection, 'after'), false)
+  assert.equal(Object.hasOwn(projection, 'saved_projection_tokens'), false)
 })
 
 test('real apply prefers the host token meter and labels its receipt host', async (t) => {

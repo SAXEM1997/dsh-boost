@@ -15,7 +15,7 @@
  * @module dsh-boost
  */
 import type { ToolDefinition } from '@deepseek-ai/dsh-tools'
-import { protocolFixedCost } from './admission/fixed-cost.js'
+import { measureBoostFixedOverhead } from './tools/boost.js'
 import { RetrievalLedger } from './admission/retrieval.js'
 import { resolveConfig } from './config.js'
 import { AnchorStore } from './gate/invalidate.js'
@@ -26,6 +26,7 @@ import { PendingQueue } from './hooks/pending.js'
 import { registerHooks } from './hooks/post-execute.js'
 import type { HookDeps, SelectorRoute } from './hooks/post-execute.js'
 import type { SpillBackend } from './projection/apply.js'
+import { ProjectionCounters } from './projection/counters.js'
 import { ReceiptStore } from './receipts/store.js'
 import { resolveVisible, supportsStepWhen, workspaceIdOf } from './scope/resolve.js'
 import type { WorkspaceRegistry } from './scope/resolve.js'
@@ -97,14 +98,6 @@ function sessionIdOf(value: unknown): string | undefined {
   const headerId = carrier?.header?.id
   if (typeof headerId === 'string') return headerId
   return typeof carrier?.id === 'string' ? carrier.id : undefined
-}
-
-/** The fixed density `@deepseek-ai/dsh-token-meter/estimate` prices text under. */
-const CHARS_PER_TOKEN = 4
-
-/** The projection estimator's fallback when the host meter is absent. */
-function estimateTextFallback(text: string): number {
-  return Math.ceil(Array.from(text).length / CHARS_PER_TOKEN)
 }
 
 /**
@@ -302,8 +295,12 @@ export function apply(ctx: PluginContext, config: unknown): void {
     const registry = serviceOf<WorkspaceRegistry>(ctx, 'workspaceRegistry')
     const spill = serviceOf<SpillBackend>(ctx, 'spillStore')
     const hostEstimate = hostEstimatorOf(ctx)
-    const estimateText = hostEstimate ?? estimateTextFallback
-    const estimateKind = hostEstimate !== undefined ? 'host' : 'chars/4'
+    // No meter means no meter: projection still clips, but its receipts carry
+    // `unknown` and substitution is refused (design §9). Never a chars/4
+    // look-alike that would be indistinguishable from a real measurement.
+    const estimateText = hostEstimate
+    const estimateKind = hostEstimate !== undefined ? 'host' : 'unknown'
+    const projectionCounters = new ProjectionCounters()
 
     // Host capabilities, measured once. `status` renders these as stable codes;
     // they are facts about this host, never inferred from usage. The fixed-cost
@@ -314,7 +311,7 @@ export function apply(ctx: PluginContext, config: unknown): void {
       hasSpill: spill !== undefined,
       supportsStepWhen: supportsStepWhen(ctx.tools),
     }
-    const fixedOverhead = protocolFixedCost()
+    const fixedOverhead = measureBoostFixedOverhead()
 
     // The hook reads this synchronously, so it only ever returns the warmed
     // answer. The map alone is not the answer: a workspace disabled between
@@ -344,6 +341,7 @@ export function apply(ctx: PluginContext, config: unknown): void {
       retrievals,
       estimateText,
       estimateKind,
+      projectionCounters,
       llm: ctx.llm,
       selectorRoute: (sessionId) => routes.get(sessionId),
     }
@@ -366,6 +364,11 @@ export function apply(ctx: PluginContext, config: unknown): void {
       receipts,
       host: hostFacts,
       fixedOverhead: () => fixedOverhead,
+      estimateKind,
+      horizonSteps: cfg.horizonSteps,
+      locatorEvictions: () => retrievals.evictions(),
+      unknownFamilies: () => projectionCounters.unknownFamilies(),
+      unknownTools: () => projectionCounters.unknownToolCounts(),
     })
   } catch (error) {
     // A second apply fails on the duplicate prompt section first (registerHooks

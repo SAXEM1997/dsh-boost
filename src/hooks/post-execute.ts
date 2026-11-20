@@ -78,6 +78,7 @@ import { alreadySpilled, looksPruned } from '../gate/invalidate.js'
 import type { AnchorStore, ReceiptAnchors } from '../gate/invalidate.js'
 import type { Candidate, Plan } from '../gate/plan.js'
 import { isPosixOnly } from '../host/platform.js'
+import type { ProjectionCounters } from '../projection/counters.js'
 import { PROTOCOL_NAME, PROTOCOL_ORDER, PROTOCOL_TEXT } from '../prompt/protocol.js'
 import { projectApply, projectShadow } from '../projection/apply.js'
 import type { FormatFooter, ProjectionMode, SpillBackend, SpillHandle } from '../projection/apply.js'
@@ -229,7 +230,20 @@ export interface HookDeps {
    * set on disposal.
    */
   retrievals?: RetrievalLedger
-  /** Token estimator; absent skips projection accounting entirely. */
+  /**
+   * Projection skip counters (Task 25 review).
+   *
+   * `projectDecision` increments the unknown-family counter when a tool name has
+   * no configured family, so status can distinguish "no window, by design"
+   * from "the mapper missed a decorated name".
+   */
+  projectionCounters?: ProjectionCounters
+  /**
+   * Token estimator; absent means no meter.
+   *
+   * Projection still clips, but records `estimate:'unknown'` and no token
+   * numbers; substitution is refused before it can spend money (design §9).
+   */
   estimateText?: (t: string) => number
   /**
    * Which estimator produced a projection receipt's numbers.
@@ -648,29 +662,51 @@ async function scopeDocOf(deps: HookDeps): Promise<ScopeDoc> {
 /** The calls that can retrieve a spilled artifact (design §5.3). */
 const RETRIEVAL_TOOLS: ReadonlySet<string> = new Set(['read', 'grep'])
 
-/** The conservative remaining-step count for a live retrieval, or the default. */
-function retrievalHorizon(deps: HookDeps): number {
-  const configured = deps.config?.horizonSteps
-  return typeof configured === 'number' && Number.isFinite(configured) && configured >= 0
-    ? Math.floor(configured)
-    : DEFAULT_CONFIG.horizonSteps
+/** A detected retrieval, held until the final visible content is known. */
+type PendingRetrieval = { locator: string }
+
+/**
+ * Detect a retrieval without writing anything yet.
+ *
+ * Detection has to happen before the visibility gate (a projected receipt
+ * consumed context whether or not the workspace is still visible), but the
+ * cost must wait until projection has decided what the model will actually
+ * see (review I3). The split keeps both properties.
+ */
+function pendingRetrievalOf(
+  deps: HookDeps,
+  exec: PostExecuteExec,
+  sessionId: string,
+): PendingRetrieval | undefined {
+  try {
+    const name = exec?.name
+    if (typeof name !== 'string' || !RETRIEVAL_TOOLS.has(name)) return undefined
+    const ledger = deps.retrievals
+    if (ledger == null || typeof ledger.locate !== 'function') return undefined
+    const locator = ledger.locate(sessionId, exec.arguments)
+    return locator === undefined ? undefined : { locator }
+  } catch {
+    return undefined
+  }
 }
 
 /**
- * The recorded cost of one retrieval, or `undefined` when it cannot be priced.
+ * The one-time cost of one retrieval, or `undefined` when it cannot be priced.
  *
- * Design §5.3: `Σ(取回调用 token + 取回内容 × 剩余步数)`. Live, the real
- * remaining-step count is unknown, so the configured conservative horizon is
- * used (the same default admission uses, never the actual count). The call's
- * own block is priced from its name and arguments; the retrieved content is
- * priced from the canonical receipt. A missing/non-finite estimate is omitted
- * rather than fabricated, so `status` subtracts nothing it did not measure.
+ * This is the **per-receipt** figure: the call block (name + arguments) plus
+ * the content the model saw. The replay multiplier is applied once, to both
+ * sides of the net formula, in `status` — multiplying only the cost by the
+ * horizon made a cheap partial re-read look like a loss (review C1).
+ *
+ * `content` is the decision's final visible text, so a retrieval that is itself
+ * projected is charged for the window, not the raw result (review I3). A
+ * missing/non-finite estimate is omitted rather than fabricated.
  */
 function retrievalCostOf(
   deps: HookDeps,
   exec: PostExecuteExec,
   content: string,
-): number | undefined {
+): { callTokens: number; contentTokens: number; totalTokens: number } | undefined {
   const estimate = estimatorOf(deps)
   if (estimate === undefined) return undefined
 
@@ -686,8 +722,8 @@ function retrievalCostOf(
   const callTokens = safeEstimate(estimate, `${exec.name ?? 'tool'} ${params}`)
   if (callTokens === undefined) return undefined
 
-  const total = callTokens + contentTokens * retrievalHorizon(deps)
-  return Number.isFinite(total) ? total : undefined
+  const totalTokens = callTokens + contentTokens
+  return Number.isFinite(totalTokens) ? { callTokens, contentTokens, totalTokens } : undefined
 }
 
 /**
@@ -695,30 +731,24 @@ function retrievalCostOf(
  *
  * `appendReceipt` is the store's only write path, and `kind:'projection'` with
  * `retrieved:true` is exactly what `boost status` aggregates as
- * `projection_retrievals` and `retrievalCost`. No `saved_projection_tokens` is
- * written: this line documents a cost, not another gross saving.
+ * `projection_retrievals` and `projection_retrieval_tokens`. No
+ * `saved_projection_tokens` is written: this line documents a cost, not
+ * another gross saving.
  *
- * Runs before the scope gate on purpose. A projected receipt consumed model
- * context whether or not the workspace is still visible, so its retrieval must
- * still be counted; dropping it because visibility changed would flatter the
- * net account after the fact.
+ * `visibleText` is the content that enters history after projection, which is
+ * what the model must pay to replay.
  */
 async function recordProjectionRetrieval(
   deps: HookDeps,
   exec: PostExecuteExec,
-  result: PostExecuteResult | undefined,
   sessionId: string,
+  pending: PendingRetrieval,
+  visibleText: string,
 ): Promise<void> {
   try {
     const name = exec?.name
-    if (typeof name !== 'string' || !RETRIEVAL_TOOLS.has(name)) return
-    const ledger = deps.retrievals
-    if (ledger == null || typeof ledger.locate !== 'function') return
-    const locator = ledger.locate(sessionId, exec.arguments)
-    if (locator === undefined) return
-
-    const receipt = canonicalise(result?.content ?? [], result?.isError === true)
-    const cost = retrievalCostOf(deps, exec, receipt.text)
+    if (typeof name !== 'string') return
+    const cost = retrievalCostOf(deps, exec, visibleText)
     const entry: ReceiptInput = {
       version: 1,
       ts: new Date().toISOString(),
@@ -728,13 +758,15 @@ async function recordProjectionRetrieval(
       code: 'projection-retrieval',
       tool: name,
       retrieved: true,
-      locator,
+      locator: pending.locator,
     }
     if (cost === undefined) {
       entry.estimate = 'unknown'
     } else {
-      entry.retrievalCost = cost
-      entry.estimate = deps.estimateKind ?? 'chars/4'
+      entry.retrieval_call_tokens = cost.callTokens
+      entry.retrieval_content_tokens = cost.contentTokens
+      entry.retrieval_tokens = cost.totalTokens
+      entry.estimate = deps.estimateKind ?? 'unknown'
     }
     await appendReceipt(deps, entry)
   } catch {
@@ -1122,6 +1154,22 @@ async function decideSubstitution(
   const plan = safePlan(deps, ctx.sessionId)
   if (plan === undefined) return { shadowCommitted: false }
 
+  // Design §9: no token meter means no substitution. The meter is what prices
+  // `worthSubstituting` and the selector's input, so running without it would
+  // spend real money on a fabricated estimate. Refuse before `decide`, before
+  // the selector and before admission; shadow mode is record-only and may
+  // still run. Projection is not gated (it needs no token numbers to clip).
+  if (!ctx.doc.shadow && estimatorOf(deps) === undefined) {
+    await appendReceipt(
+      deps,
+      ledgerEntry(ctx, 'skip', 'ERR_HOST_NO_TOKENMETER', {
+        stepId: 'root',
+        reason: 'no-token-meter',
+      }),
+    )
+    return { shadowCommitted: false }
+  }
+
   let decision: ReturnType<typeof decide>
   try {
     decision = decide({
@@ -1394,12 +1442,23 @@ async function projectDecision(
 
   const toolName = ctx.exec.name
   const family = toolName === undefined ? undefined : familyOf(toolName)
-  if (family === undefined) return decision
+  if (family === undefined) {
+    // The mapper missed a tool. Count it so status can distinguish "no window
+    // configured, by design" from "a decorated name was never recognised".
+    try {
+      deps.projectionCounters?.unknownFamily(toolName)
+    } catch {
+      // A counter is evidence, never a precondition.
+    }
+    return decision
+  }
   const target = projectionTargetOf(decision, receipt, ctx.result)
   if (target === undefined) return decision
 
+  // Clipping does not need a token meter; only its accounting does (design
+  // §9). With no estimator the replacement still happens, but the receipts
+  // carry `estimate:'unknown'` and no fabricated numbers.
   const estimate = estimatorOf(deps)
-  if (estimate === undefined) return decision
 
   try {
     if (mode === 'shadow') {
@@ -1409,8 +1468,10 @@ async function projectDecision(
         family,
         cfg: deps.config,
         // Same sanitiser as the apply path: a throwing or non-finite host
-        // estimate must never become `null` in the shadow account.
-        estimate: (text) => safeEstimate(estimate, text) ?? Number.NaN,
+        // estimate must never become `null` in the shadow account. Without a
+        // meter the NaN makes `projectShadow` record an unpriced event.
+        estimate: (text) =>
+          estimate === undefined ? Number.NaN : (safeEstimate(estimate, text) ?? Number.NaN),
       })
       if (outcome.kind === 'shadow') {
         const priced =
@@ -1429,7 +1490,7 @@ async function projectDecision(
                   saved_projection_tokens: outcome.saved,
                 }
               : {}),
-            estimate: priced ? (deps.estimateKind ?? 'chars/4') : 'unknown',
+            estimate: priced ? (deps.estimateKind ?? 'unknown') : 'unknown',
           }),
         )
       }
@@ -1453,10 +1514,13 @@ async function projectDecision(
       // Remember the artifact's only address: this is what makes a later read
       // of it a counted retrieval instead of a free one (design §5.3).
       if (outcome.locator !== undefined) deps.retrievals?.record(ctx.sessionId, outcome.locator)
-      const before = safeEstimate(estimate, target)
-      const after = safeEstimate(estimate, content)
-      // The authoritative names are the design's (§5.3): a projection receipt
-      // without `saved_projection_tokens` is counted as zero by `boost status`.
+
+      // The applied event is always recorded; only the token figures depend on
+      // the meter. One-time `before`/`after`/`saved_projection_tokens` are the
+      // authoritative names (§5.3); `status` applies the replay factor once to
+      // the aggregate, never per receipt.
+      const before = estimate === undefined ? undefined : safeEstimate(estimate, target)
+      const after = estimate === undefined ? undefined : safeEstimate(estimate, content)
       if (before !== undefined && after !== undefined) {
         await appendReceipt(
           deps,
@@ -1465,7 +1529,15 @@ async function projectDecision(
             before,
             after,
             saved_projection_tokens: before - after,
-            estimate: deps.estimateKind ?? 'chars/4',
+            estimate: deps.estimateKind ?? 'unknown',
+          }),
+        )
+      } else {
+        await appendReceipt(
+          deps,
+          ledgerEntry(ctx, 'projection', 'projected', {
+            unit: 'raw',
+            estimate: 'unknown',
           }),
         )
       }
@@ -1571,12 +1643,16 @@ async function postExecute(
     return decision
   }
 
-  // Retrieval accounting runs before the visibility gate: a projected receipt
-  // already consumed context, so its retrieval is part of the ledger even if
-  // the workspace stopped being visible before the read arrived.
-  await recordProjectionRetrieval(deps, exec, result, sessionId)
+  // Detect the retrieval before the visibility gate (a projected receipt
+  // already consumed context regardless of today's scope), but write its cost
+  // only after projection, when the final visible content is known (review I3).
+  const retrieval = pendingRetrievalOf(deps, exec, sessionId)
 
   if (!isActiveSession(deps, sessionId)) {
+    if (retrieval !== undefined) {
+      const arrival = canonicalise(result?.content ?? [], result?.isError === true)
+      await recordProjectionRetrieval(deps, exec, sessionId, retrieval, arrival.text)
+    }
     await appendSkipNoScope(deps.receipts, exec, sessionId, clockTurnOf(deps, sessionId))
     return decision
   }
@@ -1616,6 +1692,9 @@ async function postExecute(
       const reset = markerResetOf(pending, receipt.text)
       if (reset !== undefined) {
         await resetInvalidatedPending(deps, exec, sessionId, turn, pending, reset)
+        if (retrieval !== undefined) {
+          await recordProjectionRetrieval(deps, exec, sessionId, retrieval, receipt.text)
+        }
         return decision
       }
     }
@@ -1629,7 +1708,14 @@ async function postExecute(
       state,
       turn,
     }
-    return await applyDecision(deps, decision, ctx)
+    const outgoing = await applyDecision(deps, decision, ctx)
+    if (retrieval !== undefined) {
+      // The retrieval receipt's content figure must price what enters history
+      // after projection, not the raw result it arrived with.
+      const visible = decisionTextOf(outgoing) ?? receipt.text
+      await recordProjectionRetrieval(deps, exec, sessionId, retrieval, visible)
+    }
+    return outgoing
   } catch {
     // Never lose the tool's real output to a wiring bug in this listener.
     return decision

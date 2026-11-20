@@ -122,6 +122,16 @@ async function createIntegration(options: { config?: Any } = {}): Promise<Integr
   const host = fakeHost({
     get(name: string) {
       if (name === 'workspaceRegistry') return registry
+      // Substitution is now gated on the token meter (design §9); the shipped
+      // `dsh-base` profile loads `dsh-token-meter`, so this is the realistic
+      // host these end-to-end paths run on.
+      if (name === 'tokenMeter') {
+        return {
+          estimateMessage(message: Any): number {
+            return Math.ceil(String(message.content[0].text).length / 4) + 8
+          },
+        }
+      }
       return undefined
     },
     llm: {

@@ -60,6 +60,10 @@ function setup(over: { doc?: Any; deps?: Record<string, unknown> } = {}) {
     usage,
     clock,
     plans,
+    // Substitution now requires a token meter (design §9). The real host
+    // profile loads `dsh-token-meter`; tests that need the degradation pass
+    // `estimateText: undefined` explicitly.
+    estimateText: (text: string) => Math.ceil(text.length / 4),
     ...over.deps,
   }
   registerHooks(host, deps)
@@ -285,6 +289,19 @@ test('O4 ask-selector 无 llm/route 时只记 selector-unavailable，不猜、�
     env.receipts.some((r) => r.kind === 'skip' && r.code === 'selector-unavailable'),
     'the missing seam must be recorded, not guessed',
   )
+})
+
+test('O1 无 estimator 时拒绝替换：不入队、不调 selector、写 ERR_HOST_NO_TOKENMETER', async () => {
+  const env = setup({ deps: { estimateText: undefined } })
+  env.plans.set(SESSION, { goal: 'g', steps: [candidate('A', 'TRIGGER')] })
+
+  await runPost(env.host, 'TRIGGER here')
+
+  assert.equal(env.queue.peek(SESSION), undefined, 'no meter must never queue a replacement')
+  const skip = env.receipts.find((receipt) => receipt.code === 'ERR_HOST_NO_TOKENMETER')
+  assert.ok(skip, 'the refusal must carry the stable code')
+  assert.equal(skip.kind, 'skip')
+  assert.equal(skip.reason, 'no-token-meter')
 })
 
 // ---------------------------------------------------------------------------

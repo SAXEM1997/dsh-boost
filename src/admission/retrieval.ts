@@ -90,6 +90,8 @@ export function recordRetrieval(params: unknown, locators: ReadonlySet<string>):
  */
 export class RetrievalLedger {
   private readonly bySession = new Map<string, Set<string>>()
+  /** Locators dropped by the cap, across every session; exposed by status. */
+  private evictedCount = 0
 
   /** Remember one applied projection's locator; `true` when it was new. */
   record(sessionId: string, locator: string): boolean {
@@ -103,7 +105,10 @@ export class RetrievalLedger {
     if (locators.has(locator)) return false
     if (locators.size >= MAX_LOCATORS_PER_SESSION) {
       const oldest = locators.values().next().value
-      if (oldest !== undefined) locators.delete(oldest)
+      if (oldest !== undefined) {
+        locators.delete(oldest)
+        this.evictedCount += 1
+      }
     }
     locators.add(locator)
     return true
@@ -144,5 +149,16 @@ export class RetrievalLedger {
   /** Number of sessions currently holding locators. */
   size(): number {
     return this.bySession.size
+  }
+
+  /**
+   * Locators the cap has dropped since process start.
+   *
+   * A silent eviction would make later re-reads uncounted and flatter the net
+   * account; status reports this so an operator can see the ledger is lossy
+   * rather than assume every retrieval was seen.
+   */
+  evictions(): number {
+    return this.evictedCount
   }
 }

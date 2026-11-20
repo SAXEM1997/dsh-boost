@@ -435,7 +435,7 @@ test('status 同一替换两行都带数字时只计 settle 一行', async () =>
   assert.equal(status.saved.substitution, 500, 'one substitution must be counted once')
 })
 
-test('status 投影毛额读 saved_projection_tokens，净额扣掉已记录的 retrievalCost', async () => {
+test('status 净额对毛额与取回量使用同一个 (1 + horizon) 回放因子', async () => {
   const d = await deps()
   await d.receipts.append({
     version: 1,
@@ -446,7 +446,7 @@ test('status 投影毛额读 saved_projection_tokens，净额扣掉已记录的 
     code: 'projection',
     saved_projection_tokens: 100,
     retrieved: true,
-    retrievalCost: 30,
+    retrieval_tokens: 30,
   })
   await d.receipts.flush()
 
@@ -454,12 +454,18 @@ test('status 投影毛额读 saved_projection_tokens，净额扣掉已记录的 
   assert.deepEqual(status.saved, {
     substitution: 0,
     projectionGross: 100,
-    projectionNet: 70,
+    // (100 - 30) * (1 + 20): both sides are per-receipt figures and the
+    // configured horizon is the replay multiplier on both.
+    projectionNet: 1_470,
     retrievals: 1,
   })
+  assert.equal(status.projection_gross_tokens, 100)
+  assert.equal(status.projection_retrieval_tokens, 30)
+  assert.equal(status.projection_net_tokens, 1_470)
+  assert.equal(status.projection_horizon_steps, 20)
 })
 
-test('status 取回未记录 retrievalCost 时净额等于毛额', async () => {
+test('status 取回量未知时只对毛额计回放，不伪造取回成本', async () => {
   const d = await deps()
   await d.receipts.append({
     version: 1,
@@ -476,7 +482,8 @@ test('status 取回未记录 retrievalCost 时净额等于毛额', async () => {
   const status = await getStatus(d)
   assert.equal(status.saved.projectionGross, 100)
   assert.equal(status.saved.retrievals, 1)
-  assert.equal(status.saved.projectionNet, 100)
+  assert.equal(status.projection_retrieval_tokens, 0)
+  assert.equal(status.saved.projectionNet, 100 * 21)
 })
 
 test('status 投影毛额保留 saved 旧拼写作为后备', async () => {
@@ -604,13 +611,16 @@ test('status 在 scope.json 不可读时报稳定码切仍给出账目', async (
   })
 })
 
-test('status 在收据目录不可读时返回稳定码而不是抛错', async () => {
+test('status 在收据目录不可读时仍返回，空账本而不是内部失败', async () => {
   const d = await dirDeps()
-  // A file where receipts/ should be makes the all-shard scan throw.
+  // A file where receipts/ should be is ENOTDIR: an empty ledger, not a crash
+  // (review I5). The same shape is reachable through a file-valued $DSH_HOME.
   await writeFile(join(d.dir, 'receipts'), 'not a directory')
   const r = await runBoost({ args: { cmd: 'status' }, ...d })
-  assert.equal(r.ok, false)
-  if (!r.ok) assert.equal(typeof r.code, 'string')
+  assert.equal(r.ok, true)
+  if (!r.ok) return
+  assert.deepEqual({ ...r.data.counts }, {})
+  assert.equal(r.data.projection_retrievals, 0)
 })
 
 // --- rule 6: the definition satisfies the host contract ------------------

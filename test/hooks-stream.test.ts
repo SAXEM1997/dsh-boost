@@ -108,6 +108,9 @@ function setup(
     plans,
     sessionState,
     sessions: runtime,
+    // Substitution requires a token meter now (design §9); the stream tests
+    // exercise the settlement path, which needs a real enqueue.
+    estimateText: (text: string) => Math.ceil(text.length / 4),
     ...over.deps,
   }
   registerHooks(host, deps)
