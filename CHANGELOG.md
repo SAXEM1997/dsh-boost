@@ -14,10 +14,22 @@ Design rationale lives in `docs/superpowers/specs/`; the release-acceptance proc
 
 ## [0.1.0] - 2026-11-20
 
-首个可用版本。默认不改变任何行为：作用域是 `selected` + 空工作区列表，插件装上即静默。
+<!-- 版本链接暂缺：github.com/SAXEM1997/dsh-boost 不存在（404），实际远端是内网 GitLab
+     （gitlab.ai.isv.iridesc.cn:23000/zyx/dsh-boost），且两边都还没有 v0.1.0 标签，
+     任何 releases/tag 或 compare 链接今天都会 404。发布标签后恢复
+     [Unreleased]/[0.1.0] 链接定义。 / Version links omitted for now: the GitHub repo does
+     not exist (404), the real remote is the internal GitLab, and neither has a v0.1.0 tag,
+     so any releases/tag or compare URL would 404 today. Restore the [Unreleased]/[0.1.0]
+     link definitions once a tag is published. -->
+首个可用版本。默认作用域是 `selected` + 空工作区列表：不投影、不替换、不注入协议段——但
+**不是零成本**：`boost` 工具只要插件装配就注册，其 schema（本 checkout 实测 393 token）
+随**每个**模型请求常驻。装上但未启用是一个每请求 393 token 的小额净支出。
 
-First usable release. It changes nothing by default: the scope is `selected` with an empty workspace
-list, so installing the plugin is inert until a workspace is added.
+First usable release. The default scope is `selected` with an empty workspace list: no
+projection, no substitution, no protocol section — but **not zero-cost**: the `boost` tool
+registers as soon as the plugin is assembled, and its schema (393 tokens measured in this
+checkout) rides along on **every** model request. Installed-but-not-enabled is a small net cost
+of 393 tokens per request.
 
 ### 新增 Added
 
@@ -32,18 +44,23 @@ list, so installing the plugin is inert until a workspace is added.
   Deterministic substitution: the model declares a plan with literal arguments and receipt-local
   guards; code evaluates the guards, a single eligible candidate commits, several go to a
   one-token selector. Substitution is limited to three read-only tools.
-- **影子模式**：`shadow: true` 时只记账不替换，投影照常生效。默认开启，用于上线前的观察周。
-  Shadow mode records decisions without substituting, while projection still applies. It is on by
-  default, for the observation week before substitution is enabled.
+- **影子模式**：`shadow: true` 时替换决策只记账，不合成回合。投影由**独立的** `projection`
+  字段控制；默认 `projection: 'shadow'` 同样只记账、不改模型可见内容，真正投影要显式设为
+  `'on'`。影子周按设计零节省，用于上线前的观察周。
+  Shadow mode records substitution decisions without synthesizing anything. Projection is
+  governed by the **separate** `projection` field; the default `projection: 'shadow'` likewise
+  only prices and never changes model-visible content — real projection requires explicitly
+  setting `'on'`. By design the shadow week saves nothing; it exists for the observation week
+  before substitution is enabled.
 - **`boost` 控制工具**：`status` / `scope-get` / `scope-set` / `shadow` 四个子命令，全部写入走
   revision 校验，冲突返回稳定码而不是覆盖。
   The `boost` control tool: `status`, `scope-get`, `scope-set`, `shadow`. Every write is
   revision-checked; a conflict returns a stable code instead of overwriting.
 - **可审计的收据**：每次决定写一行 JSONL，含计划目标、守卫、绑定后的参数、回执预览与节省量；
-  写入按会话分片、崩溃安全、写失败即停止替换（fail-closed）。
+  写入按会话分片、崩溃安全、**连续 3 次**写失败即停止替换（fail-closed）。
   Auditable receipts: one JSONL line per decision with the plan goal, guards, bound arguments, a
-  receipt preview and the saving. Sharded per session, crash-safe, and fail-closed after repeated
-  write failures.
+  receipt preview and the saving. Sharded per session, crash-safe, and fail-closed after 3
+  consecutive write failures.
 - **失败即可见的降级**：`boost status` 暴露稳定的 `ERR_HOST_*` 码与 `protocol_suppressed`
   计数，所以"插件没生效"与"宿主缺能力"可以区分开。
   Visible degradation: `boost status` reports stable `ERR_HOST_*` codes and a
@@ -60,6 +77,3 @@ list, so installing the plugin is inert until a workspace is added.
   首轮需按 `docs/RELEASE.md` 检查含 `content[].thinking` 的 400。
   On an Anthropic-compatible thinking route, a synthesized turn without a sibling `thinking` block
   may be rejected; check for a 400 mentioning `content[].thinking` in the first substitution round.
-
-[Unreleased]: https://github.com/SAXEM1997/dsh-boost/compare/v0.1.0...HEAD
-[0.1.0]: https://github.com/SAXEM1997/dsh-boost/releases/tag/v0.1.0
