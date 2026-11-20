@@ -880,3 +880,23 @@ test('runBoost 对 null 输入与抛错 getter 返回稳定码，不抛错', asy
     code: 'ERR_BOOST_INTERNAL',
   })
 })
+test('boostTool 把 exec.signal 传给 scope-set，取消后不写盘（row 79）', async () => {
+  const d = await dirDeps()
+  const controller = new AbortController()
+  controller.abort()
+  const def = boostTool(d)
+  const result = await def.execute(
+    { cmd: 'scope-set', body: { mode: 'global' }, baseRevision: 0 },
+    { signal: controller.signal },
+  )
+  assert.deepEqual(result, { ok: false, code: 'ERR_SCOPE_ABORTED' })
+  const read = await d.scope.read()
+  assert.equal(read.doc.revision, 0)
+})
+
+test('boostTool 忽略不是 AbortSignal 的 exec.signal（不因宿主形状抛错）', async () => {
+  const d = await dirDeps()
+  const def = boostTool(d)
+  const result = await def.execute({ cmd: 'status' }, { signal: { aborted: 'no' } })
+  assert.equal((result as any).ok, true)
+})

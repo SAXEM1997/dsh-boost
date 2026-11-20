@@ -556,3 +556,37 @@ test('I8: a lock the first read found absent is reported LOCKED, not unlinked', 
   assert.equal(existsSync(lock), true, 'the concurrent writer’s lock must survive')
   assert.equal(await readFile(lock, 'utf8'), concurrent)
 })
+
+// ---------------------------------------------------------------------------
+// Row 79: a cancelled control write must stop before touching the document.
+// ---------------------------------------------------------------------------
+
+test('write 在 signal 已中止时拒绝且不写盘（ERR_SCOPE_ABORTED）', async () => {
+  const dir = await tempDir()
+  const controller = new AbortController()
+  controller.abort()
+  const s = new ScopeStore(dir)
+  await assert.rejects(
+    () => s.write(d => ({ ...d, mode: 'global' }), 0, { signal: controller.signal }),
+    (error: unknown) => {
+      assert.equal((error as NodeJS.ErrnoException).code, 'ERR_SCOPE_ABORTED')
+      return true
+    },
+  )
+  assert.equal(existsSync(join(dir, 'scope.json')), false)
+  assert.equal(existsSync(join(dir, 'scope.lock')), false)
+})
+
+test('write 在锁内被中止时释放锁且不覆盖文件', async () => {
+  const dir = await tempDir()
+  const file = join(dir, 'scope.json')
+  await writeFile(file, JSON.stringify({ version: 2, revision: 0, mode: 'selected', workspaceIds: [], shadow: true, projection: 'shadow' }))
+  const before = await readFile(file, 'utf8')
+  const controller = new AbortController()
+  const s = new ScopeStore(dir)
+  const pending = s.write(d => ({ ...d, mode: 'global' }), 0, { signal: controller.signal })
+  controller.abort()
+  await assert.rejects(pending, /ERR_SCOPE_ABORTED|ERR_SCOPE_REVISION_CONFLICT/)
+  assert.equal(await readFile(file, 'utf8'), before)
+  assert.equal(existsSync(join(dir, 'scope.lock')), false)
+})

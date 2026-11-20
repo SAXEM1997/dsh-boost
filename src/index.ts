@@ -311,7 +311,20 @@ function rememberRoute(
   routes.set(sessionId, route)
 }
 
-/** Replace the protocol section's already-resolved text with the fresh answer. */
+/**
+ * Replace the protocol section's already-resolved text with the fresh answer.
+ *
+ * This runs *after* the assemble waterfall, so it rewrites text a section
+ * provider already produced. That is deliberate and does not contradict D4
+ * ("persistent, stable content"): every agent has its own prompt prefix and
+ * its own context window, so changing this section cannot invalidate another
+ * agent's cached prefix. Within one agent the answer changes only when its
+ * resolved visibility changes (a workspace edit/`scope-set`), which is exactly
+ * the point at which the prefix must change; every other assembly reproduces
+ * the same bytes. The alternative — a section whose text is fixed at
+ * registration — would either leak one agent's visibility to every other or
+ * require a second provider to read a cache this listener has not warmed yet.
+ */
 function patchProtocolSection(assembly: unknown, visible: boolean): unknown {
   const value = assembly as { sections?: unknown } | undefined
   if (value === undefined || value === null || !Array.isArray(value.sections)) return assembly
@@ -557,6 +570,14 @@ function wireSessionEvents(
     return next()
   })
 
+  // `session/event` carries a plain `type` string, so `turn/end` is matched by
+  // value, not by a stable code. That match is a convenience: it flushes early
+  // on the common path, but it is not the durability boundary. The host does
+  // not await this listener, so a process exit immediately after `turn/end`
+  // can drop the flush; the awaited `session/flush` below is what the
+  // persistence contract rests on, and `session/disposed` flushes again after
+  // the last hook for the id. Receipts are evidence, so an early flush that
+  // does not happen costs latency, never correctness.
   ctx.on('session/event', (session: unknown, event: unknown) => {
     const type = (event as { type?: unknown } | undefined)?.type
     if (type === 'turn/end') {

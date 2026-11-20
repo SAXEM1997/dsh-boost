@@ -57,6 +57,15 @@ export const ERR_SCOPE_REVISION_CONFLICT = 'ERR_SCOPE_REVISION_CONFLICT'
 /** Stable rejection code: another writer holds the scope lock. */
 export const ERR_SCOPE_LOCKED = 'ERR_SCOPE_LOCKED'
 
+/**
+ * Stable rejection code: the write was cancelled through its `AbortSignal`.
+ *
+ * Checked at every await boundary of the write path. A cancellation is not a
+ * storage failure — the file is left exactly as it was — so the caller can
+ * report it without implying the scope is damaged.
+ */
+export const ERR_SCOPE_ABORTED = 'ERR_SCOPE_ABORTED'
+
 /** Every stable scope failure code (design §5.5 plus the future-version split). */
 export type ScopeCode =
   | typeof ERR_SCOPE_UNKNOWN_VERSION
@@ -65,6 +74,7 @@ export type ScopeCode =
   | typeof ERR_SCOPE_READ_FAILED
   | typeof ERR_SCOPE_REVISION_CONFLICT
   | typeof ERR_SCOPE_LOCKED
+  | typeof ERR_SCOPE_ABORTED
 
 /** The subset `parseScope` itself can return. */
 type ParseCode =

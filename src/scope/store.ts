@@ -60,6 +60,7 @@ import type { FileHandle } from 'node:fs/promises'
 import { join } from 'node:path'
 import {
   DEFAULT_SCOPE,
+  ERR_SCOPE_ABORTED,
   ERR_SCOPE_FUTURE_VERSION,
   ERR_SCOPE_LOCKED,
   ERR_SCOPE_PARSE_FAILED,
@@ -112,6 +113,16 @@ type DiskRead =
 /** A write-path failure: the stable code is on `.code` and in the message. */
 function scopeError(code: ScopeCode, detail: string): Error & { code: ScopeCode } {
   return Object.assign(new Error(`${code}: ${detail}`), { code })
+}
+
+/** The stable cancellation error; the file has not been touched yet. */
+function abortedError(): Error & { code: ScopeCode } {
+  return scopeError(ERR_SCOPE_ABORTED, 'the scope write was cancelled')
+}
+
+/** Stop before the next side effect when the caller has cancelled. */
+function checkAbort(signal: AbortSignal | undefined): void {
+  if (signal?.aborted === true) throw abortedError()
 }
 
 /** The errno string of a Node filesystem error, if it has one. */
@@ -257,11 +268,20 @@ export class ScopeStore {
    * it would silently drop configuration. An existing file that cannot be read
    * at all is `ERR_SCOPE_READ_FAILED` — never overwritten blindly.
    */
-  async write(mutate: (doc: ScopeDoc) => ScopeDoc, baseRevision: number): Promise<ScopeDoc> {
+  async write(
+    mutate: (doc: ScopeDoc) => ScopeDoc,
+    baseRevision: number,
+    options: { signal?: AbortSignal } = {},
+  ): Promise<ScopeDoc> {
+    const signal = options.signal
+    checkAbort(signal)
     await this.ensureDirectory()
-    await this.acquireLock()
+    checkAbort(signal)
+    await this.acquireLock(signal)
     try {
+      checkAbort(signal)
       const current = this.readDiskSync()
+      checkAbort(signal)
       if (!current.ok && current.code === ERR_SCOPE_FUTURE_VERSION) {
         throw scopeError(
           ERR_SCOPE_FUTURE_VERSION,
@@ -288,6 +308,7 @@ export class ScopeStore {
         revision: baseRevision + 1,
         updatedAt: new Date().toISOString(),
       }
+      checkAbort(signal)
       let written: { mtimeMs: number; text: string }
       try {
         written = this.writeAtomic(doc)
@@ -396,8 +417,18 @@ export class ScopeStore {
    * would lose that writer's update. Refusing is safe (the caller retries) and
    * the alternative is the one case the changed-lock guard cannot cover.
    */
-  private async acquireLock(): Promise<void> {
-    if (await this.createLock()) return
+  private async acquireLock(signal?: AbortSignal): Promise<void> {
+    checkAbort(signal)
+    if (await this.createLock()) {
+      // `createLock` is the one await that can leave a lock behind; an abort
+      // observed after it returns must release it, not strand it.
+      if (signal?.aborted === true) {
+        this.releaseLock()
+        throw abortedError()
+      }
+      return
+    }
+    checkAbort(signal)
     const first = this.readLock()
     const decision = this.classifyLock(first)
     if (decision === 'held') {
@@ -434,6 +465,10 @@ export class ScopeStore {
     }
     if (!(await this.createLock())) {
       throw scopeError(ERR_SCOPE_LOCKED, `${this.lockFile} is held by another writer`)
+    }
+    if (signal?.aborted === true) {
+      this.releaseLock()
+      throw abortedError()
     }
   }
 

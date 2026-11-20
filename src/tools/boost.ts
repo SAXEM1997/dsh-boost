@@ -61,6 +61,7 @@ import { DEFAULT_CONFIG } from '../config.js'
 import { isPosixOnly } from '../host/platform.js'
 import type { ProjectionMode } from '../projection/apply.js'
 import {
+  ERR_SCOPE_ABORTED,
   ERR_SCOPE_FUTURE_VERSION,
   ERR_SCOPE_LOCKED,
   ERR_SCOPE_PARSE_FAILED,
@@ -92,6 +93,7 @@ const SCOPE_CODES: ReadonlySet<string> = new Set([
   ERR_SCOPE_READ_FAILED,
   ERR_SCOPE_REVISION_CONFLICT,
   ERR_SCOPE_LOCKED,
+  ERR_SCOPE_ABORTED,
 ])
 
 /** Stable host degradation codes (design §9; the frozen set `status` reports). */
@@ -215,6 +217,14 @@ export interface BoostDeps {
   protocolSuppressed?: () => number
   /** Requests whose final prompt lost the protocol to a complete section; status-time read. */
   completeSectionSuppressions?: () => number
+  /**
+   * Cancellation for this invocation only.
+   *
+   * `runBoost` is also callable directly (tests, future hosts), so this is
+   * optional; `boostTool.execute` fills it from the host's `exec.signal` and a
+   * cancelled call leaves `scope.json` untouched.
+   */
+  signal?: AbortSignal
 }
 
 /** The scope document's caller-writable fields. Everything else is store-owned. */
@@ -816,9 +826,10 @@ async function writeScope(
   scope: ScopeStore,
   mutate: (doc: ScopeDoc) => ScopeDoc,
   baseRevision: number,
+  signal?: AbortSignal,
 ): Promise<BoostResult> {
   try {
-    const doc = await scope.write(mutate, baseRevision)
+    const doc = await scope.write(mutate, baseRevision, { signal })
     return { ok: true, data: doc }
   } catch (error) {
     const code = scopeCodeOf(error)
@@ -837,6 +848,7 @@ async function scopeSetCommand(deps: BoostDeps, args: BoostArgs): Promise<BoostR
     deps.scope,
     doc => ({ ...doc, ...patch, version: 2 }),
     args.baseRevision,
+    deps.signal,
   )
 }
 
@@ -856,7 +868,7 @@ async function shadowCommand(deps: BoostDeps, args: BoostArgs): Promise<BoostRes
     return { ok: false, code: ERR_SCOPE_UNKNOWN_VERSION }
   }
   const shadow = args.body
-  return writeScope(deps.scope, doc => ({ ...doc, shadow }), args.baseRevision)
+  return writeScope(deps.scope, doc => ({ ...doc, shadow }), args.baseRevision, deps.signal)
 }
 
 /** One handler per subcommand; the table is the dispatch and the documentation. */
@@ -883,6 +895,8 @@ export async function runBoost(
   },
 ): Promise<{ ok: true; data: unknown } | { ok: false; code: string }> {
   try {
+    const signal = (input as { signal?: AbortSignal } | null | undefined)?.signal
+    if (signal?.aborted === true) return { ok: false, code: ERR_SCOPE_ABORTED }
     const args = (input as { args?: unknown } | null | undefined)?.args
     const cmd = (args as { cmd?: unknown } | null | undefined)?.cmd
     const handler =
@@ -894,6 +908,24 @@ export async function runBoost(
   } catch {
     return { ok: false, code: ERR_BOOST_INTERNAL }
   }
+}
+
+/**
+ * The host's cancellation signal, or `undefined` for any other shape.
+ *
+ * `exec` crosses the host boundary and is untrusted here: a plain object with
+ * an `aborted` boolean and an `addEventListener` function is the documented
+ * `AbortSignal` contract this code relies on, and anything else is ignored
+ * rather than dereferenced (a foreign host must not make `boost` throw).
+ */
+function signalOf(exec: unknown): AbortSignal | undefined {
+  const candidate = (exec as { signal?: unknown } | null | undefined)?.signal
+  if (typeof candidate !== 'object' || candidate === null) return undefined
+  const signal = candidate as { aborted?: unknown; addEventListener?: unknown }
+  if (typeof signal.aborted !== 'boolean' || typeof signal.addEventListener !== 'function') {
+    return undefined
+  }
+  return candidate as AbortSignal
 }
 
 /** Model-facing description: what each command does and what it returns. */
@@ -1023,6 +1055,6 @@ export function boostTool(deps: BoostDeps): {
     description: DESCRIPTION,
     parameters: PARAMETERS,
     output: { schema: OUTPUT_SCHEMA, render: renderResult },
-    execute: (args, _exec) => runBoost({ args: args as BoostArgs, ...deps }),
+    execute: (args, exec) => runBoost({ args: args as BoostArgs, ...deps, signal: signalOf(exec) }),
   }
 }
