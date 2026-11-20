@@ -19,16 +19,26 @@ import { join, resolve } from 'node:path'
 /**
  * `<DSH_HOME>/boost`, falling back to `<homedir>/.dsh/boost`.
  *
+ * A `config.dshHome` override wins over the environment, matching the other
+ * host plugins (`dsh-mcp-btwy` resolves `config.dshHome` before `$DSH_HOME`):
+ * an operator who patches the plugin row should not have to change the
+ * process environment for all plugins. A non-string or blank override is
+ * ignored and the environment rule applies.
+ *
  * A blank value is treated as unset: `join('', 'boost')` would otherwise put
  * state in the process's working directory, which is not a home directory.
  *
- * A relative `$DSH_HOME` is resolved against the current cwd **once**, here.
+ * A relative home is resolved against the current cwd **once**, here.
  * Passing it through would leave the stores resolving it again on every read,
  * so a later `chdir` would silently move the state root mid-session (review
  * minor).
  */
-export function resolveBoostRoot(): string {
-  const configured = process.env.DSH_HOME?.trim()
+export function resolveBoostRoot(config?: unknown): string {
+  const override = (config as { dshHome?: unknown } | null | undefined)?.dshHome
+  const configured =
+    typeof override === 'string' && override.trim() !== ''
+      ? override.trim()
+      : process.env.DSH_HOME?.trim()
   const home = configured ? resolve(configured) : join(homedir(), '.dsh')
   return join(home, 'boost')
 }

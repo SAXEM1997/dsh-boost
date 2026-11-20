@@ -11,13 +11,20 @@ import { ReceiptStore } from '../src/receipts/store.ts'
 
 const deps = async () => {
   const dir = await mkdtemp(join(tmpdir(), 'boost-'))
-  return { scope: new ScopeStore(dir), receipts: new ReceiptStore(dir) }
+  const receipts = new ReceiptStore(dir)
+  return { scope: new ScopeStore(dir), receipts, receiptReadErrors: () => receipts.readErrors() }
 }
 
 /** Same as `deps()`, but keeps the root so a test can plant files the stores read. */
 const dirDeps = async () => {
   const dir = await mkdtemp(join(tmpdir(), 'boost-'))
-  return { dir, scope: new ScopeStore(dir), receipts: new ReceiptStore(dir) }
+  const receipts = new ReceiptStore(dir)
+  return {
+    dir,
+    scope: new ScopeStore(dir),
+    receipts,
+    receiptReadErrors: () => receipts.readErrors(),
+  }
 }
 
 /** Await a status call and narrow the success branch for the assertions below. */
@@ -218,6 +225,57 @@ test('scope-set 把 version 1 文件显式升级为 v2（store 的既有写路�
   const after = await d.scope.read()
   assert.equal(after.degraded, undefined)
   assert.equal(after.doc.version, 2)
+})
+
+test('shadow 拒绝自动升级 v1：返回 ERR_SCOPE_UNKNOWN_VERSION 且文件逐字保留', async () => {
+  const d = await dirDeps()
+  const file = join(d.dir, 'scope.json')
+  const v1 = {
+    version: 1,
+    mode: 'global',
+    workspaceIds: ['ws-a'],
+    shadow: true,
+    projection: 'on',
+  }
+  await writeFile(file, JSON.stringify(v1))
+
+  assert.deepEqual(await runBoost({ args: { cmd: 'shadow', body: false, baseRevision: 0 }, ...d }), {
+    ok: false,
+    code: 'ERR_SCOPE_UNKNOWN_VERSION',
+  })
+  assert.deepEqual(JSON.parse(await readFile(file, 'utf8')), v1)
+})
+
+test('scope-set 是 v1 的升级路径：只改调用方点名的字段，其余字段保留', async () => {
+  const d = await dirDeps()
+  const file = join(d.dir, 'scope.json')
+  await writeFile(
+    file,
+    JSON.stringify({
+      version: 1,
+      mode: 'global',
+      workspaceIds: ['ws-a', 'ws-b'],
+      shadow: false,
+      projection: 'on',
+    }),
+  )
+
+  const r = await runBoost({
+    args: { cmd: 'scope-set', body: { projection: 'off' }, baseRevision: 0 },
+    ...d,
+  })
+  assert.equal(r.ok, true, JSON.stringify(r))
+  if (!r.ok) return
+  const doc = r.data as any
+  assert.equal(doc.version, 2)
+  assert.equal(doc.mode, 'global')
+  assert.deepEqual(doc.workspaceIds, ['ws-a', 'ws-b'])
+  assert.equal(doc.shadow, false)
+  assert.equal(doc.projection, 'off')
+
+  const after = await d.scope.read()
+  assert.equal(after.degraded, undefined)
+  assert.deepEqual(after.doc, doc)
 })
 
 test('scope-set / shadow 拒绝重写 future version 文件，文件逐字保留', async () => {
@@ -696,6 +754,59 @@ test('status 在 scope.json 不可读时报稳定码切仍给出账目', async (
   })
 })
 
+test('status 遇到不可读分片时仍返回，并给出稳定的 degraded 码', async () => {
+  const d = await dirDeps()
+  const receipts = join(d.dir, 'receipts')
+  await mkdir(receipts, { recursive: true })
+  // A healthy shard read first, then a directory where a shard file should be:
+  // readFile(dir) is EISDIR on POSIX and must not abort the whole status.
+  await writeFile(
+    join(receipts, 'aa.jsonl'),
+    `${JSON.stringify({
+      version: 1,
+      ts: new Date().toISOString(),
+      sessionId: 'aa',
+      turn: 1,
+      kind: 'skip',
+      code: 'skip:no-scope',
+      receipt_hash: 'hash-aa',
+      preview: '',
+    })}\n`,
+  )
+  await mkdir(join(receipts, 'zz.jsonl'))
+  const r = await runBoost({ args: { cmd: 'status' }, ...d })
+  assert.equal(r.ok, true, JSON.stringify(r))
+  if (!r.ok) return
+  const status = r.data as BoostStatus
+  assert.ok(status.degraded.includes('ERR_RECEIPTS_UNREADABLE'), JSON.stringify(status.degraded))
+  assert.equal(status.counts['skip:no-scope'], 1, 'the healthy shard is still counted')
+})
+
+test('status 遇到只有不可读分片的账本时仍返回空账与稳定码', async () => {
+  const d = await dirDeps()
+  const receipts = join(d.dir, 'receipts')
+  await mkdir(receipts, { recursive: true })
+  await mkdir(join(receipts, 'only.jsonl'))
+  const r = await runBoost({ args: { cmd: 'status' }, ...d })
+  assert.equal(r.ok, true, JSON.stringify(r))
+  if (!r.ok) return
+  const status = r.data as BoostStatus
+  assert.deepEqual({ ...status.counts }, {})
+  assert.ok(status.degraded.includes('ERR_RECEIPTS_UNREADABLE'))
+})
+
+test('status 无宿主事实时不输出 hasWorkspaceRegistry 键（undefined 不是合法 JSON）', async () => {
+  const d = await deps()
+  const r = await runBoost({ args: { cmd: 'status' }, ...d })
+  assert.equal(r.ok, true)
+  if (!r.ok) return
+  const status = r.data as BoostStatus
+  assert.equal(Object.hasOwn(status, 'hasWorkspaceRegistry'), false)
+  // The value the host boundary receives must survive a lossless JSON round
+  // trip: an own key whose value is `undefined` is not a legal JSON value.
+  assert.doesNotThrow(() => JSON.stringify(status))
+})
+
 test('status 在收据目录不可读时仍返回，空账本而不是内部失败', async () => {
   const d = await dirDeps()
   // A file where receipts/ should be is ENOTDIR: an empty ledger, not a crash
@@ -720,6 +831,10 @@ test('工具定义满足宿主形状，output.schema 接受成功与失败两个
   assert.equal(typeof def.parameters, 'object')
   assert.equal(typeof def.execute, 'function')
   assert.doesNotThrow(() => assertSupportedJsonSchema(def.output.schema))
+  // The input schema must stay inside the same enforced subset: the host
+  // validates `output.schema` at register today, and a tightening that also
+  // asserts `parameters` must not reject the only control tool (row 45).
+  assert.doesNotThrow(() => assertSupportedJsonSchema(def.parameters as never))
   assert.deepEqual(validateJsonSchemaValue(def.output.schema, { ok: true, data: { shadow: true } }), [])
   assert.deepEqual(validateJsonSchemaValue(def.output.schema, { ok: false, code: 'ERR_X' }), [])
 

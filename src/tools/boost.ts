@@ -70,7 +70,7 @@ import {
 } from '../scope/doc.js'
 import type { ScopeCode, ScopeDoc } from '../scope/doc.js'
 import type { ScopeStore } from '../scope/store.js'
-import type { ReceiptStore } from '../receipts/store.js'
+import type { Receipt, ReceiptStore } from '../receipts/store.js'
 
 /** Stable failure code: `cmd` names no subcommand this tool implements. */
 const ERR_BOOST_UNKNOWN_CMD = 'ERR_BOOST_UNKNOWN_CMD'
@@ -101,6 +101,27 @@ const ERR_HOST_NO_ESTIMATOR = 'ERR_HOST_NO_ESTIMATOR'
 const ERR_HOST_PLATFORM_UNSUPPORTED = 'ERR_HOST_PLATFORM_UNSUPPORTED'
 const ERR_HOST_NO_STEP_WHEN = 'ERR_HOST_NO_STEP_WHEN'
 const ERR_HOST_NO_WORKSPACE_REGISTRY = 'ERR_HOST_NO_WORKSPACE_REGISTRY'
+
+/**
+ * Stable degradation code: at least one receipt shard could not be read.
+ *
+ * `status` scans every shard; a single unreadable file (EACCES, or a directory
+ * named `x.jsonl`) must leave the healthy shards readable and the tool
+ * answering. The store's per-shard containment reports skipped shards; a store
+ * that throws instead is caught here and reported with the same code.
+ */
+const ERR_RECEIPTS_UNREADABLE = 'ERR_RECEIPTS_UNREADABLE'
+
+/**
+ * Stable degradation code: the final system prompt did not carry the protocol
+ * section because a `complete: true` section replaced the assembly.
+ *
+ * Detected on the outgoing request (`llm/stream`), not at assembly time: the
+ * host restores the complete section after the waterfall, so only the request
+ * shows the loss. Substitution is refused for the affected request because the
+ * model was never taught the plan grammar (review row 12).
+ */
+const ERR_HOST_COMPLETE_SECTION = 'ERR_HOST_COMPLETE_SECTION'
 
 /**
  * Receipt codes that mean the host is degraded, mapped to the stable code
@@ -170,6 +191,15 @@ export interface BoostDeps {
   horizonSteps?: number
   /** Locators evicted by the per-session cap; status-time read. */
   locatorEvictions?: () => number
+  /**
+   * Receipt shards a whole-store scan had to skip; status-time read.
+   *
+   * A store that contains an unreadable shard per shard reports it here so
+   * `status` can add the stable code; absent means the store has no such
+   * counter (or none was skipped). A store that throws instead is caught by
+   * the status-side scan and reported with the same code.
+   */
+  receiptReadErrors?: () => number
   /** Calls skipped because no family matched; status-time read. */
   unknownFamilies?: () => number
   /** Retained unmapped tool names; status-time read. */
@@ -183,6 +213,8 @@ export interface BoostDeps {
    * configured" and "assembly failed" look identical from `status`.
    */
   protocolSuppressed?: () => number
+  /** Requests whose final prompt lost the protocol to a complete section; status-time read. */
+  completeSectionSuppressions?: () => number
 }
 
 /** The scope document's caller-writable fields. Everything else is store-owned. */
@@ -335,6 +367,26 @@ export interface BoostStatus {
 type ScopePatch = Partial<Pick<ScopeDoc, (typeof PATCH_FIELDS)[number]>>
 
 /**
+ * Yield the store's receipts, converting a throwing scan into a degraded flag.
+ *
+ * `ReceiptStore.scan` catches unreadable shards per shard; this wrapper is the
+ * status-side backstop for a store that throws instead (another store
+ * implementation, or a directory listing failure). The receipts yielded before
+ * the failure are real and must still be counted; the flag tells `status` to
+ * add {@link ERR_RECEIPTS_UNREADABLE} rather than fail the tool.
+ */
+async function* scanOrDegrade(
+  receipts: ReceiptStore,
+  state: { unreadable: boolean },
+): AsyncIterable<Receipt> {
+  try {
+    yield* receipts.scan()
+  } catch {
+    state.unreadable = true
+  }
+}
+
+/**
  * The receipt aggregation behind `status`, kept separate from the document
  * read so the accounting has one home and one test surface.
  *
@@ -348,7 +400,6 @@ async function aggregate(receipts: ReceiptStore): Promise<{
   counts: Record<string, number>
   substitution: number
   projectionGross: number
-  projectionEvents: number
   unpricedProjections: number
   retrievalTokens: number
   retrievalContentTokens: number
@@ -358,11 +409,11 @@ async function aggregate(receipts: ReceiptStore): Promise<{
   legacyRetrievals: number
   legacyRetrievalCost: number
   degraded: string[]
+  unreadable: boolean
 }> {
   const counts: Record<string, number> = Object.create(null)
   let substitution = 0
   let projectionGross = 0
-  let projectionEvents = 0
   let unpricedProjections = 0
   let retrievalTokens = 0
   let retrievalContentTokens = 0
@@ -372,7 +423,9 @@ async function aggregate(receipts: ReceiptStore): Promise<{
   let legacyRetrievals = 0
   let legacyRetrievalCost = 0
 
-  for await (const receipt of receipts.scan()) {
+  /** Set when the whole-store scan threw instead of yielding every shard. */
+  const scanState = { unreadable: false }
+  for await (const receipt of scanOrDegrade(receipts, scanState)) {
     // A receipt is untrusted text from a file: `counts` has no prototype so a
     // code of `toString` or `__proto__` is an ordinary numeric key, never a
     // string concatenation and never a dropped assignment.
@@ -388,7 +441,6 @@ async function aggregate(receipts: ReceiptStore): Promise<{
     }
 
     if (receipt.kind !== 'projection') continue
-    projectionEvents += 1
 
     if (receipt.unit === 'raw' && receipt.call_was_retrieval !== true && receipt.retrieved !== true) {
       // T23b/T26 write `saved_projection_tokens`; `saved` is the pre-T23b
@@ -452,7 +504,6 @@ async function aggregate(receipts: ReceiptStore): Promise<{
     counts,
     substitution,
     projectionGross,
-    projectionEvents,
     unpricedProjections,
     retrievalTokens,
     retrievalContentTokens,
@@ -462,6 +513,7 @@ async function aggregate(receipts: ReceiptStore): Promise<{
     legacyRetrievals,
     legacyRetrievalCost,
     degraded,
+    unreadable: scanState.unreadable,
   }
 }
 
@@ -604,6 +656,19 @@ async function statusCommand(deps: BoostDeps): Promise<BoostResult> {
   const totals = await aggregate(deps.receipts)
   const fixedOverhead = await fixedOverheadOf(deps)
   const degraded = degradationCodes(totals.degraded, read, deps.host, fixedOverhead)
+  // A shard the scan could not read is evidence, not a status failure: the
+  // healthy shards were counted and the operator gets a stable code saying the
+  // ledger is incomplete.
+  if (
+    (totals.unreadable || counterOf(deps.receiptReadErrors) > 0) &&
+    !degraded.includes(ERR_RECEIPTS_UNREADABLE)
+  ) {
+    degraded.push(ERR_RECEIPTS_UNREADABLE)
+  }
+  // A complete prompt section silently removed the protocol from the request:
+  // the workspace is visible but substitution cannot be taught, so the operator
+  // must see why the plugin is inert.
+  if (counterOf(deps.completeSectionSuppressions) > 0) degraded.push(ERR_HOST_COMPLETE_SECTION)
   const horizon = horizonOf(deps)
   const estimateKind = estimateKindOf(deps)
   const factor = 1 + horizon
@@ -663,7 +728,12 @@ async function statusCommand(deps: BoostDeps): Promise<BoostResult> {
     projection_unknown_tools: toolCountsOf(deps.unknownTools),
     protocol_suppressed: counterOf(deps.protocolSuppressed),
     receipts_stopped: receiptsStopped(deps.receipts),
-    hasWorkspaceRegistry: deps.host?.hasWorkspaceRegistry,
+    // An absent host fact is "not probed", not `false`: `undefined` is not a
+    // legal JSON value, so the key is omitted rather than handed to the host
+    // boundary (review row 35).
+    ...(deps.host?.hasWorkspaceRegistry === undefined
+      ? {}
+      : { hasWorkspaceRegistry: deps.host.hasWorkspaceRegistry }),
   }
   return { ok: true, data }
 }
@@ -770,10 +840,21 @@ async function scopeSetCommand(deps: BoostDeps, args: BoostArgs): Promise<BoostR
   )
 }
 
-/** `shadow`: the shadow-week switch, independent of `projection`. */
+/**
+ * `shadow`: the shadow-week switch, independent of `projection`.
+ *
+ * A version 1 document is **not** upgraded here. The store can carry a v1
+ * document through a write, but design §5.5 makes `scope-set` the explicit
+ * upgrade path: the other write refuses with the degraded read's stable code so
+ * the operator performs the documented upgrade instead of a blind rewrite.
+ */
 async function shadowCommand(deps: BoostDeps, args: BoostArgs): Promise<BoostResult> {
   if (typeof args.body !== 'boolean') return { ok: false, code: ERR_BOOST_INVALID_BODY }
   if (!isRevision(args.baseRevision)) return { ok: false, code: ERR_BOOST_INVALID_ARGS }
+  const current = await deps.scope.read()
+  if (current.code === ERR_SCOPE_UNKNOWN_VERSION) {
+    return { ok: false, code: ERR_SCOPE_UNKNOWN_VERSION }
+  }
   const shadow = args.body
   return writeScope(deps.scope, doc => ({ ...doc, shadow }), args.baseRevision)
 }
@@ -821,7 +902,7 @@ const DESCRIPTION = [
   'status reports the scope document, both switches (shadow, projection), receipt counts per code across all sessions, the substitution ledger, the projection ledger as a net amount with its retrieval count, the measured fixed overhead in tokens, and the stable degraded codes;',
   'scope-get reads the full scope document;',
   'scope-set replaces the given scope fields with compare-and-swap; body = { mode?, workspaceIds?, shadow?, projection? }; version and revision are store-owned and rejected;',
-  'shadow persists the shadow-week switch; body = boolean.',
+  'shadow persists the shadow-week switch; body = boolean; it refuses a version 1 document with ERR_SCOPE_UNKNOWN_VERSION — run scope-set once to upgrade it.',
   'scope-set and shadow require the baseRevision last seen via status or scope-get; a stale revision fails with ERR_SCOPE_REVISION_CONFLICT. Failures are { ok:false, code } values, never thrown.',
 ].join(' ')
 
@@ -851,9 +932,10 @@ const PARAMETERS: Record<string, unknown> = {
       ],
     },
     baseRevision: {
+      // `minimum` is outside the host's enforced JSON-Schema subset; the
+      // runtime check in `isRevision` is the authority for `>= 0` (row 45).
       type: 'integer',
-      minimum: 0,
-      description: 'Required by scope-set and shadow: the revision last seen.',
+      description: 'Required by scope-set and shadow: the revision last seen (a non-negative integer).',
     },
   },
   required: ['cmd'],

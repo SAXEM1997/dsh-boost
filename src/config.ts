@@ -132,8 +132,22 @@ function pickProjection(
  * Non-object input resolves to the defaults. `onRepair` receives one line per
  * key that was rejected, clamped or repaired; it is never called for a valid
  * value.
+ *
+ * Total: it never throws. The host hands `apply` an arbitrary object, so a
+ * throwing getter anywhere in the tree (or a throwing `onRepair` sink) aborts
+ * the resolution and returns a fresh copy of `DEFAULT_CONFIG` rather than
+ * escaping as a plugin-load failure (review row 68).
  */
 export function resolveConfig(raw: unknown, onRepair: ConfigRepair = () => {}): BoostConfig {
+  try {
+    return resolveConfigUnchecked(raw, onRepair)
+  } catch {
+    return structuredClone(DEFAULT_CONFIG)
+  }
+}
+
+/** The resolved read, split out so the public entry point can stay total. */
+function resolveConfigUnchecked(raw: unknown, onRepair: ConfigRepair): BoostConfig {
   const cfg = structuredClone(DEFAULT_CONFIG)
   const root = section(raw)
   if (!root) return cfg

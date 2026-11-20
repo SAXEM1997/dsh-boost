@@ -135,3 +135,39 @@ test('0 是合法阈值/预算，但 selector 的 0 输出上限无效', () => {
   assert.equal(c.horizonSteps, 0)
   assert.equal(c.selector.maxTokens, DEFAULT_CONFIG.selector.maxTokens)
 })
+
+// ---------------------------------------------------------------------------
+// Totality (review row 68): a hostile config object is still a config object.
+// ---------------------------------------------------------------------------
+
+test('getter 抛错不冒出 resolveConfig：整个解析回落到完整默认值', () => {
+  const hostileRoot = Object.defineProperty({}, 'projection', {
+    enumerable: true,
+    get() {
+      throw new Error('root getter bomb')
+    },
+  })
+  assert.deepEqual(resolveConfig(hostileRoot), DEFAULT_CONFIG)
+
+  const hostileNested = {
+    projection: Object.defineProperty({}, 'read', {
+      enumerable: true,
+      get() {
+        throw new Error('nested getter bomb')
+      },
+    }),
+    stepsPerTurn: 4,
+  }
+  // A value that could not be read is not a value: the whole resolution is
+  // untrustworthy, so the design defaults win rather than a partial document.
+  assert.deepEqual(resolveConfig(hostileNested), DEFAULT_CONFIG)
+})
+
+test('onRepair 抛错也不冒出 resolveConfig', () => {
+  assert.deepEqual(
+    resolveConfig({ stepsPerTurn: -1 }, () => {
+      throw new Error('repair sink bomb')
+    }),
+    DEFAULT_CONFIG,
+  )
+})

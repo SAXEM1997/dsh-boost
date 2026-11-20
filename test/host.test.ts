@@ -28,12 +28,11 @@ import { tmpdir } from 'node:os'
 import { isAbsolute, join } from 'node:path'
 import type { GenerateOptions, StreamChunk } from '@deepseek-ai/dsh-llm'
 import * as plugin from '../src/index.ts'
-import { measureFixedCost, measureFixedOverhead } from '../src/admission/fixed-cost.ts'
+import { measureFixedOverhead } from '../src/admission/fixed-cost.ts'
 import { recordRetrieval, RetrievalLedger } from '../src/admission/retrieval.ts'
 import { loadOptional } from '../src/host/loader.ts'
 import { isPosixOnly } from '../src/host/platform.ts'
 import { resolveBoostRoot } from '../src/host/root.ts'
-import { PROTOCOL_TEXT } from '../src/prompt/protocol.ts'
 import { ReceiptStore } from '../src/receipts/store.ts'
 import { measureBoostFixedOverhead } from '../src/tools/boost.ts'
 import { fakeHost } from './fakes/host.ts'
@@ -226,28 +225,6 @@ test('resolveBoostRoot: $DSH_HOME wins, unset falls back to ~/.dsh/boost', () =>
 // ---------------------------------------------------------------------------
 // Obligation 4: the fixed-cost measurement never invents a number
 // ---------------------------------------------------------------------------
-
-test('measureFixedCost prices text with the host estimator', async () => {
-  const measured = await measureFixedCost(PROTOCOL_TEXT)
-  assert.equal(typeof measured, 'number')
-  assert.ok((measured as number) > 0, 'the protocol section is not free')
-  assert.ok(Number.isInteger(measured))
-})
-
-test('measureFixedCost is unknown when the estimator is unreachable or lies', async () => {
-  assert.equal(await measureFixedCost('x', async () => undefined as never), 'unknown')
-  assert.equal(await measureFixedCost('x', async () => ({}) as never), 'unknown')
-  assert.equal(
-    await measureFixedCost('x', async () => ({ estimateSystemMessage: () => Number.NaN }) as never),
-    'unknown',
-  )
-  assert.equal(
-    await measureFixedCost('x', async () => {
-      throw new Error('peer exploded')
-    }),
-    'unknown',
-  )
-})
 
 // ---------------------------------------------------------------------------
 // Obligation 5: retrieval detection as a predicate
@@ -967,6 +944,30 @@ test('$DSH_HOME naming a file does not turn boost status into a failure', async 
   const scanned: Any[] = []
   for await (const receipt of new ReceiptStore(root).scan('s1')) scanned.push(receipt)
   assert.deepEqual(scanned, [])
+})
+
+test('config.dshHome 覆盖 $DSH_HOME，空白/非字符串回落到环境变量（row 75）', () => {
+  const saved = process.env.DSH_HOME
+  try {
+    process.env.DSH_HOME = '/tmp/env-home'
+    const absolute = join(tmpdir(), 'dsh-boost-config-home')
+    assert.equal(resolveBoostRoot({ dshHome: absolute }), join(absolute, 'boost'))
+    // Other host plugins resolve config.dshHome first; the plugin row's
+    // override must not require changing the process environment.
+    assert.equal(resolveBoostRoot({ dshHome: '   ' }), join('/tmp/env-home', 'boost'))
+    assert.equal(resolveBoostRoot({ dshHome: 42 }), join('/tmp/env-home', 'boost'))
+    assert.equal(resolveBoostRoot(null), join('/tmp/env-home', 'boost'))
+
+    const relative = resolveBoostRoot({ dshHome: 'relative/config/home' })
+    assert.equal(isAbsolute(relative), true)
+    assert.ok(relative.endsWith(join('relative', 'config', 'home', 'boost')))
+
+    delete process.env.DSH_HOME
+    assert.equal(resolveBoostRoot({ dshHome: absolute }), join(absolute, 'boost'))
+  } finally {
+    if (saved === undefined) delete process.env.DSH_HOME
+    else process.env.DSH_HOME = saved
+  }
 })
 
 test('relative $DSH_HOME resolves against the current cwd once, not per read', () => {

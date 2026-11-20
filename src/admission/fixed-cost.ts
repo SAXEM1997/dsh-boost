@@ -46,32 +46,6 @@ export interface FixedOverheadMeasurement {
   totalTokens: number
 }
 
-/**
- * Measure one rendered system-prompt text in tokens.
- *
- * `text` is wrapped as a single-text system message because that is exactly how
- * adapters serialise the prompt; the estimator's role framing is part of the
- * real per-request cost. `'unknown'` covers every failure: no package, no
- * export, a throwing estimator, or a non-finite result. The second parameter is
- * a test seam; production leaves it at `loadOptional`.
- */
-export async function measureFixedCost(
-  text: string,
-  load: ModuleLoader = loadOptional,
-): Promise<number | 'unknown'> {
-  try {
-    const module = await load<EstimateModule>('@deepseek-ai/dsh-token-meter/estimate')
-    if (module === undefined || typeof module.estimateSystemMessage !== 'function') return 'unknown'
-    const tokens = module.estimateSystemMessage({
-      role: 'system',
-      content: [{ type: 'text', text }],
-    })
-    return typeof tokens === 'number' && Number.isFinite(tokens) ? tokens : 'unknown'
-  } catch {
-    return 'unknown'
-  }
-}
-
 /** One non-negative finite estimate, or `undefined` when it cannot be trusted. */
 function usable(value: unknown): number | undefined {
   return typeof value === 'number' && Number.isFinite(value) && value >= 0 ? value : undefined
