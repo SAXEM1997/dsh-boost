@@ -793,6 +793,7 @@ export function apply(ctx: PluginContext, config: unknown): void {
         },
         locatorEvictions: () => retrievals.evictions(),
         receiptReadErrors: () => receipts.readErrors(),
+        receiptsTruncated: () => receipts.scanTruncated(),
         unknownFamilies: () => projectionCounters.unknownFamilies(),
         unknownTools: () => projectionCounters.unknownToolCounts(),
         protocolSuppressed: () => projectionCounters.protocolSuppressions(),

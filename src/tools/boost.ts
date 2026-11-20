@@ -71,7 +71,7 @@ import {
 } from '../scope/doc.js'
 import type { ScopeCode, ScopeDoc } from '../scope/doc.js'
 import type { ScopeStore } from '../scope/store.js'
-import type { Receipt, ReceiptStore } from '../receipts/store.js'
+import type { ReceiptStore } from '../receipts/store.js'
 
 /** Stable failure code: `cmd` names no subcommand this tool implements. */
 const ERR_BOOST_UNKNOWN_CMD = 'ERR_BOOST_UNKNOWN_CMD'
@@ -109,10 +109,20 @@ const ERR_HOST_NO_WORKSPACE_REGISTRY = 'ERR_HOST_NO_WORKSPACE_REGISTRY'
  *
  * `status` scans every shard; a single unreadable file (EACCES, or a directory
  * named `x.jsonl`) must leave the healthy shards readable and the tool
- * answering. The store's per-shard containment reports skipped shards; a store
- * that throws instead is caught here and reported with the same code.
+ * answering. `ReceiptStore.readErrors()` is the one live source: the store
+ * contains the failure per shard and the count describes its last whole-store
+ * scan, so repairing the shard and re-running `status` drops the code.
  */
 const ERR_RECEIPTS_UNREADABLE = 'ERR_RECEIPTS_UNREADABLE'
+
+/**
+ * Stable degradation code: the whole-store scan hit the 256-shard cap.
+ *
+ * The totals then cover only the first 256 sorted shards: under-counting is
+ * the safe direction, but presenting that as a total is not. The code marks
+ * the figures as a lower bound; `ReceiptStore.scanTruncated()` is its source.
+ */
+const ERR_RECEIPTS_TRUNCATED = 'ERR_RECEIPTS_TRUNCATED'
 
 /**
  * Stable degradation code: the final system prompt did not carry the protocol
@@ -194,14 +204,25 @@ export interface BoostDeps {
   /** Locators evicted by the per-session cap; status-time read. */
   locatorEvictions?: () => number
   /**
-   * Receipt shards a whole-store scan had to skip; status-time read.
+   * Receipt shards the last whole-store scan had to skip; status-time read.
    *
-   * A store that contains an unreadable shard per shard reports it here so
-   * `status` can add the stable code; absent means the store has no such
-   * counter (or none was skipped). A store that throws instead is caught by
-   * the status-side scan and reported with the same code.
+   * This is the **only** source of `ERR_RECEIPTS_UNREADABLE`: the store skips
+   * an unreadable shard per shard and reports the count, so `status` has one
+   * mechanism rather than a status-side scan flag that no production store can
+   * raise. Absent means the store has no such counter (or none was skipped);
+   * the count clears when a later scan reads every shard.
    */
   receiptReadErrors?: () => number
+  /**
+   * Whether the status scan stopped at the store's 256-shard cap; status-time
+   * read.
+   *
+   * True means every total in the answer covers only the first 256 sorted
+   * shards: the figures are a lower bound, not the whole ledger. Absent means
+   * the store has no such flag (or the last scan fitted), which is the
+   * pre-existing "totals are complete" reading.
+   */
+  receiptsTruncated?: () => boolean
   /** Calls skipped because no family matched; status-time read. */
   unknownFamilies?: () => number
   /** Retained unmapped tool names; status-time read. */
@@ -377,26 +398,6 @@ export interface BoostStatus {
 type ScopePatch = Partial<Pick<ScopeDoc, (typeof PATCH_FIELDS)[number]>>
 
 /**
- * Yield the store's receipts, converting a throwing scan into a degraded flag.
- *
- * `ReceiptStore.scan` catches unreadable shards per shard; this wrapper is the
- * status-side backstop for a store that throws instead (another store
- * implementation, or a directory listing failure). The receipts yielded before
- * the failure are real and must still be counted; the flag tells `status` to
- * add {@link ERR_RECEIPTS_UNREADABLE} rather than fail the tool.
- */
-async function* scanOrDegrade(
-  receipts: ReceiptStore,
-  state: { unreadable: boolean },
-): AsyncIterable<Receipt> {
-  try {
-    yield* receipts.scan()
-  } catch {
-    state.unreadable = true
-  }
-}
-
-/**
  * The receipt aggregation behind `status`, kept separate from the document
  * read so the accounting has one home and one test surface.
  *
@@ -405,6 +406,11 @@ async function* scanOrDegrade(
  * the cold-judgement path writes the real session id, once per tool call by
  * design (design §5.5:377), which is expected in unscoped workspaces and will
  * dominate their shards — not a leak. Only a whole-store scan sees both.
+ *
+ * Unreadable shards are the store's concern: `scan()` skips them and
+ * `readErrors()` reports the count, so `status` has exactly one source for
+ * `ERR_RECEIPTS_UNREADABLE` and a throwing store is an internal failure, not a
+ * second degradation channel.
  */
 async function aggregate(receipts: ReceiptStore): Promise<{
   counts: Record<string, number>
@@ -419,7 +425,6 @@ async function aggregate(receipts: ReceiptStore): Promise<{
   legacyRetrievals: number
   legacyRetrievalCost: number
   degraded: string[]
-  unreadable: boolean
 }> {
   const counts: Record<string, number> = Object.create(null)
   let substitution = 0
@@ -433,9 +438,7 @@ async function aggregate(receipts: ReceiptStore): Promise<{
   let legacyRetrievals = 0
   let legacyRetrievalCost = 0
 
-  /** Set when the whole-store scan threw instead of yielding every shard. */
-  const scanState = { unreadable: false }
-  for await (const receipt of scanOrDegrade(receipts, scanState)) {
+  for await (const receipt of receipts.scan()) {
     // A receipt is untrusted text from a file: `counts` has no prototype so a
     // code of `toString` or `__proto__` is an ordinary numeric key, never a
     // string concatenation and never a dropped assignment.
@@ -523,7 +526,6 @@ async function aggregate(receipts: ReceiptStore): Promise<{
     legacyRetrievals,
     legacyRetrievalCost,
     degraded,
-    unreadable: scanState.unreadable,
   }
 }
 
@@ -584,6 +586,15 @@ function receiptsStopped(store: BoostDeps['receipts']): boolean {
     return store.stopped() === true
   } catch {
     return true
+  }
+}
+
+/** Whether the last whole-store scan stopped at the shard cap, never thrown. */
+function receiptsTruncatedOf(deps: BoostDeps): boolean {
+  try {
+    return deps.receiptsTruncated?.() === true
+  } catch {
+    return false
   }
 }
 
@@ -668,12 +679,15 @@ async function statusCommand(deps: BoostDeps): Promise<BoostResult> {
   const degraded = degradationCodes(totals.degraded, read, deps.host, fixedOverhead)
   // A shard the scan could not read is evidence, not a status failure: the
   // healthy shards were counted and the operator gets a stable code saying the
-  // ledger is incomplete.
-  if (
-    (totals.unreadable || counterOf(deps.receiptReadErrors) > 0) &&
-    !degraded.includes(ERR_RECEIPTS_UNREADABLE)
-  ) {
+  // ledger is incomplete. `readErrors()` is the only producer; it describes the
+  // last whole-store scan, so a repaired shard clears the code.
+  if (counterOf(deps.receiptReadErrors) > 0 && !degraded.includes(ERR_RECEIPTS_UNREADABLE)) {
     degraded.push(ERR_RECEIPTS_UNREADABLE)
+  }
+  // The scan cap makes every figure a lower bound over the first 256 sorted
+  // shards. Under-counting is safe, but it must not be presented as a total.
+  if (receiptsTruncatedOf(deps) && !degraded.includes(ERR_RECEIPTS_TRUNCATED)) {
+    degraded.push(ERR_RECEIPTS_TRUNCATED)
   }
   // A complete prompt section silently removed the protocol from the request:
   // the workspace is visible but substitution cannot be taught, so the operator
@@ -931,11 +945,11 @@ function signalOf(exec: unknown): AbortSignal | undefined {
 /** Model-facing description: what each command does and what it returns. */
 const DESCRIPTION = [
   'Inspect or change dsh-boost state. Commands:',
-  'status reports the scope document, both switches (shadow, projection), receipt counts per code across all sessions, the substitution ledger, the projection ledger as a net amount with its retrieval count, the measured fixed overhead in tokens, and the stable degraded codes;',
+  'status reports the scope document, both switches, receipt counts per code, both ledgers (substitution; projection net with its retrieval count), the measured fixed overhead, and the degraded codes;',
   'scope-get reads the full scope document;',
-  'scope-set replaces the given scope fields with compare-and-swap; body = { mode?, workspaceIds?, shadow?, projection? }; version and revision are store-owned and rejected;',
+  'scope-set replaces the given fields with compare-and-swap; body = { mode?, workspaceIds?, shadow?, projection? }; version and revision are store-owned and rejected;',
   'shadow persists the shadow-week switch; body = boolean; it refuses a version 1 document with ERR_SCOPE_UNKNOWN_VERSION — run scope-set once to upgrade it.',
-  'scope-set and shadow require the baseRevision last seen via status or scope-get; a stale revision fails with ERR_SCOPE_REVISION_CONFLICT. Failures are { ok:false, code } values, never thrown.',
+  'scope-set and shadow require the baseRevision last seen via status or scope-get; a stale one fails with ERR_SCOPE_REVISION_CONFLICT. Failures are { ok:false, code } values, never thrown.',
 ].join(' ')
 
 /** The argument schema shown to the model; `status`/`scope-get` need only `cmd`. */

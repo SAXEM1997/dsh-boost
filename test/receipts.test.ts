@@ -1,6 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { appendFile, mkdir, mkdtemp, readFile, stat, unlink, writeFile } from 'node:fs/promises'
+import { appendFile, mkdir, mkdtemp, readFile, rm, stat, unlink, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { ReceiptStore, receiptHash } from '../src/receipts/store.ts'
@@ -404,9 +404,18 @@ test('row 34：一个不可读分片不中断整库扫描，readErrors() 计数'
   assert.equal(s.readErrors(), 1)
 
   // An explicit session still works and an unreadable one degrades to empty.
+  // Named scans neither contribute to nor clear the whole-store reading.
   assert.equal(await s.count('a'), 1)
   assert.equal(await s.count('bad'), 0)
   assert.equal(s.readErrors(), 2)
+
+  // D2: repairing the shard and re-running the whole-store scan clears the
+  // reading, so status can drop ERR_RECEIPTS_UNREADABLE.
+  await rm(join(root, 'receipts', 'bad.jsonl'), { recursive: true, force: true })
+  const repaired: any[] = []
+  for await (const r of s.scan()) repaired.push(r)
+  assert.deepEqual(repaired.map((r) => r.sessionId).sort(), ['a', 'b'])
+  assert.equal(s.readErrors(), 0, 'a fully readable scan resets the reading')
 })
 
 test('row 39：整库 scan 有分片上限，超出的分片被明确跳过而不是无界扫描', async () => {

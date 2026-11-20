@@ -1,6 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdir, mkdtemp, readFile, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { assertSupportedJsonSchema, validateJsonSchemaValue } from '@deepseek-ai/dsh-tools'
@@ -12,7 +12,12 @@ import { ReceiptStore } from '../src/receipts/store.ts'
 const deps = async () => {
   const dir = await mkdtemp(join(tmpdir(), 'boost-'))
   const receipts = new ReceiptStore(dir)
-  return { scope: new ScopeStore(dir), receipts, receiptReadErrors: () => receipts.readErrors() }
+  return {
+    scope: new ScopeStore(dir),
+    receipts,
+    receiptReadErrors: () => receipts.readErrors(),
+    receiptsTruncated: () => receipts.scanTruncated(),
+  }
 }
 
 /** Same as `deps()`, but keeps the root so a test can plant files the stores read. */
@@ -24,6 +29,7 @@ const dirDeps = async () => {
     scope: new ScopeStore(dir),
     receipts,
     receiptReadErrors: () => receipts.readErrors(),
+    receiptsTruncated: () => receipts.scanTruncated(),
   }
 }
 
@@ -781,6 +787,73 @@ test('status 遇到不可读分片时仍返回，并给出稳定的 degraded 码
   const status = r.data as BoostStatus
   assert.ok(status.degraded.includes('ERR_RECEIPTS_UNREADABLE'), JSON.stringify(status.degraded))
   assert.equal(status.counts['skip:no-scope'], 1, 'the healthy shard is still counted')
+})
+
+test('D2: status 在分片修复后清掉 ERR_RECEIPTS_UNREADABLE', async () => {
+  const d = await dirDeps()
+  const receipts = join(d.dir, 'receipts')
+  await mkdir(receipts, { recursive: true })
+  await mkdir(join(receipts, 'bad.jsonl'))
+
+  const broken = await getStatus(d)
+  assert.ok(
+    broken.degraded.includes('ERR_RECEIPTS_UNREADABLE'),
+    'an unreadable shard must be visible while it exists',
+  )
+
+  // The README tells the operator to fix the shard and re-run status. The code
+  // must clear, not stay pinned for the life of the process (D2).
+  await rm(join(receipts, 'bad.jsonl'), { recursive: true, force: true })
+  const repaired = await getStatus(d)
+  assert.equal(
+    repaired.degraded.includes('ERR_RECEIPTS_UNREADABLE'),
+    false,
+    JSON.stringify(repaired.degraded),
+  )
+})
+
+test('D3: status 在 256 分片上限命中时报 ERR_RECEIPTS_TRUNCATED', async () => {
+  const d = await dirDeps()
+  const receipts = join(d.dir, 'receipts')
+  await mkdir(receipts, { recursive: true })
+  const total = 257
+  for (let i = 0; i < total; i += 1) {
+    const name = `s${String(i).padStart(3, '0')}`
+    await writeFile(
+      join(receipts, `${name}.jsonl`),
+      `${JSON.stringify({
+        version: 1,
+        ts: '2026-11-20T00:00:00.000Z',
+        sessionId: name,
+        turn: 1,
+        kind: 'skip',
+        code: 'skip:no-scope',
+        receipt_hash: `hash-${name}`,
+        preview: '',
+      })}\n`,
+    )
+  }
+
+  const capped = await getStatus(d)
+  assert.ok(
+    capped.degraded.includes('ERR_RECEIPTS_TRUNCATED'),
+    `the capped total must be labelled: ${JSON.stringify(capped.degraded)}`,
+  )
+  assert.equal(
+    Object.values(capped.counts).reduce((sum, n) => sum + n, 0),
+    256,
+    'the figures cover only the first 256 sorted shards',
+  )
+
+  // The flag describes the scan, not the process: one shard fewer fits and the
+  // code clears.
+  await rm(join(receipts, 's256.jsonl'))
+  const complete = await getStatus(d)
+  assert.equal(
+    complete.degraded.includes('ERR_RECEIPTS_TRUNCATED'),
+    false,
+    JSON.stringify(complete.degraded),
+  )
 })
 
 test('status 遇到只有不可读分片的账本时仍返回空账与稳定码', async () => {

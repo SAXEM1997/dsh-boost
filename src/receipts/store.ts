@@ -439,8 +439,16 @@ export class ReceiptStore {
 
   /** *Consecutive* write failures; reset by any successful append. */
   private failureCount = 0
-  /** Shard reads that failed and were skipped by a scan (EACCES, EISDIR, …). */
+  /**
+   * Shard reads skipped by the most recent **whole-store** scan (EACCES,
+   * EISDIR, …). A scan that read every shard resets it to zero, so a repaired
+   * shard drops `ERR_RECEIPTS_UNREADABLE` instead of pinning it for the life of
+   * the process. Named scans neither count here nor reset it: they do not cover
+   * the shard set status reports.
+   */
   private readFailureCount = 0
+  /** Whether the most recent whole-store scan hit {@link MAX_SCAN_SHARDS}. */
+  private scanCapHit = false
   private linesSinceSync = 0
   private readonly pending: PendingLine[] = []
   private readonly states = new Map<string, ShardState>()
@@ -494,16 +502,33 @@ export class ReceiptStore {
   }
 
   /**
-   * Shard reads that a scan skipped because the file was unreadable.
+   * Shard reads that the most recent whole-store scan skipped.
    *
    * A single unreadable shard (EACCES, a directory named `x.jsonl`, …) must
    * not abort the whole scan: `boost status` would turn that into
    * `ERR_BOOST_INTERNAL` for the entire ledger. Scans skip the shard and count
-   * it here so status can report a stable degraded code. The counter is
-   * cumulative for the instance (a repeated scan counts again).
+   * it here so status can report a stable degraded code.
+   *
+   * The count describes the **last completed whole-store scan**, not the
+   * process lifetime: a scan that read every shard resets it, so repairing the
+   * shard and re-running `status` drops the code, as the README instructs. A
+   * named `scan(sessionId)`/`count(sessionId)` neither contributes to nor
+   * clears it, because it does not cover the shard set the status total claims.
    */
   readErrors(): number {
     return this.readFailureCount
+  }
+
+  /**
+   * Whether the most recent whole-store scan stopped at {@link MAX_SCAN_SHARDS}.
+   *
+   * `status` reports a total over the shards it read, so a capped scan is a
+   * lower bound, not a total. The flag is per scan (false on the next full
+   * scan that fits), which lets the operator see the condition clear; the
+   * numeric totals stay unchanged and under-count, the safe direction.
+   */
+  scanTruncated(): boolean {
+    return this.scanCapHit
   }
 
   /**
@@ -511,24 +536,34 @@ export class ReceiptStore {
    *
    * The optional `sessionId` is encoded to its shard name; the receipts keep
    * their original `sessionId`. With no argument, every shard under `receipts/`
-   * is visited (encoded shard names sorted for determinism), and each receipt
-   * supplies its own id from its body. Unparseable middle lines are skipped; the
-   * unfinished trailing line is truncated and skipped.
+   * is visited (encoded shard names sorted for determinism, capped at
+   * {@link MAX_SCAN_SHARDS}), and each receipt supplies its own id from its
+   * body. Unparseable middle lines are skipped; an unfinished trailing line is
+   * ignored by the read and only the next write repairs it.
+   *
+   * A whole-store scan also maintains the two status readings: a shard it
+   * cannot read increments {@link readErrors} (a fully readable scan resets
+   * it), and more shards than the cap sets {@link scanTruncated}. Named scans
+   * touch neither, because they are not the population `status` totals.
    */
   async *scan(sessionId?: string): AsyncIterable<Receipt> {
     await this.chain
     let shards: string[]
-    if (sessionId === undefined) {
+    let readFailed = false
+    const wholeStore = sessionId === undefined
+    if (wholeStore) {
+      this.scanCapHit = false
       try {
-        shards = await this.listShardNames()
+        const names = await this.listShardNames()
+        this.scanCapHit = names.length > MAX_SCAN_SHARDS
+        // Bounded status scan; named scans below still address any one shard.
+        shards = names.slice(0, MAX_SCAN_SHARDS)
       } catch {
         // An unreadable receipts directory is a degraded status answer, not a
         // thrown tool error. Count it and yield nothing.
         this.readFailureCount += 1
         return
       }
-      // Bounded status scan; named scans below still address any one shard.
-      shards = shards.slice(0, MAX_SCAN_SHARDS)
     } else {
       shards = [encodeSegment(sessionId)]
     }
@@ -539,6 +574,7 @@ export class ReceiptStore {
           receipts = await readShard(shardFile(this.root, base, rotated))
         } catch {
           this.readFailureCount += 1
+          readFailed = true
           continue
         }
         for (const receipt of receipts) {
@@ -546,6 +582,9 @@ export class ReceiptStore {
         }
       }
     }
+    // A completed whole-store scan that read every shard clears the reading, so
+    // repairing the shard and re-running `status` drops ERR_RECEIPTS_UNREADABLE.
+    if (wholeStore && !readFailed) this.readFailureCount = 0
   }
 
   /**
