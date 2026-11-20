@@ -117,19 +117,13 @@ type ReceiptInput = Parameters<ReceiptStore['append']>[0]
 export const SUBSTITUTION_WHITELIST: ReadonlySet<string> = new Set(['read', 'grep', 'glob'])
 
 /**
- * The Jev input+output upper bound (design §5.3), paid only by a plan that
- * actually reaches the selector. A single surviving candidate has no selector
- * call and pays nothing.
- */
-const SELECTOR_OVERHEAD_TOKENS = 512
-
-/**
  * Hard cap on the receipt text shown to the selector.
  *
- * The selector prompt carries a 512-token input+output bound; a full 40 KB
- * receipt would blow through it before the candidate summaries are added. This
- * cap keeps the receipt near 300 tokens even when the tool family's projection
- * window is larger, while still showing the projection's head/tail shape.
+ * A full 40 KB receipt would dominate the selector call before the candidate
+ * summaries are added. This cap keeps the receipt near 300 tokens even when the
+ * tool family's projection window is larger, while still showing the
+ * projection's head/tail shape. The actual input+output charge is computed
+ * from the text that is sent, never from this cap alone.
  */
 const SELECTOR_RECEIPT_MAX_CHARS = 1_200
 
@@ -230,7 +224,7 @@ export interface HookDeps {
    * the fixed-density fallback did. The field exists so an audit reader never
    * mistakes the fallback for a provider measurement.
    */
-  estimateKind?: 'host' | 'chars/4'
+  estimateKind?: 'host' | 'chars/4' | 'unknown'
   /**
    * The host spill-notice predicate, injected instead of imported.
    *
@@ -863,6 +857,66 @@ function selectorReceiptOf(deps: HookDeps, ctx: DecisionContext): string {
   return `${head}\n…[selector window: omitted ${omitted} chars]…\n${tail}`
 }
 
+/** The configured selector output budget, with the design default as a fallback. */
+function selectorMaxTokens(deps: HookDeps): number {
+  const raw = deps.config?.selector?.maxTokens
+  if (typeof raw !== 'number' || !Number.isFinite(raw) || raw < 0) {
+    return DEFAULT_CONFIG.selector.maxTokens
+  }
+  return Math.floor(raw)
+}
+
+/** The candidate list exactly as `choose` renders it, for pricing the input. */
+function selectorCandidateList(candidates: readonly Candidate[]): string {
+  return candidates.map((candidate) => `${candidate.id}: ${selectorSummary(candidate)}`).join('\n')
+}
+
+/** The route the selector call would inherit, or `undefined` when it cannot run. */
+function selectorRouteOf(deps: HookDeps, sessionId: string): SelectorRoute | undefined {
+  try {
+    const route = deps.selectorRoute?.(sessionId)
+    if (
+      route === undefined ||
+      typeof route.provider !== 'string' ||
+      typeof route.model !== 'string'
+    ) {
+      return undefined
+    }
+    return route
+  } catch {
+    return undefined
+  }
+}
+
+/** Whether the selector is missing its LLM or its effective route. */
+function selectorSeamUnavailable(deps: HookDeps, ctx: DecisionContext): boolean {
+  const llm = deps.llm
+  return llm == null || typeof llm.stream !== 'function' || selectorRouteOf(deps, ctx.sessionId) === undefined
+}
+
+/**
+ * The selector's fast upper bound: its output cap plus the estimated input.
+ *
+ * `maxTokens` bounds only the output; the receipt and candidate summaries are
+ * input. Charging a flat 512 would under-count the input by hundreds of tokens
+ * and make admission optimistic exactly where it decides whether to call.
+ * `undefined` means the caller cannot price the call; it must not guess.
+ */
+function selectorChargeOf(
+  deps: HookDeps,
+  candidates: readonly Candidate[],
+  receiptText: string,
+): number | undefined {
+  const estimate = deps.estimateText
+  if (typeof estimate !== 'function') return undefined
+  const input = safeEstimate(
+    estimate,
+    `${receiptText}\n${selectorCandidateList(candidates)}`,
+  )
+  if (input === undefined || input < 0) return undefined
+  return selectorMaxTokens(deps) + input
+}
+
 /**
  * Ask the selector to pick one of `decision.candidates` and return that same
  * decision candidate, whose `args` are already bound.
@@ -877,6 +931,7 @@ async function chooseCandidate(
   deps: HookDeps,
   ctx: DecisionContext,
   candidates: readonly Candidate[],
+  receiptText: string,
 ): Promise<Candidate | undefined> {
   const llm = deps.llm
   if (llm == null || typeof llm.stream !== 'function') {
@@ -911,7 +966,7 @@ async function chooseCandidate(
         id: candidate.id,
         summary: selectorSummary(candidate),
       })),
-      receiptText: selectorReceiptOf(deps, ctx),
+      receiptText,
       maxTokens: deps.config.selector.maxTokens,
     })
     if ('choice' in result) {
@@ -976,19 +1031,35 @@ async function decideSubstitution(
   let boundArgs: Record<string, unknown> | undefined
   let candidateId: string | undefined
 
-  // A plan that needs the selector pays its 512-token bound before the call is
-  // made. A single surviving candidate pays nothing. This must run before
-  // `choose`: a selector call that cannot be paid for is never sent.
-  const selectorOverhead = decision.kind === 'ask-selector' ? SELECTOR_OVERHEAD_TOKENS : 0
-
+  // A selector call pays its output cap plus the input actually sent. A single
+  // surviving candidate pays no selector at all. This must run before `choose`:
+  // a selector call that cannot be paid for is never sent.
+  let selectorOverhead = 0
+  let selectorReceiptText = ''
   if (decision.kind === 'ask-selector') {
+    // Availability is checked before pricing: a missing LLM/route is the
+    // `selector-unavailable` degradation, not an admission decision.
+    if (selectorSeamUnavailable(deps, ctx)) {
+      await appendReceipt(deps, ledgerEntry(ctx, 'skip', 'selector-unavailable', { stepId: 'root' }))
+      return { shadowCommitted: false }
+    }
+    selectorReceiptText = selectorReceiptOf(deps, ctx)
+    const charge = selectorChargeOf(deps, decision.candidates, selectorReceiptText)
+    if (charge === undefined) {
+      await appendReceipt(
+        deps,
+        ledgerEntry(ctx, 'skip', 'not-admitted', { stepId: 'root', reason: 'no-estimator' }),
+      )
+      return { shadowCommitted: false }
+    }
+    selectorOverhead = charge
     if (!admittedFor(deps, ctx.sessionId, plan, selectorOverhead)) {
       await appendReceipt(deps, ledgerEntry(ctx, 'skip', 'not-admitted', { stepId: 'root' }))
       return { shadowCommitted: false }
     }
     // The decision's candidates already carry the bound trees; committing from
     // the plan here would dispatch a `$public` template.
-    const chosen = await chooseCandidate(deps, ctx, decision.candidates)
+    const chosen = await chooseCandidate(deps, ctx, decision.candidates, selectorReceiptText)
     if (chosen === undefined) return { shadowCommitted: false }
     candidate = chosen
     boundArgs = chosen.args
@@ -1211,18 +1282,28 @@ async function projectDecision(
         isError: receipt.isError,
         family,
         cfg: deps.config,
-        estimate,
+        // Same sanitiser as the apply path: a throwing or non-finite host
+        // estimate must never become `null` in the shadow account.
+        estimate: (text) => safeEstimate(estimate, text) ?? Number.NaN,
       })
       if (outcome.kind === 'shadow') {
+        const priced =
+          outcome.before !== undefined &&
+          outcome.after !== undefined &&
+          outcome.saved !== undefined
         await appendReceipt(
           deps,
           ledgerEntry(ctx, 'shadow', 'projection-shadow', {
             decision: 'projection',
             unit: 'raw',
-            before: outcome.before,
-            after: outcome.after,
-            saved_projection_tokens: outcome.saved,
-            estimate: deps.estimateKind ?? 'chars/4',
+            ...(priced
+              ? {
+                  before: outcome.before,
+                  after: outcome.after,
+                  saved_projection_tokens: outcome.saved,
+                }
+              : {}),
+            estimate: priced ? (deps.estimateKind ?? 'chars/4') : 'unknown',
           }),
         )
       }

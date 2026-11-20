@@ -147,7 +147,10 @@ type ScopePatch = Partial<Pick<ScopeDoc, (typeof PATCH_FIELDS)[number]>>
  * read so the accounting has one home and one test surface.
  *
  * `scan()` is called with no session id on purpose: `skip:no-scope` receipts
- * live under the empty session id, so a per-session scan would miss them.
+ * are not owned by one shard. The no-agent case writes the empty session id;
+ * the cold-judgement path writes the real session id, once per tool call by
+ * design (design §5.5:377), which is expected in unscoped workspaces and will
+ * dominate their shards — not a leak. Only a whole-store scan sees both.
  */
 async function aggregate(receipts: ReceiptStore): Promise<{
   counts: Record<string, number>

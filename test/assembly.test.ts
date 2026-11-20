@@ -79,6 +79,14 @@ const CANDIDATE_C = {
   guards: [{ text_contains: 'NEW-VALUE' }],
 }
 
+/** B bound by a named field, so a long receipt can carry its value at the head. */
+const LONG_CANDIDATE_B = {
+  id: 'B',
+  tool: 'read',
+  args: { file_path: { $public: { after: 'root', field: 'name' } } },
+  guards: [{ text_contains: 'BOUND' }],
+}
+
 function planText(steps: readonly Any[]): string {
   return `intro\n<CHISEL_PLAN>${JSON.stringify({ goal: 'g', steps })}</CHISEL_PLAN>\nend`
 }
@@ -123,7 +131,7 @@ type Assembly = {
  * records the selector's `GenerateOptions` so the test can assert the route and
  * the purpose marker the host will actually see.
  */
-async function createAssembly(options: { spill?: Any; tokenMeter?: Any } = {}): Promise<Assembly> {
+async function createAssembly(options: { spill?: Any; tokenMeter?: Any; config?: Any } = {}): Promise<Assembly> {
   const dir = await mkdtemp(join(tmpdir(), 'dsh-boost-assembly-'))
   const root = join(dir, 'boost')
   await mkdir(root, { recursive: true })
@@ -165,7 +173,7 @@ async function createAssembly(options: { spill?: Any; tokenMeter?: Any } = {}): 
       },
     },
   })
-  plugin.apply(host, { stepsPerTurn: 8 })
+  plugin.apply(host, { stepsPerTurn: 8, ...(options.config ?? {}) })
 
   return {
     host,
@@ -253,6 +261,35 @@ async function commitB(
   )
 
   return { callId: callIdFor(SESSION, turn, step, 'B') }
+}
+
+/**
+ * Seed a two-candidate plan against a long root receipt and run one
+ * post-execute. The long receipt makes the selector's computed input charge
+ * materially larger than the old flat 512; B binds from the named field.
+ */
+async function runLongPlan(a: Assembly, savedTokens: number): Promise<void> {
+  await agentRequest(a.host, 1, 0)
+  a.state.main = [
+    { type: 'text-delta', index: 0, text: planText([CANDIDATE_A, LONG_CANDIDATE_B]) },
+    {
+      type: 'usage',
+      usage: { inputTokens: savedTokens, cacheReadTokens: 0, outputTokens: 1 },
+    },
+    { type: 'finish', reason: { kind: 'stop' } },
+  ]
+  await collect(a.host.stream(SESSION, {}))
+
+  a.state.selector = [
+    { type: 'text-delta', index: 0, text: 'B' },
+    { type: 'finish', reason: { kind: 'stop' } },
+  ]
+  const root = `name: "BOUND-VALUE"\n${'x'.repeat(10_000)}`
+  await a.host.callHook(
+    'tools/post-execute',
+    [{ name: 'read', callId: 'root', agent }, { content: [{ type: 'text', text: root }] }],
+    async () => ({ kind: 'accept' }),
+  )
 }
 
 /** A host spill double that records the canonical original it is given. */
@@ -350,11 +387,12 @@ test('turn change drops a parked decision: a constant clock cannot ship', async 
 // receipt handed to the selector is bounded.
 // ---------------------------------------------------------------------------
 
-test('selector admission: a saving below 512 + threshold makes zero selector calls', async (t) => {
+test('selector admission: a saving below the computed bound + threshold makes zero selector calls', async (t) => {
   const a = await createAssembly()
   t.after(() => a.dispose())
 
-  // 1,500 saved - 512 selector bound = 988, below the 1,024 threshold.
+  // 1,500 saved is already below the 1,024 threshold; the computed selector
+  // charge only makes the refusal more certain.
   await commitB(a, { inputTokens: 1_500, cacheReadTokens: 0 })
   assert.equal(a.state.selectorRequests.length, 0, 'the selector must not be paid for')
   assert.equal(a.host.synthesized, 0)
@@ -374,11 +412,11 @@ test('selector admission: a saving below 512 + threshold makes zero selector cal
   )
 })
 
-test('selector admission: a saving above 512 + threshold pays exactly one selector call', async (t) => {
+test('selector admission: a saving above the computed bound + threshold pays exactly one selector call', async (t) => {
   const a = await createAssembly()
   t.after(() => a.dispose())
 
-  // 2,000 saved - 512 selector bound = 1,488, above the 1,024 threshold.
+  // 2,000 saved clears the 1,024 threshold with room for the computed charge.
   const { callId } = await commitB(a, { inputTokens: 2_000, cacheReadTokens: 0 })
   assert.equal(a.state.selectorRequests.length, 1, 'exactly one selector call')
   assert.equal(callId, callIdFor(SESSION, 1, 0, 'B'))
@@ -393,6 +431,115 @@ test('selector admission: a saving above 512 + threshold pays exactly one select
   const delta = chunks.find((chunk) => chunk.type === 'tool-call-delta') as Any
   assert.ok(delta)
   assert.deepEqual(JSON.parse(delta.argumentsDelta), { file_path: 'BOUND-VALUE' })
+})
+
+test('selector admission uses the computed input bound, not a flat 512', async (t) => {
+  const a = await createAssembly()
+  t.after(() => a.dispose())
+
+  // 1,700 saved - the old flat 512 = 1,188 > 1,024, so the old constant would
+  // have admitted and called the selector. The windowed receipt makes the
+  // computed input charge larger, so the same saving must now be refused.
+  await runLongPlan(a, 1_700)
+  assert.equal(a.state.selectorRequests.length, 0, 'the computed charge must refuse this saving')
+  const receipts = await receiptsOf(a)
+  assert.ok(
+    receipts.some((receipt) => receipt.kind === 'skip' && receipt.code === 'not-admitted'),
+    'the refusal must be auditable',
+  )
+
+  await agentRequest(a.host, 1, 1)
+  a.state.main = []
+  a.host.nextCalls = 0
+  const chunks = await collect(a.host.stream(SESSION, { messages: anchorMessages('BOUND-VALUE') }))
+  assert.equal(a.host.nextCalls, 1, 'the model must fall back')
+  assert.equal(a.host.synthesized, 0)
+  assert.equal(chunks.some((chunk) => chunk.type === 'tool-call-delta'), false)
+})
+
+test('raising selector.maxTokens raises the computed selector charge', async (t) => {
+  const standard = await createAssembly()
+  t.after(() => standard.dispose())
+  await runLongPlan(standard, 2_000)
+  assert.equal(standard.state.selectorRequests.length, 1, 'the default 512 budget admits 2,000')
+
+  const raised = await createAssembly({ config: { selector: { maxTokens: 2_000 } } })
+  t.after(() => raised.dispose())
+  await runLongPlan(raised, 2_000)
+  assert.equal(raised.state.selectorRequests.length, 0, 'a raised budget must raise the charge')
+  const receipts = await receiptsOf(raised)
+  assert.ok(
+    receipts.some((receipt) => receipt.kind === 'skip' && receipt.code === 'not-admitted'),
+    'the raised charge must refuse the same saving',
+  )
+})
+
+test('a single survivor pays no selector overhead', async (t) => {
+  const a = await createAssembly()
+  t.after(() => a.dispose())
+
+  await agentRequest(a.host, 1, 0)
+  a.state.main = [
+    {
+      type: 'text-delta',
+      index: 0,
+      // A is filtered by its guard; B is the only survivor, so the decision is
+      // commit and there is no selector call to charge.
+      text: planText([
+        { id: 'A', tool: 'read', args: { file_path: '/a' }, guards: [{ text_contains: 'NEVER' }] },
+        CANDIDATE_B,
+      ]),
+    },
+    { type: 'usage', usage: { inputTokens: 1_200, cacheReadTokens: 0, outputTokens: 1 } },
+    { type: 'finish', reason: { kind: 'stop' } },
+  ]
+  await collect(a.host.stream(SESSION, {}))
+
+  await a.host.callHook(
+    'tools/post-execute',
+    [
+      { name: 'read', callId: 'root', agent },
+      { content: [{ type: 'text', text: 'BOUND-VALUE' }] },
+    ],
+    async () => ({ kind: 'accept' }),
+  )
+
+  assert.equal(a.state.selectorRequests.length, 0, 'a single survivor has no selector call')
+  await agentRequest(a.host, 1, 1)
+  a.state.main = []
+  a.host.nextCalls = 0
+  const chunks = await collect(a.host.stream(SESSION, { messages: anchorMessages('BOUND-VALUE') }))
+
+  assert.equal(a.host.nextCalls, 0, 'the survivor must still be admitted')
+  assert.equal(a.host.synthesized, 1)
+  const delta = chunks.find((chunk) => chunk.type === 'tool-call-delta') as Any
+  assert.ok(delta)
+  assert.deepEqual(JSON.parse(delta.argumentsDelta), { file_path: 'BOUND-VALUE' })
+})
+
+test('shadow with a non-finite host estimate records unknown, never null', async (t) => {
+  const a = await createAssembly({ tokenMeter: { estimateMessage: () => Number.NaN } })
+  t.after(() => a.dispose())
+
+  await a.setScope({ ...scopeDoc(1), projection: 'shadow' })
+  await agentRequest(a.host, 1, 0)
+  await a.host.callHook(
+    'tools/post-execute',
+    [
+      { name: 'read', callId: 'shadow', agent },
+      { content: [{ type: 'text', text: 'x'.repeat(5_000) }] },
+    ],
+    async () => ({ kind: 'accept' }),
+  )
+
+  const receipts = await receiptsOf(a)
+  const shadow = receipts.find((receipt) => receipt.kind === 'shadow' && receipt.code === 'projection-shadow')
+  assert.ok(shadow, 'shadow mode must still write its accounting record')
+  assert.equal(shadow.estimate, 'unknown')
+  assert.equal(Object.hasOwn(shadow, 'before'), false)
+  assert.equal(Object.hasOwn(shadow, 'after'), false)
+  assert.equal(Object.hasOwn(shadow, 'saved_projection_tokens'), false)
+  assert.equal(JSON.stringify(shadow).includes('null'), false)
 })
 
 test('the selector gets the head/tail window, not the full canonical receipt', async (t) => {

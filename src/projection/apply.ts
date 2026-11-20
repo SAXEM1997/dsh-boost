@@ -43,7 +43,12 @@ export interface ProjectionOutcome {
   kind: 'skipped' | 'shadow' | 'applied'
   /** Stable skip code; present only when `kind === 'skipped'`. */
   reason?: string
-  /** Tokens in the original receipt; present only when `kind === 'shadow'`. */
+  /**
+   * Tokens in the original receipt.
+   *
+   * Present only when `kind === 'shadow'` and the estimator priced both
+   * sides; absent (with `estimate: 'unknown'` on the receipt) when it did not.
+   */
   before?: number
   /** Tokens in the replacement shadow mode would have produced. */
   after?: number
@@ -138,9 +143,13 @@ function measure(
   original: string,
   replacement: string,
   estimate: (s: string) => number,
-): Pick<ProjectionOutcome, 'before' | 'after' | 'saved'> {
+): Pick<ProjectionOutcome, 'before' | 'after' | 'saved'> | undefined {
   const before = estimate(original)
   const after = estimate(replacement)
+  // A non-finite estimate is an unknown, never a number to serialise: JSON
+  // would turn NaN into `null`, which looks like a measured zero in the
+  // shadow account. The caller writes `estimate: 'unknown'` instead.
+  if (!Number.isFinite(before) || !Number.isFinite(after)) return undefined
   return { before, after, saved: before - after }
 }
 
@@ -175,7 +184,8 @@ export async function projectShadow(input: {
   const truncation = truncate(text, params)
   if (truncation === null) return { kind: 'skipped', reason: 'not-worth-it' }
 
-  return { kind: 'shadow', ...measure(text, projectedText(truncation), estimate) }
+  const measured = measure(text, projectedText(truncation), estimate)
+  return measured === undefined ? { kind: 'shadow' } : { kind: 'shadow', ...measured }
 }
 
 /** The prechecks that passed, with the host pieces narrowed to their present values. */
