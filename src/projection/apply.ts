@@ -101,7 +101,7 @@ export interface SpillBackend {
  *
  * Injected by the caller, which dynamically imports the host's
  * `formatSpillNotice`; this module must never statically import
- * `@deepseek-ai/dsh-spill-policy` — it is an optional peer, and a static import
+ * `@deepseek-ai/dsh-spill-policy` — it is not declared as a dependency, and a static import
  * would make the degradation path unreachable (design §5.4).
  */
 export type FormatFooter = (omitted: { kind: 'exact'; count: number }, ref: SpillHandle) => string

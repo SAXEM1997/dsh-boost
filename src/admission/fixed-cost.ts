@@ -6,7 +6,7 @@
  * tokens per request and requires the measured value in `boost status`
  * (design §6.1). The measurement uses the host's own fixed-density estimator
  * (`estimateSystemMessage` / `estimateToolsTokens` from
- * `@deepseek-ai/dsh-token-meter/estimate`), a dynamic optional peer: a missing
+ * `@deepseek-ai/dsh-token-meter/estimate`), a dynamic import of an undeclared package: a missing
  * package must degrade to `'unknown'`, never to a fabricated zero, because the
  * audit reader cannot tell a real zero from an absent measurement
  * (design §9: do not fabricate).
@@ -27,7 +27,7 @@
 import { loadOptional } from '../host/loader.js'
 import { PROTOCOL_TEXT } from '../prompt/protocol.js'
 
-/** The export shapes this module reads from the optional peer. */
+/** The export shapes this module reads from the host's estimate module. */
 interface EstimateModule {
   estimateSystemMessage?: (message: unknown) => number
   estimateToolsTokens?: (header: unknown) => number

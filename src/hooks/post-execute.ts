@@ -280,7 +280,7 @@ export interface HookDeps {
   /**
    * The host spill-notice predicate, injected instead of imported.
    *
-   * Kept from Task 17 because the host spill policy is an optional peer and a
+   * Kept because the host spill policy is not declared as a dependency at all and a
    * test needs to hand over a throwing predicate without the host package.
    * Production omits it and the dynamically imported host function is used.
    */
@@ -615,7 +615,7 @@ async function resetInvalidatedPending(
 /**
  * The host's spill-notice predicate, resolved at most once per process.
  *
- * The spill policy is an optional peer (design §5.4), so its notice module is
+ * The spill policy is never declared as a dependency (design §5.4), so its notice module is
  * imported dynamically: a static import would make the plugin fail to load on
  * a host without it. A missing package means no receipt can carry its footer,
  * so the guard simply does not fire. The deps seam wins, which is what keeps
