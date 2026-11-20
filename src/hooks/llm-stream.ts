@@ -14,10 +14,15 @@
  *
  * ## Rule order (fixed, checks before any side effect)
  *
- * 1. `purpose === SELECTOR_PURPOSE` -> raw `next()`. The plugin's own selection
- *    request must never be substituted, and it must never reach
- *    `usage.request()`: it would become the pairing sample of a substitution
- *    and corrupt `saved_input_tokens` (obligation 7).
+ * 1. `purpose` set -> raw `next()`. The appendix sets `purpose` **only** for
+ *    auxiliary calls, and the host issues several on the same session id: the
+ *    plugin's selector (`boost-selector`), `dsh-compaction-basic`
+ *    (`compaction`) and the session-title model (`session-title`). None is a
+ *    conversation step, so all pass through untouched: never substituted,
+ *    never observed into `usage.request()`, never settling a mark. Observing
+ *    one would pair a substitution with the summarizer's usage and corrupt
+ *    `saved_input_tokens` (obligation 7); synthesizing into one would break
+ *    compaction and write a substitute receipt for a call that never ran.
  * 2. `receipts.stopped()` -> pass through, fail-closed. A store that cannot
  *    record evidence cannot justify a substitution.
  * 3. Visibility. `resolveSession(sessionId)` returning `undefined` means the
@@ -65,7 +70,10 @@
  * ```
  *
  * `onModelRequest` copies the host turn/step (never a plugin count) and resets
- * that session's budget only when its turn changes. `clearSession(deps, id)`
+ * that session's budget only when its turn changes. `notePlanTurn` is the
+ * matching rollover for the plan store: the first real request of a new turn
+ * drops the previous turn's plan before a new one can be parsed, so a stale
+ * plan cannot drive a substitution in the new turn. `clearSession(deps, id)`
  * is the session-end cleanup: queue, anchors, plans, receipt state, the usage
  * mark and the runtime entry, all dropped together (obligation 10). No map is
  * ever handed out.
@@ -91,6 +99,11 @@
  * `carriesAnchor` therefore accepts either the exact text or a body holding the
  * anchor's head *and* tail probes; the prune marker then decides
  * `pruned-reset`, and only a body that carries neither is `compaction-reset`.
+ * Probes are measured in code points (a UTF-16 slice can split a surrogate
+ * pair) and clamped to the smallest configured projection window, because
+ * `resolveConfig` accepts `headChars`/`tailChars` below the probe length and a
+ * window shorter than the probe would make our own projection look like
+ * compaction.
  *
  * Everything here is contained: a foreign store, queue, ledger, clock or
  * resolver can degrade the decision, never throw out of the model request.
@@ -107,7 +120,6 @@ import { looksPruned } from '../gate/invalidate.js'
 import type { ReceiptAnchors } from '../gate/invalidate.js'
 import { parsePlan } from '../gate/plan.js'
 import type { ReceiptStore } from '../receipts/store.js'
-import { SELECTOR_PURPOSE } from '../selector/jev.js'
 import { TurnClock } from './clock.js'
 import { synthesizeTurn } from './synthesize.js'
 import type { PendingEntry } from './pending.js'
@@ -125,7 +137,7 @@ type ReceiptInput = Parameters<ReceiptStore['append']>[0]
 /** Which external rewrite invalidated a decision. */
 type ResetCode = 'pruned-reset' | 'compaction-reset'
 
-/** Head/tail probe length used to recognize a receipt rewritten in place. */
+/** Default head/tail probe length for a receipt rewritten in place. */
 const ANCHOR_PROBE_CHARS = 32
 
 // ---------------------------------------------------------------------------
@@ -140,6 +152,8 @@ interface SessionEntry {
   budget: StepBudget
   /** This session's request pairing. */
   usage: UsageLedger
+  /** The host turn whose plan store this session has been reconciled with. */
+  planTurn?: number
 }
 
 /**
@@ -197,6 +211,25 @@ export class SessionRuntime {
     const before = entry.clock.turn()
     entry.clock.onModelRequest(turn, step)
     if (entry.clock.turn() !== before) entry.budget.reset()
+  }
+
+  /**
+   * Reconcile this session's plan store with `turn`; `true` on a turn change.
+   *
+   * The plan lives in `HookDeps.plans` and is keyed by session only, so
+   * without this note a turn that emits no new plan keeps the previous turn's
+   * one, and its remaining steps can still drive a substitution. The stream
+   * hook calls this once per **real** request (never for an auxiliary
+   * `purpose`, which is not a conversation step) and clears the plan map when
+   * it returns true, before that request's response could write a new plan.
+   * The first call reports true so a seeded map cannot outlive its first
+   * request; `clearSession` drops the note with the rest of the entry.
+   */
+  notePlanTurn(sessionId: string, turn: number): boolean {
+    const entry = this.entry(sessionId)
+    if (entry.planTurn === turn) return false
+    entry.planTurn = turn
+    return true
   }
 
   /** Drop everything this runtime holds for one session. */
@@ -266,11 +299,14 @@ export function sessionUsage(deps: HookDeps, sessionId: string): UsageLedger | u
   }
 }
 
-/** The session's clock turn, or `undefined` when no clock can answer. */
+/** The session's clock turn, or `undefined` when no clock can answer a real turn. */
 function clockTurnOf(deps: HookDeps, sessionId: string): number | undefined {
   try {
     const turn = sessionClock(deps, sessionId)?.turn()
-    return typeof turn === 'number' && Number.isFinite(turn) ? turn : undefined
+    // `TurnClock` reports 0 before the first `agent/request`; real host turns
+    // start at 1. Treating 0 as a turn would let a `turn: 0` entry match an
+    // undriven clock and synthesize a substitution nobody decided.
+    return typeof turn === 'number' && Number.isFinite(turn) && turn > 0 ? turn : undefined
   } catch {
     return undefined
   }
@@ -391,6 +427,37 @@ function messageTexts(messages: unknown): string[] {
 }
 
 /**
+ * The head/tail probe windows, clamped to the projection's own windows.
+ *
+ * Our projection keeps `headChars`/`tailChars` code points of the receipt, so
+ * a probe longer than a configured window can never match a projected body and
+ * would report `compaction-reset`. `resolveConfig` accepts any finite value
+ * (including 0), so the window is the smallest one any family configures,
+ * capped at {@link ANCHOR_PROBE_CHARS}; a 0 window drops that side of the
+ * probe and leaves only the other. With the design defaults this is 32/32.
+ */
+function anchorProbe(deps: HookDeps): { head: number; tail: number } {
+  let head = ANCHOR_PROBE_CHARS
+  let tail = ANCHOR_PROBE_CHARS
+  try {
+    const projection: unknown = deps.config?.projection
+    if (typeof projection !== 'object' || projection === null) return { head, tail }
+    for (const raw of Object.values(projection)) {
+      const params = raw as { headChars?: unknown; tailChars?: unknown } | null
+      if (typeof params?.headChars === 'number' && Number.isFinite(params.headChars)) {
+        head = Math.min(head, Math.max(0, params.headChars))
+      }
+      if (typeof params?.tailChars === 'number' && Number.isFinite(params.tailChars)) {
+        tail = Math.min(tail, Math.max(0, params.tailChars))
+      }
+    }
+  } catch {
+    return { head: ANCHOR_PROBE_CHARS, tail: ANCHOR_PROBE_CHARS }
+  }
+  return { head, tail }
+}
+
+/**
  * Whether `body` still carries `anchor`, verbatim or as an in-place rewrite.
  *
  * The host pruner replaces the middle of an oversized receipt with
@@ -399,16 +466,29 @@ function messageTexts(messages: unknown): string[] {
  * end, so a body holding both probes is the same receipt, rewritten by us or
  * by the host (and the marker then says which).
  *
- * Short anchors get no probe treatment: at that size the exact text either is
- * present or the receipt is gone.
+ * Probes are sliced by **code point**, exactly like `truncate`: a UTF-16 slice
+ * can end on half a surrogate pair, and a lone surrogate is not a substring a
+ * correctly projected body has to contain. Short anchors whose two windows
+ * would cover the whole text get no probe treatment: at that size the exact
+ * text either is present or the receipt is gone.
  */
-function carriesAnchor(body: string, anchor: string): boolean {
+function carriesAnchor(
+  body: string,
+  anchor: string,
+  probe: { head: number; tail: number },
+): boolean {
   if (body.includes(anchor)) return true
-  if (anchor.length <= ANCHOR_PROBE_CHARS * 2) return false
-  const head = anchor.slice(0, ANCHOR_PROBE_CHARS)
-  const tail = anchor.slice(-ANCHOR_PROBE_CHARS)
-  const start = body.indexOf(head)
-  return start !== -1 && body.indexOf(tail, start + ANCHOR_PROBE_CHARS) !== -1
+  const points = Array.from(anchor)
+  const headLen = Math.min(probe.head, points.length)
+  const tailLen = Math.min(probe.tail, points.length)
+  if (headLen === 0 && tailLen === 0) return false
+  if (points.length <= headLen + tailLen) return false
+  const head = headLen > 0 ? points.slice(0, headLen).join('') : ''
+  const tail = tailLen > 0 ? points.slice(-tailLen).join('') : ''
+  const start = headLen > 0 ? body.indexOf(head) : 0
+  if (headLen > 0 && start === -1) return false
+  if (tailLen > 0 && body.indexOf(tail, start + headLen) === -1) return false
+  return true
 }
 
 /**
@@ -430,6 +510,7 @@ function carriesAnchor(body: string, anchor: string): boolean {
 function anchorResetOf(
   anchors: ReceiptAnchors | undefined,
   messages: unknown,
+  probe: { head: number; tail: number },
 ): ResetCode | undefined {
   if (anchors == null) return undefined
   const record: unknown = anchors.anchors
@@ -444,7 +525,7 @@ function anchorResetOf(
   let compacted = false
   for (const anchor of texts) {
     if (looksPruned(anchor)) return 'pruned-reset'
-    const carriers = bodies.filter((body) => carriesAnchor(body, anchor))
+    const carriers = bodies.filter((body) => carriesAnchor(body, anchor, probe))
     if (carriers.length === 0) {
       compacted = true
       continue
@@ -525,7 +606,7 @@ function resolveStreamPlan(
   }
 
   const anchors = anchorsOf(deps, sessionId)
-  const reset = anchorResetOf(anchors, options?.messages)
+  const reset = anchorResetOf(anchors, options?.messages, anchorProbe(deps))
   if (reset !== undefined) {
     return {
       kind: 'pass',
@@ -775,16 +856,34 @@ async function* synthesizeBranch(
  * Build the `llm/stream` listener.
  *
  * Returns a **synchronous** function returning an `AsyncIterable`; see the
- * module header for why an `async` function here breaks every request. The
- * selector branch returns `next()` untouched (never observed, never
- * substituted). Every other request is decided synchronously by
- * {@link resolveStreamPlan} and then answered by a generator.
+ * module header for why an `async` function here breaks every request. Any
+ * `purpose`-tagged call (selector, compaction, session-title) returns `next()`
+ * untouched: never observed, never substituted. Every real request is decided
+ * synchronously by {@link resolveStreamPlan} and then answered by a generator.
  */
 export function streamHook(
   deps: HookDeps,
 ): (options: GenerateOptions, next: () => AsyncIterable<StreamChunk>) => AsyncIterable<StreamChunk> {
   return (options, next) => {
-    if (options?.purpose === SELECTOR_PURPOSE) return next()
+    // Any purpose-tagged request is auxiliary (appendix §1): the selector, the
+    // compaction summarizer, the session-title model. They share the session
+    // id but are not conversation steps, so they pass through raw: no
+    // substitution, no usage observation, no settlement, no plan rollover.
+    if (options?.purpose !== undefined) return next()
+
+    const sessionId = sessionIdOf(options)
+    if (sessionId !== undefined) {
+      const turn = clockTurnOf(deps, sessionId)
+      if (turn !== undefined) {
+        let rolledOver = false
+        try {
+          rolledOver = deps.sessions?.notePlanTurn(sessionId, turn) === true
+        } catch {
+          rolledOver = false
+        }
+        if (rolledOver) clearPlans(deps, sessionId)
+      }
+    }
 
     let plan: StreamPlan
     try {
@@ -811,6 +910,15 @@ export function streamHook(
   }
 }
 
+/** Drop the session's parsed plan; a foreign map must not break the request. */
+function clearPlans(deps: HookDeps, sessionId: string): void {
+  try {
+    deps.plans?.delete(sessionId)
+  } catch {
+    // A foreign map can only cost a later decision.
+  }
+}
+
 /**
  * Drop every per-session trace the plugin keeps for `sessionId`.
  *
@@ -824,11 +932,7 @@ export function clearSession(deps: HookDeps, sessionId: string): void {
   settleDiscarded(deps, sessionId)
   clearPending(deps, sessionId)
   clearAnchors(deps, sessionId)
-  try {
-    deps.plans?.delete(sessionId)
-  } catch {
-    // A foreign map must not block the rest of the cleanup.
-  }
+  clearPlans(deps, sessionId)
   try {
     deps.sessionState?.clear(sessionId)
   } catch {

@@ -215,6 +215,58 @@ test('O7 selector 自身调用放行：不进 usage.request、不合成、不结
 })
 
 // ---------------------------------------------------------------------------
+// C1: every purpose-tagged call is auxiliary, not only the selector's
+// ---------------------------------------------------------------------------
+
+test('C1 purpose=compaction 一律透传：不合成、不观测 usage、不结算标记、队列与锚点不动', async () => {
+  const usage = { inputTokens: 4000, cacheReadTokens: 0, outputTokens: 300 }
+  const env = setup({
+    chunks: [{ type: 'usage', usage }, { type: 'finish', reason: { kind: 'stop' } }],
+  })
+  env.runtime.onModelRequest(SESSION, 1, 0)
+  const entry = seedPending(env)
+  const anchors = { stepId: 'root', anchors: { root: 'ANCHORED-TEXT' } }
+  env.anchors.set(SESSION, anchors)
+  const ledger = env.runtime.usageFor(SESSION)
+  ledger.markSubstituted('A')
+
+  const chunks = await streamOnce(env, {
+    purpose: 'compaction',
+    messages: messagesWith('the shadowed span'),
+  })
+
+  assert.deepEqual(chunks, [{ type: 'usage', usage }, { type: 'finish', reason: { kind: 'stop' } }])
+  assert.equal(env.host.nextCalls, 1)
+  assert.equal(env.upstreamCalls(), 1)
+  assert.equal(env.queue.peek(SESSION), entry, 'an auxiliary call never consumes the decision')
+  assert.deepEqual(env.anchors.get(SESSION), anchors, 'an auxiliary call never invalidates evidence')
+  assert.equal(ledger.last(), undefined, 'the summarizer request is not a pairing sample')
+  assert.equal(ledger.pendingCandidateId(), 'A', 'the mark belongs to the next real request, not this one')
+  assert.equal(env.receipts.length, 0, 'nothing is substituted, reset or settled')
+})
+
+test("C1 purpose='session-title' 同样透传：合成后再出现的辅助调用不结算也未观测", async () => {
+  const usage = { inputTokens: 4000, cacheReadTokens: 0, outputTokens: 300 }
+  const env = setup({
+    chunks: [{ type: 'usage', usage }, { type: 'finish', reason: { kind: 'stop' } }],
+  })
+  env.runtime.onModelRequest(SESSION, 1, 0)
+  // The post-synthesis window: the entry is gone, only the usage mark remains.
+  const ledger = env.runtime.usageFor(SESSION)
+  ledger.markSubstituted('A')
+
+  const chunks = await streamOnce(env, { purpose: 'session-title', messages: [] })
+
+  assert.equal(env.host.nextCalls, 1)
+  assert.equal(env.upstreamCalls(), 1)
+  assert.equal(env.queue.peek(SESSION), undefined)
+  assert.equal(ledger.last(), undefined, 'the title request must not become the after-mark sample')
+  assert.equal(ledger.pendingCandidateId(), 'A', 'the next real request still owns the settlement')
+  assert.equal(env.receipts.length, 0)
+  assert.deepEqual(chunks, [{ type: 'usage', usage }, { type: 'finish', reason: { kind: 'stop' } }])
+})
+
+// ---------------------------------------------------------------------------
 // The plan's pass-through tests
 // ---------------------------------------------------------------------------
 
@@ -260,15 +312,11 @@ test('scope 不可见放行 + 清该 session 队列，post-execute 侧记 skip:n
 })
 
 test('收据停写 fail-closed：放行、不合成、不吃预算、放弃的标记被结算', async () => {
-  const env = setup({
-    deps: {
-      receipts: {
-        append: async () => {},
-        stopped: () => true,
-      },
-    },
-    chunks: [{ type: 'finish', reason: { kind: 'stop' } }],
-  })
+  const env = setup({ chunks: [{ type: 'finish', reason: { kind: 'stop' } }] })
+  // Keep the recording append, then make the store report that it stopped:
+  // a settlement receipt must not be masked by the store also swallowing it.
+  const append = env.deps.receipts.append
+  env.deps.receipts = { append, stopped: () => true }
   env.runtime.onModelRequest(SESSION, 1, 0)
   seedPending(env)
   const ledger = env.runtime.usageFor(SESSION)
@@ -282,6 +330,11 @@ test('收据停写 fail-closed：放行、不合成、不吃预算、放弃的�
   assert.equal(chunks.some((c) => c.type === 'tool-call-delta'), false)
   assert.equal(budget.count(), before, 'llm/stream must not take a step')
   assert.equal(ledger.pendingCandidateId(), undefined, 'a failed substitution is not left marked')
+  assert.equal(
+    env.receipts.some((r) => r.kind === 'substitute-settled'),
+    false,
+    'abandonment must not report a saving (the end-of-request fallback must not mask it)',
+  )
 })
 
 test('预算耗尽回主模型：nextCalls === 1 且流里没有 tool-call-delta', async () => {
@@ -436,6 +489,27 @@ test('跨回合结算：合成后的下一次真实请求写 substitute-settled 
   assert.equal(env.runtime.usageFor(SESSION).pendingCandidateId(), undefined)
 })
 
+test('O11 兜底结算：本请求没有 usage 块时，真实请求结束仍写 unknown 结算并消费标记', async () => {
+  const env = setup({
+    chunks: [
+      { type: 'text-delta', index: 0, text: 'plain answer' },
+      { type: 'finish', reason: { kind: 'stop' } },
+    ],
+  })
+  env.runtime.onModelRequest(SESSION, 1, 0)
+  const ledger = env.runtime.usageFor(SESSION)
+  ledger.markSubstituted('A')
+
+  await streamOnce(env)
+
+  const settled = env.receipts.filter((r) => r.kind === 'substitute-settled')
+  assert.equal(settled.length, 1, 'the request ends even when no usage chunk arrived')
+  assert.equal(settled[0].candidateId, 'A')
+  assert.equal(settled[0].saved_input_tokens, 'unknown')
+  assert.equal(settled[0].output_tokens, 'unknown')
+  assert.equal(ledger.pendingCandidateId(), undefined, 'the mark is consumed at request end')
+})
+
 // ---------------------------------------------------------------------------
 // Obligation 1: clock and budget are per session
 // ---------------------------------------------------------------------------
@@ -495,6 +569,18 @@ test('O4 回合有效：上一回合的 pending 在换回合的第一次请求�
   assert.equal(env.queue.peek(SESSION), undefined)
 })
 
+test('O4 时钟未驱动（turn 0）不是回合：turn 0 的 pending 不会合成', async () => {
+  const env = setup({ chunks: [{ type: 'finish', reason: { kind: 'stop' } }] })
+  // No onModelRequest: TurnClock.turn() is 0, which is not a host turn.
+  seedPending(env, { turn: 0 })
+
+  const chunks = await streamOnce(env)
+
+  assert.equal(env.host.nextCalls, 1)
+  assert.equal(chunks.some((c) => c.type === 'tool-call-delta'), false)
+  assert.equal(env.queue.peek(SESSION), undefined, 'an undecidable entry is cleared, not synthesized')
+})
+
 // ---------------------------------------------------------------------------
 // Obligation 5: abandoning a marked entry settles the mark
 // ---------------------------------------------------------------------------
@@ -528,10 +614,10 @@ test('O5 放弃 marked entry 时 settle-and-discard：后续真实请求不再�
 const LONG_ANCHOR = `${'H'.repeat(120)}${'M'.repeat(60)}${'T'.repeat(120)}`
 
 /** Seed a valid pending entry plus its anchors for the anchor tests. */
-function seedAnchored(env: ReturnType<typeof setup>): Any {
+function seedAnchored(env: ReturnType<typeof setup>, anchor = LONG_ANCHOR): Any {
   env.runtime.onModelRequest(SESSION, 1, 0)
   const entry = seedPending(env)
-  env.anchors.set(SESSION, { stepId: 'root', anchors: { root: LONG_ANCHOR } })
+  env.anchors.set(SESSION, { stepId: 'root', anchors: { root: anchor } })
   return entry
 }
 
@@ -590,6 +676,39 @@ test('O6 插件自己的投影也保留 head+tail：不得误判成 compaction',
   assert.equal(env.receipts.some((r) => r.kind === 'reset'), false)
 })
 
+test('O6 窄投影窗口（headChars/tailChars=12）也认作投影，不误判 compaction', async () => {
+  const narrow = {
+    ...DEFAULT_CONFIG,
+    projection: {
+      ...DEFAULT_CONFIG.projection,
+      read: { ...DEFAULT_CONFIG.projection.read, headChars: 12, tailChars: 12 },
+    },
+  }
+  const env = setup({ deps: { config: narrow } })
+  seedAnchored(env)
+  const points = Array.from(LONG_ANCHOR)
+  const projected = `${points.slice(0, 12).join('')}\n(Omitted 99 bytes.)\n${points.slice(-12).join('')}`
+
+  const chunks = await streamOnce(env, { messages: messagesWith(projected) })
+
+  assert.equal(env.host.nextCalls, 0, 'a probe longer than the configured window would look like compaction')
+  assert.equal(chunks.some((c) => c.type === 'tool-call-delta'), true)
+  assert.equal(env.receipts.some((r) => r.kind === 'reset'), false)
+})
+
+test('O6 代理对边界：投影头尾按码点切片，32 字符探测不切开 astral 字符', async () => {
+  const anchor = `${'a'.repeat(31)}😀${'b'.repeat(40)}😀${'c'.repeat(31)}`
+  const env = setup()
+  seedAnchored(env, anchor)
+  const points = Array.from(anchor)
+  const projected = `${points.slice(0, 32).join('')}\n(Omitted 40 bytes.)\n${points.slice(-32).join('')}`
+
+  const chunks = await streamOnce(env, { messages: messagesWith(projected) })
+
+  assert.equal(env.host.nextCalls, 0)
+  assert.equal(chunks.some((c) => c.type === 'tool-call-delta'), true)
+})
+
 // ---------------------------------------------------------------------------
 // Obligation 10: session-end cleanup is exposed, not leaked
 // ---------------------------------------------------------------------------
@@ -611,4 +730,37 @@ test('O10 clearSession 清队列/锚点/计划/收据状态/会话预算，且�
   assert.equal(env.sessionState.receiptsFor(SESSION, 1).size, 0)
   assert.equal(env.runtime.size(), 0)
   assert.equal(env.runtime.clockFor(SESSION).turn(), 0, 'a cleared session starts a fresh clock')
+})
+
+test('I1 registerHooks 自建的 sessionState 写回 deps：caller 省略时 clearSession 仍能清', async () => {
+  const env = setup({ deps: { sessionState: undefined } })
+  assert.ok(env.deps.sessionState, 'registerHooks publishes the instance it created')
+
+  env.runtime.onModelRequest(SESSION, 3, 0)
+  await runPost(env, 'TRIGGER here')
+  assert.equal(
+    env.deps.sessionState.receiptsFor(SESSION, 3).size,
+    1,
+    'the default state recorded the root receipt',
+  )
+
+  clearSession(env.deps, SESSION)
+  assert.equal(
+    env.deps.sessionState.receiptsFor(SESSION, 3).size,
+    0,
+    'the default state is reachable, so it is cleared instead of leaked',
+  )
+})
+
+test('I2 换回合清计划：新回合第一次请求前丢弃上一回合的 plan', async () => {
+  const env = setup({ chunks: [{ type: 'finish', reason: { kind: 'stop' } }] })
+  env.runtime.onModelRequest(SESSION, 1, 0)
+  await streamOnce(env, { messages: [] })
+  env.plans.set(SESSION, { goal: 'turn-1', steps: [candidate()] })
+  await streamOnce(env, { messages: [] })
+  assert.equal(env.plans.get(SESSION)?.goal, 'turn-1', 'the same turn keeps the plan it parsed')
+
+  env.runtime.onModelRequest(SESSION, 2, 0)
+  await streamOnce(env, { messages: [] })
+  assert.equal(env.plans.has(SESSION), false, 'a new turn starts without the previous turn plan')
 })

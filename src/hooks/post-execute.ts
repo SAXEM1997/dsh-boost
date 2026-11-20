@@ -1410,6 +1410,11 @@ function registerProtocolSection(ctx: PluginContext, scope: ScopeStore | undefin
  */
 export function registerHooks(ctx: PluginContext, deps: HookDeps): void {
   const state = deps.sessionState ?? new ReceiptSessionState()
+  // Publish the instance we created. `clearSession` and Task 23c-2's session-end
+  // wiring reach the state through `deps.sessionState`; a caller that omits it
+  // (the plan's 23c-2 assembly list does) would otherwise leave the created
+  // receipt/dispatch maps unreachable and leaked per session.
+  deps.sessionState = state
   registerProtocolSection(ctx, deps.scope)
   registerPostExecute(ctx, deps, state)
   registerLlmStream(ctx, deps)
