@@ -258,6 +258,7 @@ latest`。`package.json` 的 `description` 写着同一件事。
 | `ERR_HOST_NO_SPILL` | `status.degraded`（仅 `projection:'on'`） | 超限回执不投影，`projection-skipped:no-spill` | 恢复/检查的是 spill **后端**（`dsh-spill-local`，§2.2） |
 | `ERR_HOST_PLATFORM_UNSUPPORTED` | `status.degraded` | win32 上替换拒绝，投影不受影响 | 平台限制，无需处置 |
 | `ERR_HOST_NO_STEP_WHEN` | 注册警告 | 整族工具（含 `boost`）不注册，`status` 本身不可用 | 宿主不支持步骤级 `when` |
+| `ERR_RECEIPTS_TRUNCATED` | `status.degraded` | 收据分片超过 256 个；`status` 只聚合按名排序的前 256 个，`counts` 与两账因此都是**下界**，不是漏算就是少算——方向安全但数字偏小 | 归档或清理旧分片，重跑 `status`；要全量就分批统计 |
 | `ERR_RECEIPTS_UNREADABLE` | `status.degraded` | 至少一个收据分片读不出来（EACCES、名为 `x.jsonl` 的目录等）；`status` 仍是**全量聚合**——健康分片照常计数——并带该码，数字因此可能不完整 | 检查 `$DSH_HOME/boost/receipts/` 的权限与异常条目，修复后重跑 `status`，对比修复前后计数 |
 | `ERR_HOST_COMPLETE_SECTION` | `status.degraded` | 宿主的 `complete: true` 提示段在装配瀑布之后替换了整个系统提示，协议段没有到达出站请求；受影响请求上替换与投影 fail-closed（会话被判不可见），工作区明明可见插件却不动作 | 找出宿主提示配置里覆盖瀑布装配的 complete 段（通常属于另一个插件）；移除它，或接受这些请求上替换/投影不可用 |
 | `ERR_SCOPE_ABORTED` | `scope-set` / `shadow` 工具的失败 `code`（**不在** `degraded` 里） | 调用方的取消信号打断了 `boost` 写入；锁已释放、`scope.json` 原样未动，无残留 | 重读 `status` 取当前 `revision` 后重试即可 |
@@ -460,7 +461,7 @@ lockfile 里的 tarball URL。workflow 选的是**先重写、再安装**：一�
 - [ ] 测试工作区已写入 `scope.workspaceIds`，`shadow: true`、`projection: 'on'` 经 `boost status` 确认
 - [ ] no-tokenmeter 门按 §2.1 承担：单元测试注入 `hasTokenMeter: false` 锁定预期（替换拒绝、投影可用、账目 `unknown`、`ERR_HOST_NO_TOKENMETER`）；活宿主复核仅在确要部署缺该服务的宿主时做，先验健康态再验降级
 - [ ] no-spill 门按 §2.2 完整跑过：移除的是 spill **后端**（`dsh-spill-local`），观察到超限回执不投影、`projection-skipped:no-spill`、`ERR_HOST_NO_SPILL`；只移除 `dsh-spill-policy`（页脚格式化器，从宿主树解析）的话只能验到 `projection-skipped:no-footer`
-- [ ] 两条降级路径都保留 status/收据证据；验收中出现的每个稳定码都按 §2.5 的矩阵处置并留证（含本轮新增的 `ERR_RECEIPTS_UNREADABLE` / `ERR_HOST_COMPLETE_SECTION` / `ERR_SCOPE_ABORTED`）
+- [ ] 两条降级路径都保留 status/收据证据；验收中出现的每个稳定码都按 §2.5 的矩阵处置并留证（含本轮新增的 `ERR_RECEIPTS_UNREADABLE` / `ERR_RECEIPTS_TRUNCATED` / `ERR_HOST_COMPLETE_SECTION` / `ERR_SCOPE_ABORTED`）
 - [ ] 20 任务门按 §3 跑过，pass 谓词逐字对照，结论只有"过门/未过门"
 - [ ] 第一次开启替换的真实回合检查 `content[].thinking` 400（不是影子周）；若有，替换在该路由关闭
 - [ ] `npm run --silent stats` 在干净 clone 上可复算 §5.2 的聚合（口径对应设计稿 §2.1）
