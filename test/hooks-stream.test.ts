@@ -176,6 +176,25 @@ function seedPending(
 /** A tool-role request message carrying exactly `text`. */
 const messagesWith = (text: string) => [{ role: 'tool', content: [{ type: 'text', text }] }]
 
+/**
+ * The body apply-mode projection composes: head line, head, footer, tail.
+ *
+ * The head line is the projection's own identity (`[output N chars; showing
+ * first H and last T]`), and a real projected receipt always carries it. A body
+ * that merely shares the head and tail of the anchor, with no rewrite evidence,
+ * is a different receipt.
+ */
+function projectedBody(
+  anchor: string,
+  headChars: number,
+  tailChars: number,
+  footer = '(Omitted 99 bytes.)',
+): string {
+  const points = Array.from(anchor)
+  const header = `[output ${points.length.toLocaleString('en-US')} chars; showing first ${headChars.toLocaleString('en-US')} and last ${tailChars.toLocaleString('en-US')}]`
+  return `${header}\n${points.slice(0, headChars).join('')}\n${footer}\n${points.slice(-tailChars).join('')}`
+}
+
 // ---------------------------------------------------------------------------
 // The sync contract: an async function makes the host for-await a Promise
 // ---------------------------------------------------------------------------
@@ -300,6 +319,42 @@ test('P0 收据停写直通也结算决策期标记：之后的真实请求不�
   )
 })
 
+test('P3 resolveStreamPlan 抛错走同一透传路径：丢弃标记、观测 usage、不写幽灵 settle', async () => {
+  const usage = { inputTokens: 100, cacheReadTokens: 900, outputTokens: 10 }
+  const env = setup({
+    chunks: [{ type: 'usage', usage }, { type: 'finish', reason: { kind: 'stop' } }],
+  })
+  env.runtime.onModelRequest(SESSION, 1, 0)
+  seedPending(env)
+  const ledger = env.runtime.usageFor(SESSION)
+  ledger.markSubstituted('A')
+  // A throwing getter is not one of the store calls the defensive readers wrap,
+  // so it escapes `resolveStreamPlan` and reaches the hook's catch. The catch
+  // must not hand the raw upstream back: the decision-time mark would then be
+  // settled by this unrelated real request.
+  env.anchors.set(SESSION, {
+    stepId: 'root',
+    get anchors(): Record<string, string> {
+      throw new Error('anchor store boom')
+    },
+  } as Any)
+
+  const chunks = await streamOnce(env, { messages: messagesWith('anything') })
+
+  assert.equal(env.host.nextCalls, 1, 'a decision bug must not take the request down')
+  assert.deepEqual(chunks, [
+    { type: 'usage', usage },
+    { type: 'finish', reason: { kind: 'stop' } },
+  ])
+  assert.equal(ledger.pendingCandidateId(), undefined, 'the mark is discarded, not left for a later request')
+  assert.deepEqual(ledger.last(), { input: 100, cacheRead: 900, output: 10 }, 'the pass path still observes usage')
+  assert.equal(
+    env.receipts.some((r) => r.kind === 'substitute-settled'),
+    false,
+    'a decision that never synthesized cannot report a saving',
+  )
+})
+
 // ---------------------------------------------------------------------------
 // Rows 71-72: anchor detection mutation survivors
 // ---------------------------------------------------------------------------
@@ -337,6 +392,45 @@ test('row 72 tail 必须出现在 head 之后：tail 在前不算承载', async 
   assert.equal(chunks.some((c) => c.type === 'tool-call-delta'), false, 'not synthesized')
   const reset = env.receipts.find((r) => r.kind === 'reset')
   assert.equal(reset?.code, 'compaction-reset', 'the ordered probe must not accept a tail-first body')
+})
+
+test('P2 头尾相同、中段不同的完整回执不是锚点：探针碰撞必须 fail closed', async () => {
+  const env = setup({ chunks: [{ type: 'finish', reason: { kind: 'stop' } }] })
+  const anchor = `${'H'.repeat(120)}${'M'.repeat(60)}${'T'.repeat(120)}`
+  seedAnchored(env, anchor)
+  // The same file edited in the middle and re-read: the new receipt shares the
+  // 32-character head and tail, but its body is not the anchored one and is not
+  // an in-place rewrite either. Accepting the probes would substitute against
+  // content the model no longer holds.
+  const edited = `${'H'.repeat(120)}${'X'.repeat(60)}${'T'.repeat(120)}`
+
+  const chunks = await streamOnce(env, { messages: messagesWith(edited) })
+
+  assert.equal(env.host.nextCalls, 1, 'a changed body must not be synthesized over')
+  assert.equal(chunks.some((c) => c.type === 'tool-call-delta'), false)
+  const reset = env.receipts.find((r) => r.kind === 'reset')
+  assert.equal(reset?.code, 'compaction-reset', 'an unverifiable head/tail match is a lost anchor')
+  assert.equal(env.queue.peek(SESSION), undefined)
+})
+
+test('P2 锚点形状无法校验（旧/外来值）：不崩溃且 fail closed', async () => {
+  const env = setup({ chunks: [{ type: 'finish', reason: { kind: 'stop' } }] })
+  env.runtime.onModelRequest(SESSION, 1, 0)
+  seedPending(env)
+  // A value the stronger rule cannot verify: an object, not the canonical text.
+  // It must not be treated as "no anchors" (which would vacuously pass) and it
+  // must not throw out of the model request.
+  env.anchors.set(SESSION, {
+    stepId: 'root',
+    anchors: { root: { text: 'old-shape' } },
+  } as Any)
+
+  const chunks = await streamOnce(env, { messages: messagesWith('old-shape') })
+
+  assert.equal(env.host.nextCalls, 1)
+  assert.equal(chunks.some((c) => c.type === 'tool-call-delta'), false)
+  const reset = env.receipts.find((r) => r.kind === 'reset')
+  assert.equal(reset?.code, 'compaction-reset', 'an unverifiable anchor is not a match')
 })
 
 // ---------------------------------------------------------------------------
@@ -424,6 +518,76 @@ test('预算耗尽回主模型：nextCalls === 1 且流里没有 tool-call-delta
   assert.equal(chunks.some((c) => c.type === 'tool-call-delta'), false)
 })
 
+test('P2 同一步不得合成两次：丢弃仍存活的条目、只写一条 substitute、不写幽灵 settle', async () => {
+  const env = setup({ stepsPerTurn: 1, chunks: [{ type: 'finish', reason: { kind: 'stop' } }] })
+  env.runtime.onModelRequest(SESSION, 1, 0)
+  const entry = await commit(env)
+  const budget = env.runtime.budgetFor(SESSION)
+  const ledger = env.runtime.usageFor(SESSION)
+
+  // First request: the one budgeted step is spent and the turn is synthesized.
+  const first = await streamOnce(env, { messages: messagesWith('TRIGGER here') })
+  assert.equal(first.filter((c) => c.type === 'tool-call-delta').length, 1)
+  assert.equal(env.receipts.filter((r) => r.kind === 'substitute').length, 1)
+  assert.equal(ledger.pendingCandidateId(), 'A')
+
+  // The next post-execute in the same turn cannot take a step: the decision it
+  // would have made is refused, but the first entry is still live because the
+  // synthesized call has not been dispatched yet.
+  env.plans.set(SESSION, { goal: 'g', steps: [candidate()] })
+  await runPost(env, 'TRIGGER here')
+  assert.ok(env.receipts.some((r) => r.code === 'steps-exhausted'))
+  assert.equal(env.queue.peek(SESSION)?.callId, entry.callId, 'the refused decision did not replace the entry')
+
+  // A second request must not synthesize the same step again: that would write
+  // a duplicate callId and spend a step the budget never granted.
+  const second = await streamOnce(env, { messages: messagesWith('TRIGGER here') })
+  assert.equal(env.host.nextCalls, 1, 'the model must answer instead of a duplicate synthesis')
+  assert.equal(second.some((c) => c.type === 'tool-call-delta'), false)
+  assert.equal(env.queue.peek(SESSION), undefined, 'the unhonourable entry is dropped')
+  assert.equal(budget.count(), 1, 'no second step was taken')
+  assert.equal(ledger.pendingCandidateId(), undefined, 'the dropped entry settles its mark as discarded')
+
+  const substitutes = env.receipts.filter((r) => r.kind === 'substitute')
+  assert.equal(substitutes.length, 1, 'the same step must never produce two substitute receipts')
+  assert.equal(substitutes[0]?.callId, entry.callId)
+
+  // The real request that follows must not report a saving for a substitution
+  // that never ran twice.
+  env.runtime.onModelRequest(SESSION, 2, 0)
+  env.setChunks([
+    { type: 'usage', usage: { inputTokens: 10, cacheReadTokens: 90, outputTokens: 1 } },
+    { type: 'finish', reason: { kind: 'stop' } },
+  ])
+  await streamOnce(env)
+  assert.equal(
+    env.receipts.some((r) => r.kind === 'substitute-settled'),
+    false,
+    'a dropped entry must not settle a phantom saving',
+  )
+})
+
+test('P2 预算已耗尽时即使 callId 不同也不再合成：合成数不得超过已付步数', async () => {
+  const env = setup({ stepsPerTurn: 1, chunks: [{ type: 'finish', reason: { kind: 'stop' } }] })
+  env.runtime.onModelRequest(SESSION, 1, 0)
+  await commit(env)
+  await streamOnce(env, { messages: messagesWith('TRIGGER here') })
+  // A different decision parked in the same turn without a paid step: the
+  // budget half alone must refuse it, independently of the call-id half.
+  seedPending(env, { callId: 'unpaid-call', turn: 1 })
+
+  const chunks = await streamOnce(env, { messages: messagesWith('TRIGGER here') })
+
+  assert.equal(env.host.nextCalls, 1)
+  assert.equal(chunks.some((c) => c.type === 'tool-call-delta'), false)
+  assert.equal(env.queue.peek(SESSION), undefined, 'the unpayable entry is dropped')
+  assert.equal(
+    env.receipts.filter((r) => r.kind === 'substitute').length,
+    1,
+    'the only substitute receipt is the one the budget paid for',
+  )
+})
+
 // ---------------------------------------------------------------------------
 // Obligation 2: the stream hook never charges the turn budget
 // ---------------------------------------------------------------------------
@@ -483,6 +647,29 @@ test('有 pending 时合成：nextCalls === 0、流里有 tool-call-delta、收�
   assert.deepEqual(substitute.args, entry.args, 'the synthesized call args are the evidence')
   assert.match(substitute.preview, /read/, 'preview names the call that ran')
   assert.match(substitute.preview, /\/x/, 'preview carries the bound arguments')
+})
+
+test('P3 entry 在生成器启动前消失：上游在瀑布点同步解析，回退观测同一请求', async () => {
+  const env = setup()
+  seedAnchored(env)
+  let generation = 0
+  const stream = streamHook(env.deps)(
+    { sessionId: SESSION, messages: messagesWith(LONG_ANCHOR) } as Any,
+    () => {
+      const seen = generation
+      return streamOf([{ type: 'text-delta', index: 0, text: `gen${seen}` }])
+    },
+  )
+  // The host advances past the waterfall point before the generator is pulled,
+  // and the entry vanishes in between. The fallback must use the upstream
+  // resolved at the waterfall point, not one resolved lazily inside the
+  // generator body.
+  generation = 1
+  env.queue.clear(SESSION)
+
+  const chunks = await collect(stream)
+
+  assert.deepEqual(chunks, [{ type: 'text-delta', index: 0, text: 'gen0' }])
 })
 
 test('O3 合成用 peek 不 take：条目活到 execute，篡改的派发仍被拒绝', async () => {
@@ -740,11 +927,13 @@ test('O6 compaction 删掉承载消息：锚点原文已不在 → compaction-re
   assert.equal(env.anchors.get(SESSION), undefined)
 })
 
-test('O6 插件自己的投影也保留 head+tail：不得误判成 compaction', async () => {
+test('O6 插件自己的投影（头行 + head + footer + tail）不得误判成 compaction', async () => {
   const env = setup()
   seedAnchored(env)
-  // Apply-mode projection composes head + spill footer + tail; no prune marker.
-  const projected = `${LONG_ANCHOR.slice(0, 120)}\n(Omitted 99 bytes.)\n${LONG_ANCHOR.slice(-120)}`
+  // Apply-mode projection composes the head line, head, spill footer and tail;
+  // no prune marker. The head line is what distinguishes our rewrite from a
+  // different full receipt that happens to share the two windows.
+  const projected = projectedBody(LONG_ANCHOR, 120, 120)
 
   const chunks = await streamOnce(env, { messages: messagesWith(projected) })
   assert.equal(env.host.nextCalls, 0)
@@ -762,8 +951,7 @@ test('O6 窄投影窗口（headChars/tailChars=12）也认作投影，不误判 
   }
   const env = setup({ deps: { config: narrow } })
   seedAnchored(env)
-  const points = Array.from(LONG_ANCHOR)
-  const projected = `${points.slice(0, 12).join('')}\n(Omitted 99 bytes.)\n${points.slice(-12).join('')}`
+  const projected = projectedBody(LONG_ANCHOR, 12, 12)
 
   const chunks = await streamOnce(env, { messages: messagesWith(projected) })
 
@@ -776,8 +964,7 @@ test('O6 代理对边界：投影头尾按码点切片，32 字符探测不切�
   const anchor = `${'a'.repeat(31)}😀${'b'.repeat(40)}😀${'c'.repeat(31)}`
   const env = setup()
   seedAnchored(env, anchor)
-  const points = Array.from(anchor)
-  const projected = `${points.slice(0, 32).join('')}\n(Omitted 40 bytes.)\n${points.slice(-32).join('')}`
+  const projected = projectedBody(anchor, 32, 32, '(Omitted 40 bytes.)')
 
   const chunks = await streamOnce(env, { messages: messagesWith(projected) })
 

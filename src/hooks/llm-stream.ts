@@ -39,15 +39,27 @@
  *    current is what makes the anchors current; only then is detection run
  *    against `options.messages` (obligation 6). A pruned carrier yields
  *    `pruned-reset`, a receipt that is no longer present yields
- *    `compaction-reset`; either clears queue + anchors and passes through.
- * 7. Synthesize: `markSubstituted` -> `{kind:'substitute'}` receipt ->
- *    `peek` (never `take`, obligation 3) -> `yield* synthesizeTurn(entry)`,
- *    **without calling `next()`**. The entry must survive to `tools/execute`,
- *    which is the consumer that enforces the tamper check.
+ *    `compaction-reset`; either clears queue + anchors and passes through. A
+ *    body that only shares the anchor's head and tail is **not** a carrier: it
+ *    must also carry the pruner marker or our projection's head line, or a
+ *    middle edit would pass for the original text.
+ * 7. Step still payable. `post-execute` already took the entry's step, but the
+ *    same decision can be replayed (a retried request, a re-enqueue at one
+ *    step). The per-turn synthesis tally and the budget's paid-step count are
+ *    re-checked immediately before synthesizing; an entry whose step can no
+ *    longer be honoured is dropped through the abandon path (settling its mark
+ *    as discarded) instead of emitting a duplicate `callId`.
+ * 8. Synthesize: `markSubstituted` -> `{kind:'substitute'}` receipt ->
+ *    `peek` (never `take`, obligation 3) -> `yield* synthesizeTurn(entry)`.
+ *    The upstream iterator is resolved synchronously at the waterfall point on
+ *    every path, but the synthesis branch does not consume it. The entry must
+ *    survive to `tools/execute`, which is the consumer that enforces the
+ *    tamper check.
  *
  * The hook never calls `budget.take()`: Task 23b already took the step at
  * `tools/post-execute`, and a second take would charge 2 of 8 per substitution
- * (obligation 2).
+ * (obligation 2). It only reads `count()` to verify that a paid step backs the
+ * synthesis.
  *
  * ## Per-session state (obligation 1)
  *
@@ -112,20 +124,26 @@
  * pending, calls `settle()` and appends `{kind:'substitute-settled'}` with the
  * measured counts (`'unknown'` stays `'unknown'`; it is never interpolated).
  * When a marked entry is abandoned (turn rollover, reset, stopped receipts,
- * lost visibility, a vanished queue entry) the mark is settled and discarded
- * **without** a settlement receipt: no substitution ran, so no saving exists to
- * report (obligation 5).
+ * lost visibility, an unpayable or already-synthesized step, a vanished queue
+ * entry) the mark is settled and discarded **without** a settlement receipt: no
+ * substitution ran, so no saving exists to report (obligation 5).
  *
  * ## Anchor detection and our own projection
  *
  * The host pruner rewrites an oversized receipt in place to
  * `head + PRUNE_MARKER + tail`, and apply-mode projection composes
- * `head + spill footer + tail`. Both preserve the receipt's head and tail, so
- * "the anchor text is not present verbatim" alone would classify our own
- * projection as compaction and disable substitution whenever projection is on.
- * `carriesAnchor` therefore accepts either the exact text or a body holding the
- * anchor's head *and* tail probes; the prune marker then decides
- * `pruned-reset`, and only a body that carries neither is `compaction-reset`.
+ * `head line + head + spill footer + tail`. Both preserve the receipt's head
+ * and tail, so "the anchor text is not present verbatim" alone would classify
+ * our own projection as compaction and disable substitution whenever projection
+ * is on. `carriesAnchor` therefore accepts the exact text, or a body holding
+ * the anchor's head *and* tail probes **plus** one of the two rewrites' own
+ * evidence: the prune marker (which then decides `pruned-reset`) or the
+ * projection head line, whose `output N chars; showing first H and last T`
+ * counts must name this anchor's length and windows. A full receipt with the
+ * same probes but a different middle — a file edited and re-read — carries
+ * neither, so it is a lost anchor (`compaction-reset`) rather than a
+ * substitution against content the model no longer holds.
+ *
  * Probes are measured in code points (a UTF-16 slice can split a surrogate
  * pair) and clamped to the smallest configured projection window, because
  * `resolveConfig` accepts `headChars`/`tailChars` below the probe length and a
@@ -134,8 +152,9 @@
  *
  * Everything here is contained: a foreign store, queue, ledger, clock or
  * resolver can degrade the decision, never throw out of the model request.
- * `resolveStreamPlan` is pure and synchronous; every effect (receipt writes,
- * clears, settlement) happens inside a generator after the decision.
+ * `resolveStreamPlan` is synchronous and writes no receipt; its only state is
+ * the per-turn synthesis tally, and every receipt/queue effect (writes, clears,
+ * settlement) happens inside a generator after the decision.
  *
  * @module dsh-boost/hooks/llm-stream
  */
@@ -440,13 +459,62 @@ function anchorProbe(deps: HookDeps): { head: number; tail: number } {
 }
 
 /**
- * Whether `body` still carries `anchor`, verbatim or as an in-place rewrite.
+ * The head line our own projection writes: `[output N chars; showing first H
+ * and last T]`. The counts use `toLocaleString('en-US')`, hence the commas.
+ */
+const PROJECTION_HEADER = /^\[output ([\d,]+) chars; showing first ([\d,]+) and last ([\d,]+)\]$/
+
+/** One `en-US`-formatted count from a projection head line. */
+function headerCount(raw: string | undefined): number | undefined {
+  if (raw === undefined) return undefined
+  const value = Number(raw.replaceAll(',', ''))
+  return Number.isSafeInteger(value) ? value : undefined
+}
+
+/**
+ * Whether `body` is our own projection of `anchor`.
+ *
+ * A projected receipt is `head line + head + spill footer + tail`. The head
+ * line names the anchor's total code points and both window sizes, and the two
+ * windows are the anchor's own first/last code points. A full receipt that
+ * merely shares the anchor's head and tail cannot produce that line, so this
+ * closes the probe collision without reading the middle (which the projection
+ * removed) and without a new stored field. Old anchors that cannot be verified
+ * this way simply do not match, which fails closed.
+ */
+function ownProjectionCarries(body: string, anchor: string): boolean {
+  const newline = body.indexOf('\n')
+  if (newline === -1) return false
+  const match = PROJECTION_HEADER.exec(body.slice(0, newline))
+  if (match === null) return false
+  const output = headerCount(match[1])
+  const headLen = headerCount(match[2])
+  const tailLen = headerCount(match[3])
+  if (output === undefined || headLen === undefined || tailLen === undefined) return false
+  if (headLen <= 0 && tailLen <= 0) return false
+  const points = Array.from(anchor)
+  if (output !== points.length) return false
+  if (headLen + tailLen >= points.length) return false
+  const head = headLen > 0 ? points.slice(0, headLen).join('') : ''
+  const tail = tailLen > 0 ? points.slice(-tailLen).join('') : ''
+  return body.startsWith(`${match[0]}\n${head}`) && (tailLen === 0 || body.endsWith(tail))
+}
+
+/**
+ * Whether `body` still carries `anchor`, verbatim or as a verified in-place
+ * rewrite.
  *
  * The host pruner replaces the middle of an oversized receipt with
  * `PRUNE_MARKER` while preserving a head and a tail; apply-mode projection
- * composes head + spill footer + tail. Both keep the anchor's beginning and
- * end, so a body holding both probes is the same receipt, rewritten by us or
- * by the host (and the marker then says which).
+ * composes head line + head + spill footer + tail. Both keep the anchor's
+ * beginning and end, so a body holding both probes *and* the rewrite's own
+ * evidence is the same receipt rewritten in place.
+ *
+ * Sharing the two probes alone is not identity: a file edited in the middle and
+ * re-read produces a full receipt with the same 32-character head and tail but
+ * a different body. Accepting it would substitute against content the model no
+ * longer holds, so a probe match must be accompanied by the pruner marker or
+ * our projection's head line. Anything else is a lost anchor (fail closed).
  *
  * Probes are sliced by **code point**, exactly like `truncate`: a UTF-16 slice
  * can end on half a surrogate pair, and a lone surrogate is not a substring a
@@ -470,7 +538,7 @@ function carriesAnchor(
   const start = headLen > 0 ? body.indexOf(head) : 0
   if (headLen > 0 && start === -1) return false
   if (tailLen > 0 && body.indexOf(tail, start + headLen) === -1) return false
-  return true
+  return looksPruned(body) || ownProjectionCarries(body, anchor)
 }
 
 /**
@@ -498,10 +566,16 @@ function anchorResetOf(
   const record: unknown = anchors.anchors
   if (typeof record !== 'object' || record === null) return undefined
 
-  const texts = Object.values(record as Record<string, unknown>).filter(
-    (text): text is string => typeof text === 'string' && text.length > 0,
-  )
-  if (texts.length === 0) return undefined
+  const values = Object.values(record as Record<string, unknown>)
+  if (values.length === 0) return undefined
+  const texts = values.filter((text): text is string => typeof text === 'string' && text.length > 0)
+  if (texts.length === 0) {
+    // An empty anchor is a real value the check skips (it cannot be located in
+    // any message). Any other unverifiable shape — an object from an older or
+    // foreign anchor store — must fail closed instead: treating it as "no
+    // anchors" would substitute on evidence this code cannot read.
+    return values.every((value) => value === '') ? undefined : 'compaction-reset'
+  }
 
   const bodies = messageTexts(messages)
   let compacted = false
@@ -548,6 +622,101 @@ type StreamPlan =
       discardMark?: boolean
     }
   | { kind: 'synthesize'; sessionId: string; entry: PendingEntry }
+
+/**
+ * How many synthesized turns this session has already emitted in one turn.
+ *
+ * `post-execute` takes exactly one step per queue entry, so the budget's
+ * `count()` is the number of steps paid for in the turn; this tally is how many
+ * of them have been spent on synthesis. A second synthesis of one entry would
+ * spend a step the budget never granted. The call ids are kept too: the
+ * deterministic `callIdFor` makes a re-enqueued decision at the same
+ * turn/step/candidate reuse one id, and the host would persist two `tool_use`
+ * blocks with it.
+ */
+interface SynthesisTally {
+  /** Host turn this tally belongs to. */
+  turn: number
+  /** Synthesized turns emitted in `turn`. */
+  count: number
+  /** Call ids already synthesized in `turn`. */
+  callIds: Set<string>
+}
+
+/**
+ * Per-session synthesis history, keyed by `HookDeps` first so two plugin
+ * instances in one process cannot read each other's session. It holds one turn
+ * per session and dies with the assembly; `clearSession` drops the session.
+ */
+const SYNTHESIS_TALLY = new WeakMap<HookDeps, Map<string, SynthesisTally>>()
+
+/** The session's synthesis tally, if this turn has one. */
+function synthesisTallyOf(deps: HookDeps, sessionId: string): SynthesisTally | undefined {
+  try {
+    return SYNTHESIS_TALLY.get(deps)?.get(sessionId)
+  } catch {
+    return undefined
+  }
+}
+
+/** Count one synthesized turn, starting a new tally when the turn changed. */
+function recordSynthesis(deps: HookDeps, sessionId: string, turn: number, callId: string): void {
+  try {
+    let bySession = SYNTHESIS_TALLY.get(deps)
+    if (bySession === undefined) {
+      bySession = new Map()
+      SYNTHESIS_TALLY.set(deps, bySession)
+    }
+    let tally = bySession.get(sessionId)
+    if (tally === undefined || tally.turn !== turn) {
+      tally = { turn, count: 0, callIds: new Set() }
+      bySession.set(sessionId, tally)
+    }
+    tally.count += 1
+    tally.callIds.add(callId)
+  } catch {
+    // A tally miss costs a duplicate guard, never this request.
+  }
+}
+
+/** Drop one session's synthesis history at session end. */
+function forgetSynthesis(deps: HookDeps, sessionId: string): void {
+  try {
+    SYNTHESIS_TALLY.get(deps)?.delete(sessionId)
+  } catch {
+    // Same: the tally is a guard, not a precondition.
+  }
+}
+
+/**
+ * Whether the entry's step can no longer be honoured.
+ *
+ * Two independent facts make a still-live entry unhonourable: its deterministic
+ * call id was already synthesized in this turn (a retry or a re-enqueue at one
+ * step), or the turn's paid steps are already used up by earlier syntheses.
+ * A budget that reports no spend at all is a fixture/legacy shape rather than
+ * proof of a step; the call-id half still applies there.
+ */
+function synthesisBlocked(
+  deps: HookDeps,
+  sessionId: string,
+  entry: PendingEntry,
+  turn: number,
+): boolean {
+  const tally = synthesisTallyOf(deps, sessionId)
+  const current = tally !== undefined && sameTurn(tally.turn, turn) ? tally : undefined
+  if (current !== undefined && current.callIds.has(entry.callId)) return true
+  const budget = sessionBudget(deps, sessionId)
+  if (budget === undefined) return false
+  let spent: number
+  try {
+    spent = budget.count()
+  } catch {
+    return false
+  }
+  if (!Number.isFinite(spent) || spent <= 0) return false
+  return (current?.count ?? 0) >= spent
+}
 
 /**
  * The rule order as pure, synchronous decision logic.
@@ -618,6 +787,20 @@ function resolveStreamPlan(
           turn: turn,
         },
       },
+    }
+  }
+
+  // Re-check the step immediately before synthesizing. The turn/step checks
+  // above validate identity, not spend: a retried or re-enqueued request in the
+  // same turn would otherwise emit a second substitute receipt with the same
+  // call id, bypassing the per-turn budget the decision already consumed. The
+  // entry is dropped through the ordinary abandon path so its usage mark is
+  // settled as discarded rather than left to a later real request.
+  if (synthesisBlocked(deps, sessionId, entry, turn)) {
+    return {
+      kind: 'pass',
+      sessionId,
+      abandon: { entry, clearQueue: true, clearAnchors: true },
     }
   }
 
@@ -881,22 +1064,29 @@ async function* observeBranch(
 /**
  * The synthesized turn.
  *
- * No `next()`: the plugin answers instead of the model. The entry is re-read
- * with `peek` (never `take`) so it survives to `tools/execute`; if it vanished
- * between the synchronous decision and the first generator step, the mark is
- * discarded and the real model answers, because a substitution that cannot be
- * dispatched must not be faked.
+ * The plugin answers instead of the model, so `upstream` is only a fallback:
+ * the hook body resolved it synchronously at the waterfall point, before this
+ * generator runs, and it stays untouched when the entry is still live. The
+ * entry is re-read with `peek` (never `take`) so it survives to
+ * `tools/execute`; if it vanished between the synchronous decision and the
+ * first generator step, the mark is discarded and the real model answers,
+ * because a substitution that cannot be dispatched must not be faked.
+ *
+ * `upstream` is absent only when the host's `next()` itself threw while the
+ * hook body was resolving it; a host that cannot produce an upstream has no
+ * fallback to offer, so the vanished entry ends with an empty stream rather
+ * than a synthesized call no dispatch can check.
  */
 async function* synthesizeBranch(
   deps: HookDeps,
   sessionId: string,
   entry: PendingEntry,
-  next: () => AsyncIterable<StreamChunk>,
+  upstream: AsyncIterable<StreamChunk> | undefined,
 ): AsyncGenerator<StreamChunk> {
   const current = peekPending(deps, sessionId)
   if (current === undefined || current.callId !== entry.callId) {
     settleDiscarded(deps, sessionId)
-    yield* observeBranch(deps, sessionId, next())
+    if (upstream !== undefined) yield* observeBranch(deps, sessionId, upstream)
     return
   }
 
@@ -914,6 +1104,30 @@ async function* synthesizeBranch(
 // ---------------------------------------------------------------------------
 
 /**
+ * Answer a pass decision: abandon what the decision owned, then observe the
+ * real stream.
+ *
+ * `upstream` is resolved by the hook body at the waterfall point; the generator
+ * only delays effects and consumption.
+ */
+function observedPass(
+  deps: HookDeps,
+  plan: Extract<StreamPlan, { kind: 'pass' }>,
+  upstream: AsyncIterable<StreamChunk>,
+): AsyncIterable<StreamChunk> {
+  return (async function* (): AsyncGenerator<StreamChunk> {
+    if (plan.sessionId !== undefined) {
+      // Order matters only for evidence: the discard drops the parked
+      // plan/guards, and `applyAbandon` then clears the rest. Both settle
+      // calls are idempotent.
+      if (plan.discardMark === true) settleDiscarded(deps, plan.sessionId)
+      if (plan.abandon !== undefined) await applyAbandon(deps, plan.sessionId, plan.abandon)
+    }
+    yield* observeBranch(deps, plan.sessionId, upstream)
+  })()
+}
+
+/**
  * Build the `llm/stream` listener.
  *
  * Returns a **synchronous** function returning an `AsyncIterable`; see the
@@ -921,6 +1135,13 @@ async function* synthesizeBranch(
  * `purpose`-tagged call (selector, compaction, session-title) returns `next()`
  * untouched: never observed, never substituted. Every real request is decided
  * synchronously by {@link resolveStreamPlan} and then answered by a generator.
+ *
+ * The upstream iterator is resolved **at the waterfall point on every path**,
+ * before any generator body runs. The host's terminal is a lazy async iterable
+ * (starting it is what calls the model), so resolving it on the synthesis path
+ * costs nothing; it is only consumed if the pending entry vanished and the real
+ * model has to answer. Resolving it lazily inside the generator would resume a
+ * waterfall the host may already have moved past.
  */
 export function streamHook(
   deps: HookDeps,
@@ -950,28 +1171,45 @@ export function streamHook(
     try {
       plan = resolveStreamPlan(deps, options)
     } catch {
-      // A bug in our own decision logic must not take the model request down.
-      return next()
+      // A bug in our own decision logic must not take the model request down,
+      // but it must still take the ordinary pass path: the decision-time mark
+      // has to be discarded here or this real request would settle a
+      // substitution that never ran. Clearing the queue is the same fail-closed
+      // answer — no decision was made.
+      try {
+        plan = passPlan(deps, sessionId, { clearQueue: true, clearAnchors: false }, true)
+      } catch {
+        plan = { kind: 'pass', sessionId, discardMark: true }
+      }
+    }
+
+    // Resolve the upstream iterator before any branch. The real host's terminal
+    // is an async generator, so this starts no model call; it only fixes which
+    // request the fallbacks observe. A host whose `next()` throws was already
+    // failing on the pass path, so that throw is preserved there; the synthesis
+    // path proceeds without a fallback instead.
+    // Count a synthesis decision before the generator runs: an unconsumed
+    // stream or a vanished entry must still not let the same step be
+    // synthesized twice. This runs before `next()` too, so a host whose
+    // terminal throws cannot reopen the same step.
+    if (plan.kind === 'synthesize') {
+      const turn = clockTurnOf(deps, plan.sessionId) ?? turnNumberOf(plan.entry.turn)
+      recordSynthesis(deps, plan.sessionId, turn, plan.entry.callId)
+    }
+
+    let upstream: AsyncIterable<StreamChunk> | undefined
+    try {
+      upstream = next()
+    } catch (error) {
+      if (plan.kind !== 'synthesize') throw error
+      return synthesizeBranch(deps, plan.sessionId, plan.entry, undefined)
     }
 
     if (plan.kind === 'synthesize') {
-      return synthesizeBranch(deps, plan.sessionId, plan.entry, next)
+      return synthesizeBranch(deps, plan.sessionId, plan.entry, upstream)
     }
 
-    // Call `next()` synchronously, exactly like the pass-through stub: the
-    // returned generator only delays consumption, not the waterfall step.
-    const upstream = next()
-    const observed = async function* (): AsyncGenerator<StreamChunk> {
-      if (plan.sessionId !== undefined) {
-        // Order matters only for evidence: the discard drops the parked
-        // plan/guards, and `applyAbandon` then clears the rest. Both settle
-        // calls are idempotent.
-        if (plan.discardMark === true) settleDiscarded(deps, plan.sessionId)
-        if (plan.abandon !== undefined) await applyAbandon(deps, plan.sessionId, plan.abandon)
-      }
-      yield* observeBranch(deps, plan.sessionId, upstream)
-    }
-    return observed()
+    return observedPass(deps, plan, upstream)
   }
 }
 
@@ -990,6 +1228,7 @@ export function clearSession(deps: HookDeps, sessionId: string): void {
   clearPending(deps, sessionId)
   clearAnchors(deps, sessionId)
   clearPlan(deps, sessionId)
+  forgetSynthesis(deps, sessionId)
   try {
     // Projection locators are session-scoped evidence: a disposed session must
     // not leave its spill paths behind for the next session id to inherit.

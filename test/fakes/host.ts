@@ -10,23 +10,23 @@
  * records handlers, `hooked()` lists the mounted names, and
  * `callHook(name, args, next)` runs them in registration order. Every handler
  * receives the **same original args**, followed by a **zero-argument** `next()`
- * that resumes the chain; only the return value is transformable. The terminal
- * `next()` increments `nextCalls`, so a pass-through is observable and a hook
- * that synthesizes a turn (returns its own iterable without calling `next()`)
- * leaves `nextCalls` at 0.
+ * that resumes the chain; only the return value is transformable. For every
+ * event except `llm/stream`, the terminal `next()` increments `nextCalls`, so a
+ * pass-through is observable.
  *
  * `llm/stream` is the one **synchronous** waterfall: `next()` returns the
  * downstream `AsyncIterable` directly, and an `async` listener would hand the
  * host a `Promise<AsyncIterable>` (appendix §7). `runStream` runs that chain
- * synchronously; `stream()` uses it and can therefore classify a pass-through
- * the moment the hook returns.
+ * synchronously.
  *
  * `stream(sessionId, options?)` is the driver a test uses to simulate a real
  * model request: it runs the registered `llm/stream` waterfall with
  * `{ ...options, sessionId }` and records the resulting iterable for
- * `lastStream()`. When the waterfall never calls `next()`, the turn was
- * synthesized, so the fake increments `synthesized` itself — a test never has
- * to bump that counter by hand.
+ * `lastStream()`. Its terminal mirrors the real host's lazy async generator:
+ * resolving `next()` starts nothing, and `nextCalls`/the model stream advance
+ * only when the returned iterator is pulled. A turn that completes without
+ * pulling the upstream was synthesized, so the fake increments `synthesized`
+ * itself — a test never has to bump that counter by hand.
  *
  * Behaviour that no test exercises yet is the smallest honest implementation:
  * `receipts` is an empty array, `llm.stream` yields an empty stream, and
@@ -218,20 +218,33 @@ export function fakeHost(overrides: Record<string, unknown> = {}): any {
     // --- stream driver: runs the llm/stream waterfall like the real host ---
     stream(sessionId: string, options: Partial<GenerateOptions> = {}): AsyncIterable<StreamChunk> {
       const request = { ...options, sessionId } as GenerateOptions
-      let passedThrough = false
+      // The real host's terminal is an async generator (`adapterStream`): calling
+      // `next()` only creates it, and the model request starts when it is first
+      // pulled. The hook now resolves `next()` eagerly on every path, so the
+      // counters must follow consumption, not resolution.
+      let upstreamStarted = false
       const result = host.runStream('llm/stream', [request], () => {
-        passedThrough = true
-        host.nextCalls += 1
-        return host.llm.stream(request)
+        return (async function* () {
+          upstreamStarted = true
+          host.nextCalls += 1
+          yield* host.llm.stream(request)
+        })()
       })
       if (typeof (result as AsyncIterable<StreamChunk> | undefined)?.[Symbol.asyncIterator] !== 'function') {
         throw new Error('fakeHost: an llm/stream listener must return an AsyncIterable synchronously')
       }
-      // A hook that returns without calling `next()` substituted its own
-      // turn, so the fake owns the count rather than each test bumping it.
-      // The decision is synchronous by contract, so it is known right here.
-      if (!passedThrough) host.synthesized += 1
-      last = result as AsyncIterable<StreamChunk>
+      // A turn is synthesized when the returned stream completes without ever
+      // pulling the upstream iterator; the fake owns that count rather than each
+      // test bumping it. It is recorded at completion because eager resolution
+      // alone no longer proves the model answered.
+      const observed = (async function* (): AsyncGenerator<StreamChunk> {
+        try {
+          yield* (result as AsyncIterable<StreamChunk>)
+        } finally {
+          if (!upstreamStarted) host.synthesized += 1
+        }
+      })()
+      last = observed
       return last
     },
     lastStream(): AsyncIterable<StreamChunk> | undefined {

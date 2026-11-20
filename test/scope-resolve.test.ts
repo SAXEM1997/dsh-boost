@@ -224,7 +224,11 @@ test('fakeHost 暴露后续任务依赖的成员，未用到的保持最小诚�
   const chunks = host.stream('s1', {})
   assert.equal(typeof chunks[Symbol.asyncIterator], 'function')
   assert.equal(host.lastStream(), chunks)
-  // 没有监听器时直通 llm.stream：终态 next 计一次，且不算合成回合。
+  // 没有监听器时直通 llm.stream：终态 next 是惰性的，只有被消费才算一次模型请求。
+  assert.equal(host.nextCalls, 0)
+  for await (const _chunk of chunks) {
+    // drain: the upstream is lazy, exactly like the real host's async generator
+  }
   assert.equal(host.nextCalls, 1)
   assert.equal(host.synthesized, 0)
 })
