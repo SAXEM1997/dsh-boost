@@ -191,3 +191,14 @@ test('shouldTruncate 与 truncate 的判定处处一致（规则 4、5）', () =
     )
   }
 })
+
+test('tailChars: 0 不把整段文本当作 tail 复制（row 69）', () => {
+  const text = `${'h'.repeat(5)}${'o'.repeat(95)}`
+  const t = truncate(text, { triggerChars: 10, headChars: 5, tailChars: 0 })
+  assert.ok(t)
+  assert.equal(t.tail, '')
+  assert.equal(t.head, 'hhhhh')
+  assert.equal(t.omittedCodePoints, 95)
+  assert.equal(t.omittedBytes, Buffer.byteLength('o'.repeat(95), 'utf8'))
+  assert.equal(t.after, `${renderHeadLine(t)}\nhhhhh\n`)
+})

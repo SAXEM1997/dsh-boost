@@ -51,7 +51,10 @@ export function canonicalise(
       typeof block === 'object' &&
       block !== null &&
       (block as { type?: unknown }).type === 'text' &&
-      (block as { text?: unknown }).text !== undefined,
+      // `text` must actually be a string. `join` would silently coerce `null`
+      // to '' and `42` to '42', so a malformed renderer could inject content
+      // no text block declared (review row 64).
+      typeof (block as { text?: unknown }).text === 'string',
   )
   const text = textBlocks.map((block) => block.text).join('')
   return { text, isError, empty: text.length === 0, textBlocks: textBlocks.length }

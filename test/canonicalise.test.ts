@@ -53,3 +53,20 @@ test('非数组 content 视为空回执，不抛错', () => {
     assert.equal(r.textBlocks, 0)
   }
 })
+
+test('非字符串 text 不计入 textBlocks，也不被 join 强制转换（row 64）', () => {
+  const r = canonicalise(
+    [
+      { type: 'text', text: null as any },
+      { type: 'text', text: 42 as any },
+      { type: 'text', text: {} as any },
+      { type: 'text', text: 'kept' },
+    ],
+    false,
+  )
+  assert.equal(r.text, 'kept')
+  assert.equal(r.textBlocks, 1)
+  // `Array.join` would turn 42 into "42" and null into ""; neither is content
+  // the host declared, so neither may reach a guard or a receipt.
+  assert.equal(r.text.includes('42'), false)
+})

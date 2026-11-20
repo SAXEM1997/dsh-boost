@@ -105,7 +105,7 @@ test('$single 要求整段恰为单元素单引号数组', () => {
   assert.equal(extractField("  ['v']  ", '$single'), 'v')
   assert.equal(extractField("['v'] trailing", '$single'), undefined)
   assert.equal(extractField('["v"]', '$single'), undefined)
-  assert.equal(extractField("['']", '$single'), '')
+  assert.equal(extractField("['']", '$single'), undefined)
 })
 
 test('$single 的值不能跨行（与另外两种形式一致）', () => {
@@ -299,4 +299,12 @@ test('一个树里只要有一处失败，整份参数都不产出', () => {
     bindArgs(args, new Map([['A', r('v')], ['B', r('a b')]])),
     { ok: false, reason: 'ambiguous' },
   )
+})
+
+test('$single 拒绝空捕获，与标识符的空值规则一致（row 65）', () => {
+  assert.equal(extractField("['']", '$single'), undefined)
+  assert.equal(extractField("[' ']", '$single'), ' ')
+  // A bare empty identifier is already rejected; the whole-text form must not
+  // be the one place an empty argument can reach a tool.
+  assert.equal(extractField('name: ""', 'name'), undefined)
 })

@@ -81,7 +81,9 @@ export function truncate(text: string, params: ProjectionParams): Truncation | n
   // Slicing the code-point array cannot split a surrogate pair; string
   // indexing could.
   const head = codePoints.slice(0, params.headChars).join('')
-  const tail = codePoints.slice(-params.tailChars).join('')
+  // `slice(-0)` is `slice(0)`, i.e. the whole text: a configured zero tail must
+  // be no tail, not a duplicate of the receipt (review row 69).
+  const tail = params.tailChars === 0 ? '' : codePoints.slice(-params.tailChars).join('')
   const omittedCodePoints = codePoints.length - params.headChars - params.tailChars
   const omittedBytes = beforeBytes - Buffer.byteLength(head, 'utf8') - Buffer.byteLength(tail, 'utf8')
 

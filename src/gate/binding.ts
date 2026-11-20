@@ -157,8 +157,13 @@ function scalarField(text: string): string | undefined {
  */
 function singleField(text: string): string | undefined {
   const match = SINGLE.exec(text.trim())
-  if (match === null || LINE_TERMINATOR.test(match[1])) return undefined
-  return match[1]
+  if (match === null) return undefined
+  const value = match[1]
+  // An empty capture is never a useful argument (it reaches a tool as
+  // `path: ""`), and the identifier form already refuses empty values; the
+  // whole-text form must apply the same rule (review row 65).
+  if (value.length === 0 || LINE_TERMINATOR.test(value)) return undefined
+  return value
 }
 
 /**
