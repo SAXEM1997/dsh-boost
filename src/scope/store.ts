@@ -67,6 +67,7 @@ import {
   ERR_SCOPE_PARSE_FAILED,
   ERR_SCOPE_READ_FAILED,
   ERR_SCOPE_REVISION_CONFLICT,
+  ERR_SCOPE_UNKNOWN_VERSION,
   parseScope,
   parseVersionOneScope,
 } from './doc.js'
@@ -278,13 +279,14 @@ export class ScopeStore {
    * `updatedAt` now) and leaves it cached.
    *
    * A missing file is a first write: the base is `DEFAULT_SCOPE` at revision 0,
-   * so it succeeds only when the caller passes 0. A corrupt or version 1 file
-   * is also based on the strict default, which is how `boost scope set`
-   * explicitly upgrades a version 1 document. A **future** version (a numeric
-   * version greater than 2) is refused with `ERR_SCOPE_FUTURE_VERSION` before
-   * the mutation: the newer field set cannot be represented here, so rewriting
-   * it would silently drop configuration. An existing file that cannot be read
-   * at all is `ERR_SCOPE_READ_FAILED` — never overwritten blindly.
+   * so it succeeds only when the caller passes 0. A version 1 file is based on
+   * the fields it actually carries, which is how `boost scope set` explicitly
+   * upgrades it. Every other present-but-unusable document is refused before
+   * the mutation: a **future** version (a numeric version greater than 2) with
+   * `ERR_SCOPE_FUTURE_VERSION`, a non-document with
+   * `ERR_SCOPE_PARSE_FAILED`, a missing or non-numeric version with
+   * `ERR_SCOPE_UNKNOWN_VERSION`, and an unreadable file with
+   * `ERR_SCOPE_READ_FAILED`. Each refusal leaves the file byte-identical.
    */
   async write(
     mutate: (doc: ScopeDoc) => ScopeDoc,
@@ -317,10 +319,30 @@ export class ScopeStore {
           const detail = current.cause === undefined ? 'unknown read error' : messageOf(current.cause)
           throw scopeError(ERR_SCOPE_READ_FAILED, `cannot read ${this.file}: ${detail}`)
         }
+        // Both remaining codes mean the bytes are present but unusable. Key on
+        // the code, not on this branch: only a v1 document (whose `upgrade`
+        // `decode` supplied) has recognised fields worth preserving, and only
+        // its documented `scope-set` upgrade may rewrite the file. A parse
+        // failure has no fields at all, and a missing or non-numeric version is
+        // equally unrepresentable; basing a write on DEFAULT_SCOPE for either
+        // would silently replace the user's document, which `docs/RELEASE.md`
+        // promises not to do ("写拒绝" / "写不盲改").
+        if (current.code === ERR_SCOPE_PARSE_FAILED) {
+          throw scopeError(
+            ERR_SCOPE_PARSE_FAILED,
+            `refusing to rewrite ${this.file}: it is not a scope document`,
+          )
+        }
+        if (current.upgrade === undefined) {
+          throw scopeError(
+            ERR_SCOPE_UNKNOWN_VERSION,
+            `refusing to rewrite ${this.file}: it declares an unknown scope version`,
+          )
+        }
         // A v1 file was read as DEFAULT_SCOPE at revision 0, but its recognised
         // fields are the user's configuration: base the upgrade on those so a
         // partial `scope-set` cannot silently drop `global`/`workspaceIds`.
-        base = current.upgrade ?? current.doc
+        base = current.upgrade
       }
       if (base.revision !== baseRevision) {
         throw scopeError(

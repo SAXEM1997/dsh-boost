@@ -437,6 +437,95 @@ test('future version 文件只读降级且拒绝写入，内容逐字保留', as
   assert.deepEqual(JSON.parse(await readFile(file, 'utf8')), future)
 })
 
+test('不可解析的 scope 文件写拒绝且逐字保留（ERR_SCOPE_PARSE_FAILED）', async () => {
+  // Corrupt JSON, `null`, a scalar and an array all reach the same arm. None
+  // carries recognised field values, so basing a write on DEFAULT_SCOPE would
+  // replace whatever the user had; the write must refuse and leave the bytes.
+  const cases = ['{ not json\n', 'null\n', '"global"\n', '[]\n']
+  for (const text of cases) {
+    const dir = await tempDir()
+    const file = join(dir, 'scope.json')
+    await writeFile(file, text)
+    const before = await readFile(file)
+    const s = new ScopeStore(dir)
+
+    await assert.rejects(
+      () => s.write(d => ({ ...d, mode: 'global' }), 0),
+      (error: unknown) => {
+        const scopeError = error as NodeJS.ErrnoException
+        assert.equal(scopeError.code, 'ERR_SCOPE_PARSE_FAILED')
+        assert.match(scopeError.message, /ERR_SCOPE_PARSE_FAILED/)
+        return true
+      },
+      `write must refuse ${JSON.stringify(text)}`,
+    )
+    assert.deepEqual(await readFile(file), before, `${JSON.stringify(text)} must be byte-identical`)
+    assert.equal(existsSync(join(dir, 'scope.lock')), false, 'the refusal must release the lock')
+    assert.deepEqual((await readdir(dir)).filter(name => name.endsWith('.tmp')), [])
+
+    // The lock is gone, not stranded: after repairing the file the same store
+    // can write again immediately (a leftover lock would be ERR_SCOPE_LOCKED).
+    await writeFile(file, JSON.stringify({ version: 2, revision: 0 }))
+    assert.equal((await s.write(d => ({ ...d, mode: 'global' }), 0)).revision, 1)
+  }
+})
+
+test('版本缺失或非数值时写拒绝且逐字保留（ERR_SCOPE_UNKNOWN_VERSION 无 upgrade）', async () => {
+  // `parseVersionOneScope` answers only for an exact `version: 1`; every other
+  // unknown version has no field values to carry forward. The review's
+  // reproduction is the first case: a rewrite used to drop `workspaceIds`.
+  const cases = [
+    '{"mode":"global","workspaceIds":["w1"]}',
+    '{"version":"2","mode":"global","workspaceIds":["w1"]}',
+    '{"version":0,"mode":"global","workspaceIds":["w1"]}',
+  ]
+  for (const text of cases) {
+    const dir = await tempDir()
+    const file = join(dir, 'scope.json')
+    await writeFile(file, text)
+    const before = await readFile(file)
+    const s = new ScopeStore(dir)
+
+    await assert.rejects(
+      () => s.write(d => ({ ...d, mode: 'selected' }), 0),
+      (error: unknown) => {
+        const scopeError = error as NodeJS.ErrnoException
+        assert.equal(scopeError.code, 'ERR_SCOPE_UNKNOWN_VERSION')
+        assert.match(scopeError.message, /ERR_SCOPE_UNKNOWN_VERSION/)
+        return true
+      },
+      `write must refuse ${JSON.stringify(text)}`,
+    )
+    assert.deepEqual(await readFile(file), before, `${JSON.stringify(text)} must be byte-identical`)
+    assert.equal(existsSync(join(dir, 'scope.lock')), false, 'the refusal must release the lock')
+    assert.deepEqual((await readdir(dir)).filter(name => name.endsWith('.tmp')), [])
+
+    await writeFile(file, JSON.stringify({ version: 2, revision: 0 }))
+    assert.equal((await s.write(d => ({ ...d, mode: 'selected' }), 0)).revision, 1)
+  }
+})
+
+test('v1 文件带 upgrade 仍走显式升级并保留 workspaceIds（不得误伤升级路径）', async () => {
+  const dir = await tempDir()
+  const file = join(dir, 'scope.json')
+  await writeFile(file, JSON.stringify({ version: 1, mode: 'global', workspaceIds: ['w1'] }))
+  const s = new ScopeStore(dir)
+
+  const before = await s.read()
+  assert.equal(before.code, 'ERR_SCOPE_UNKNOWN_VERSION')
+
+  // `scope-set` is the documented upgrade route: it must still pass.
+  const upgraded = await s.write(d => ({ ...d, projection: 'off' }), 0)
+  assert.equal(upgraded.version, 2)
+  assert.equal(upgraded.revision, 1)
+  assert.equal(upgraded.mode, 'global')
+  assert.deepEqual(upgraded.workspaceIds, ['w1'])
+
+  const after = await s.read()
+  assert.equal(after.degraded, undefined)
+  assert.deepEqual(after.doc, upgraded)
+})
+
 test('写失败的错误在 message 与 .code 上带同一个稳定码', async () => {
   const dir = await tempDir()
   const s = new ScopeStore(dir)
