@@ -240,16 +240,22 @@ locator 与数字位数浮动。
         historyTurns: 5
 ```
 
-宿主判定“这一行已装配”的条件是两个**独立**的等式：
+宿主对顶层 `insert` 行**不做任何 id/name 匹配**：加载器（cordis-plugin-include 的
+`applyEntryPatches`）直接把行 push 进装配计划，不存在「匹配不上就静默跳过」的路径。这两个
+等式另有用途——**plugin manager 用它们把运行中的 entry 归属到本 bundle 的行**（`dsh-plugin-manager`
+的 in-use / 可寻址判定，见 `listPlugins` / `removeBundle`）：
 
 ```text
 row.id   === entry.options.id
 row.name === entry.options.name
 ```
 
-`id` 与 `name` **不需要彼此相等**：宿主自己的 `dsh-mcp-btwy` patch 就写成 `id: dsh-mcp-server`、
-`name: dsh-mcp-btwy`。本包让四个名字全部保持为 `dsh-boost`（npm 包名、导出的插件 `name`、
-patch 行的 `id` 与 `name`）。任一等式不成立，宿主会**静默跳过**该行，不报错。
+`id` 与 `name` **不需要彼此相等**：第三方插件 `dsh-mcp-btwy`（用户 profile 里自装的 GitHub
+包，不是宿主自带的 patch）就写成 `id: dsh-mcp-server`、`name: dsh-mcp-btwy`。本包让四个名字
+全部保持为 `dsh-boost`（npm 包名、导出的插件 `name`、patch 行的 `id` 与 `name`），这样
+plugin manager 才能把运行中的 entry 认成本包的行、通过 profile patch 寻址与移除；等式不成
+立时行**照常装配**，只是在管理面变成不可寻址（读写状态、移除判定都会失灵），而 `name` 指到
+不存在的包时加载会**响亮地**失败，不是静默。
 
 ## 状态、回滚与卸载
 

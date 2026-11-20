@@ -12,11 +12,16 @@
 # window. To disable one, raise its `triggerChars` above every receipt (the
 # projection byte cap is 256 KiB, so 300000 prevents it from triggering).
 #
-# The host appends top-level `insert` rows and treats a row as installed only
-# when `row.id === entry.options.id && row.name === entry.options.name`; a
-# mismatch is skipped silently. The two equalities are independent, so `id`
-# and `name` need not match each other. This package keeps all four identical:
-# package name, exported plugin name, row id, and row name are `dsh-boost`.
+# The loader pushes top-level `insert` rows into the assembly plan without any
+# id/name matching (cordis-plugin-include `applyEntryPatches`); nothing is
+# "silently skipped" at load time. The `row.id === entry.options.id &&
+# row.name === entry.options.name` equalities are the plugin manager's in-use /
+# addressable attribution (dsh-plugin-manager `listPlugins` / `removeBundle`):
+# they decide whether a running entry is recognised as this bundle's row and
+# can be addressed or removed through the profile patch. The two equalities
+# are independent, so `id` and `name` need not match each other; keeping all
+# four identical (package name, exported plugin name, row id, row name =
+# `dsh-boost`) keeps the row addressable in the management plane.
 
 - insert:
     - id: dsh-boost

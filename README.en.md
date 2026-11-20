@@ -274,17 +274,26 @@ footer, so the shadow account's `after` is a lower bound; the apply path re-chec
         historyTurns: 5
 ```
 
-The host treats a row as installed when two **independent** equalities hold:
+The host performs **no id/name matching on top-level `insert` rows**: the loader
+(cordis-plugin-include's `applyEntryPatches`) pushes them straight into the assembly plan —
+there is no "mismatch means the row is silently skipped" path. The two equalities serve another
+purpose: **the plugin manager uses them to attribute a running entry to this bundle's row** (the
+in-use / addressable determination in `dsh-plugin-manager`, see `listPlugins` / `removeBundle`):
 
 ```text
 row.id   === entry.options.id
 row.name === entry.options.name
 ```
 
-`id` and `name` do **not** have to equal each other: the host's own `dsh-mcp-btwy` patch uses
+`id` and `name` do **not** have to equal each other: the third-party plugin `dsh-mcp-btwy` (a
+GitHub package installed into the user's profile, not a patch the host ships) uses
 `id: dsh-mcp-server` and `name: dsh-mcp-btwy`. This package keeps all four names identical:
 `dsh-boost` is the npm package name, the exported plugin `name`, and the patch row's `id` and
-`name`. If either equality fails, the host **skips the row silently**; there is no error.
+`name`, so the plugin manager can attribute the running entry to this bundle and address or
+remove it through the profile patch. When an equality fails the row **still assembles** — it
+only becomes unaddressable in the management plane (its read/write state and removal detection
+break) — and a `name` pointing at a nonexistent package fails the load **loudly**, not
+silently.
 
 ## State, rollback, and removal
 
