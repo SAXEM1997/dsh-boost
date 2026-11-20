@@ -266,7 +266,7 @@ test('O4 commit 后计划移除该候选；未消费会重复 commit（此测试
   )
 })
 
-test('O4 ask-selector 保留计划、不消费、不入队（23c 的 seam）', async () => {
+test('O4 ask-selector 无 llm/route 时只记 selector-unavailable，不猜、不消费', async () => {
   const env = setup()
   env.plans.set(SESSION, {
     goal: 'g',
@@ -275,11 +275,15 @@ test('O4 ask-selector 保留计划、不消费、不入队（23c 的 seam）', a
 
   await runPost(env.host, 'TRIGGER')
 
-  assert.equal(env.queue.peek(SESSION), undefined, 'the selector call belongs to 23c')
+  assert.equal(env.queue.peek(SESSION), undefined, 'without a selector seam nothing may be queued')
   assert.deepEqual(
     env.plans.get(SESSION)?.steps.map((s: Any) => s.id),
     ['A', 'B'],
-    'ask-selector must keep the whole plan',
+    'an abstention must keep the whole plan',
+  )
+  assert.ok(
+    env.receipts.some((r) => r.kind === 'skip' && r.code === 'selector-unavailable'),
+    'the missing seam must be recorded, not guessed',
   )
 })
 

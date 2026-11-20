@@ -75,7 +75,7 @@ import { DEFAULT_CONFIG } from '../config.js'
 import { decide } from '../gate/decide.js'
 import { alreadySpilled, looksPruned } from '../gate/invalidate.js'
 import type { AnchorStore, ReceiptAnchors } from '../gate/invalidate.js'
-import type { Plan } from '../gate/plan.js'
+import type { Candidate, Plan } from '../gate/plan.js'
 import { PROTOCOL_NAME, PROTOCOL_ORDER, PROTOCOL_TEXT } from '../prompt/protocol.js'
 import { projectApply, projectShadow } from '../projection/apply.js'
 import type { FormatFooter, ProjectionMode, SpillBackend, SpillHandle } from '../projection/apply.js'
@@ -85,6 +85,8 @@ import type { ReceiptStore } from '../receipts/store.js'
 import { DEFAULT_SCOPE, isVisible } from '../scope/doc.js'
 import type { ScopeDoc } from '../scope/doc.js'
 import type { ScopeStore } from '../scope/store.js'
+import { choose } from '../selector/jev.js'
+import type { LlmLike } from '../selector/jev.js'
 import type { AgentLike, BoostConfig, PluginContext, ToolFamily } from '../types.js'
 import type { TurnClock } from './clock.js'
 import { rejectIfTampered } from './execute.js'
@@ -113,6 +115,13 @@ type ReceiptInput = Parameters<ReceiptStore['append']>[0]
  * every write tool stay out: they have no deterministic read-only judgement.
  */
 export const SUBSTITUTION_WHITELIST: ReadonlySet<string> = new Set(['read', 'grep', 'glob'])
+
+/** The route an `ask-selector` request inherits from the boundary request. */
+export interface SelectorRoute {
+  provider: string
+  model: string
+  reasoningEffort?: string
+}
 
 /** The dependencies the mounts read; Task 23c constructs the whole set once. */
 export interface HookDeps {
@@ -164,6 +173,24 @@ export interface HookDeps {
    * `agent/request` payload, and passes it here.
    */
   sessions?: SessionRuntime
+  /**
+   * The host LLM service, used only for the `ask-selector` call.
+   *
+   * Optional so a minimal assembly (or a unit test of the decision path)
+   * degrades to a record-only abstention rather than crashing. The selector
+   * request carries `purpose: 'boost-selector'`, which the frozen stream hook
+   * lets through untouched (Task 23c-2).
+   */
+  llm?: LlmLike
+  /**
+   * The effective provider/model of the session's latest model request.
+   *
+   * The selector request must inherit the boundary request's route; this hook
+   * has no `GenerateOptions` of its own, so 23c-2 captures it from the
+   * `agent/request` waterfall and exposes it here. Missing means the selector
+   * cannot run and `ask-selector` records an abstention.
+   */
+  selectorRoute?: (sessionId: string) => SelectorRoute | undefined
   /** Parsed plans per session, written by 23c's stream hook. */
   plans?: Map<string, Plan>
   /**
@@ -762,20 +789,114 @@ function substitutableSession(deps: HookDeps, sessionId: string, doc: ScopeDoc):
 }
 
 /**
+ * A selector-facing summary of one already-bound candidate.
+ *
+ * The selector only needs to tell candidates apart; the args are included so
+ * two calls to the same tool with different paths are distinguishable. The
+ * bound tree is safe to show (it is what will run) and bounded so one huge
+ * argument cannot dominate the selector prompt.
+ */
+function selectorSummary(candidate: Candidate): string {
+  let args = ''
+  try {
+    args = JSON.stringify(candidate.args) ?? ''
+  } catch {
+    // A model-written plan is already JSON, but the summary is evidence-shaped
+    // and must not make the selector call throw.
+  }
+  const text = `${candidate.tool} ${args}`.trim()
+  const points = Array.from(text)
+  return points.length > 200 ? `${points.slice(0, 200).join('')}…` : text
+}
+
+/**
+ * Ask the selector to pick one of `decision.candidates` and return that same
+ * decision candidate, whose `args` are already bound.
+ *
+ * Never throws and never guesses. A missing LLM seam, a missing route, an
+ * abstention or a thrown call all leave the plan untouched and write one
+ * `skip` receipt explaining why; the next post-execute may try again. The
+ * `SELECTOR_PURPOSE` marker is set by `choose` itself, so the frozen stream
+ * hook can recognize and pass the aux request through.
+ */
+async function chooseCandidate(
+  deps: HookDeps,
+  ctx: DecisionContext,
+  candidates: readonly Candidate[],
+): Promise<Candidate | undefined> {
+  const llm = deps.llm
+  if (llm == null || typeof llm.stream !== 'function') {
+    await appendReceipt(deps, ledgerEntry(ctx, 'skip', 'selector-unavailable', { stepId: 'root' }))
+    return undefined
+  }
+
+  let route: SelectorRoute | undefined
+  try {
+    route = deps.selectorRoute?.(ctx.sessionId)
+  } catch {
+    route = undefined
+  }
+  if (
+    route === undefined ||
+    typeof route.provider !== 'string' ||
+    typeof route.model !== 'string'
+  ) {
+    await appendReceipt(deps, ledgerEntry(ctx, 'skip', 'selector-unavailable', { stepId: 'root' }))
+    return undefined
+  }
+
+  try {
+    const result = await choose({
+      llm,
+      provider: route.provider,
+      model: route.model,
+      ...(typeof route.reasoningEffort === 'string'
+        ? { reasoningEffort: route.reasoningEffort }
+        : {}),
+      candidates: candidates.map((candidate) => ({
+        id: candidate.id,
+        summary: selectorSummary(candidate),
+      })),
+      receiptText: ctx.receipt.text,
+      maxTokens: deps.config.selector.maxTokens,
+    })
+    if ('choice' in result) {
+      // `candidates` are the decision's copies: their args are the bound tree.
+      return candidates.find((candidate) => candidate.id === result.choice)
+    }
+    await appendReceipt(
+      deps,
+      ledgerEntry(ctx, 'skip', 'selector-abstain', { stepId: 'root', reason: result.abstain }),
+    )
+    return undefined
+  } catch {
+    await appendReceipt(
+      deps,
+      ledgerEntry(ctx, 'skip', 'selector-abstain', { stepId: 'root', reason: 'error' }),
+    )
+    return undefined
+  }
+}
+
+/**
  * The substitution decision and its side effects.
  *
  * The fixed order is the plan's: existence of a plan and a receipt first, then
  * `worthSubstituting`, then `budget.take()`. Nothing below spends budget on a
  * decision that will not be dispatched.
  *
- * `ask-selector` is Task 23c's seam: this hook keeps the plan untouched and
- * performs no selector call (the selector is an LLM request, and this task owns
- * no stream hook). `fallback` records the decision code and leaves the pending
- * entry alone: this invocation has enqueued nothing, so any entry it finds
- * belongs to another call, and clearing it would cancel a live substitution in
- * a multi-call step. A commit consumes the candidate and, outside shadow mode,
- * parks the substituted call for `tools/execute`; the entry is dropped at turn
- * rollover or on a reset.
+ * `ask-selector` is fulfilled here since Task 23c-2: the decision carries only
+ * already-bound candidates, so the selector's choice is committed from
+ * `decision.candidates[].args` — never from `plan.steps[i].args`, which still
+ * holds `$public` templates. The selector call is the plugin's own aux request
+ * (`purpose: 'boost-selector'`), so the frozen stream hook passes it through.
+ * A missing route or a missing LLM is a record-only abstention, never a guess.
+ * `fallback` records the decision code and leaves the pending entry alone: this
+ * invocation has enqueued nothing, so any entry it finds belongs to another
+ * call, and clearing it would cancel a live substitution in a multi-call step.
+ * A commit consumes the candidate and, outside shadow mode, parks the
+ * substituted call for `tools/execute`; the entry is dropped at turn rollover
+ * or on a reset.
  */
 async function decideSubstitution(
   deps: HookDeps,
@@ -797,23 +918,31 @@ async function decideSubstitution(
     return { shadowCommitted: false }
   }
 
-  if (decision.kind === 'ask-selector') {
-    // Seam for Task 23c: the selector call and the chosen candidate's
-    // `candidates[i].args` are stream-hook work. Keep the plan so the next
-    // decision sees the same candidates.
-    return { shadowCommitted: false }
-  }
+  let candidate: Candidate | undefined
+  let boundArgs: Record<string, unknown> | undefined
+  let candidateId: string | undefined
 
-  if (decision.kind === 'fallback') {
+  if (decision.kind === 'ask-selector') {
+    // The decision's candidates already carry the bound trees; committing from
+    // the plan here would dispatch a `$public` template.
+    const chosen = await chooseCandidate(deps, ctx, decision.candidates)
+    if (chosen === undefined) return { shadowCommitted: false }
+    candidate = chosen
+    boundArgs = chosen.args
+    candidateId = chosen.id
+  } else if (decision.kind === 'fallback') {
     // This invocation enqueued nothing, so any pending entry belongs to another
     // call in the step; cancelling it would leave the budget spent and usage
     // marked for a substitution that never runs (review F2).
     await appendReceipt(deps, ledgerEntry(ctx, 'skip', decision.code, { stepId: 'root' }))
     return { shadowCommitted: false }
+  } else {
+    candidate = plan.steps.find((step) => step.id === decision.candidateId)
+    boundArgs = decision.args
+    candidateId = decision.candidateId
   }
 
-  const candidate = plan.steps.find((step) => step.id === decision.candidateId)
-  if (candidate === undefined) {
+  if (candidate === undefined || boundArgs === undefined || candidateId === undefined) {
     // decide only commits its own plan's ids; this is containment, not a path.
     await appendReceipt(deps, ledgerEntry(ctx, 'skip', 'no-candidate', { stepId: 'root' }))
     return { shadowCommitted: false }
@@ -836,14 +965,14 @@ async function decideSubstitution(
       deps,
       ledgerEntry(ctx, 'shadow', 'ok', {
         decision: 'commit',
-        candidateId: decision.candidateId,
+        candidateId,
         admitted: admittedFor(deps, ctx.sessionId, plan),
         whitelisted: SUBSTITUTION_WHITELIST.has(candidate.tool),
         stepId: 'root',
-        args: decision.args,
+        args: boundArgs,
       }),
     )
-    consumePlan(deps, ctx.sessionId, decision.candidateId)
+    consumePlan(deps, ctx.sessionId, candidateId)
     return { shadowCommitted: true }
   }
 
@@ -875,14 +1004,14 @@ async function decideSubstitution(
     return { shadowCommitted: false }
   }
 
-  const callId = callIdFor(ctx.sessionId, ctx.turn, step, decision.candidateId)
+  const callId = callIdFor(ctx.sessionId, ctx.turn, step, candidateId)
   const entry: PendingEntry = {
     callId,
-    candidateId: decision.candidateId,
+    candidateId,
     // The candidate's tool name identifies the call; the executable args are
     // the *decision's* bound tree, never the plan's `$public` template.
     name: candidate.tool,
-    args: decision.args,
+    args: boundArgs,
     turn: ctx.turn,
     step,
     createdAt: Date.now(),
@@ -903,9 +1032,12 @@ async function decideSubstitution(
     return { shadowCommitted: false }
   }
 
-  markSubstituted(deps, ctx.sessionId, decision.candidateId)
-  setAnchors(deps, ctx, candidate.args)
-  consumePlan(deps, ctx.sessionId, decision.candidateId)
+  markSubstituted(deps, ctx.sessionId, candidateId)
+  // Anchors name the templates the executed call was bound from: the decision's
+  // args are already expanded, so only the plan copy still carries the
+  // `$public` references. That tree is inspected here, never dispatched.
+  setAnchors(deps, ctx, plan.steps.find((step) => step.id === candidateId)?.args ?? boundArgs)
+  consumePlan(deps, ctx.sessionId, candidateId)
   return { shadowCommitted: false }
 }
 

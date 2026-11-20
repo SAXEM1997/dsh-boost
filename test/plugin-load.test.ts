@@ -44,7 +44,7 @@ test('apply 用假 ctx 调用不抛错，并记录解析后的步数预算（T1 
   )
 })
 
-test('apply 从 $DSH_HOME 装配四个挂载点（R4）', () => {
+test('apply 从 $DSH_HOME 装配四个挂载点与两条会话事件（R4）', () => {
   const saved = process.env.DSH_HOME
   process.env.DSH_HOME = join(tmpdir(), 'dsh-boost-apply')
   try {
@@ -56,7 +56,9 @@ test('apply 从 $DSH_HOME 装配四个挂载点（R4）', () => {
 
     assert.doesNotThrow(() => plugin.apply(host as unknown as PluginContext, {}))
     assert.deepEqual(host.hooked().sort(), [
+      'agent/request',
       'llm/stream',
+      'session/disposed',
       'systemPrompt',
       'tools/execute',
       'tools/post-execute',
