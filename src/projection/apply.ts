@@ -63,6 +63,13 @@ export interface ProjectionOutcome {
   omittedBytes?: number
   /** Unicode code points the replacement omits; applied outcomes only. */
   omittedCodePoints?: number
+  /**
+   * The persisted artifact's locator; applied outcomes only.
+   *
+   * It is the path the footer tells the model to read, and the retrieval ledger
+   * matches later `read`/`grep` arguments against it (Task 25).
+   */
+  locator?: string
 }
 
 /** A persisted spill artifact's model-facing handle. */
@@ -279,6 +286,7 @@ export async function projectApply(
         kind: 'applied',
         omittedBytes: truncation.omittedBytes,
         omittedCodePoints: truncation.omittedCodePoints,
+        locator: ref.locator,
       },
     }
   } catch {

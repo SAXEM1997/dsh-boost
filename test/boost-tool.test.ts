@@ -278,8 +278,9 @@ test('status 空收据目录返回零账目而不是抛错', async () => {
   })
   assert.deepEqual(status.scope, { mode: 'selected', workspaceIds: [], revision: 0 })
   // A fresh root has no scope.json; the store's degraded read is the honest
-  // answer, not a status failure.
-  assert.deepEqual(status.degraded, ['scope-degraded'])
+  // answer, not a status failure — and status reports the stable code, not the
+  // store's internal `scope-degraded` label.
+  assert.deepEqual(status.degraded, ['ERR_SCOPE_READ_FAILED'])
 })
 
 test('status 计数跨分片，空 sessionId 的 skip:no-scope 也计入', async () => {
@@ -581,18 +582,19 @@ test('status 把 projection-skipped:no-spill 映射为 ERR_HOST_NO_SPILL（过�
 
   const status = await getStatus(d)
   assert.equal(status.counts['projection-skipped:no-spill'], 1)
-  assert.deepEqual(status.degraded, ['ERR_HOST_NO_SPILL', 'scope-degraded'])
-  // ERR_HOST_NO_TOKENMETER has no receipt channel until T25's host probe; a
-  // literal code must not be conjured from the receipt stream.
+  assert.deepEqual(status.degraded, ['ERR_HOST_NO_SPILL', 'ERR_SCOPE_READ_FAILED'])
+  // Without a host probe (this test builds none), status must not invent the
+  // capability codes: the token-meter label comes from the host facts, not the
+  // receipt stream.
   assert.equal(status.degraded.includes('ERR_HOST_NO_TOKENMETER'), false)
 })
 
-test('status 在 scope.json 不可读时报 scope-degraded 且仍给出账目', async () => {
+test('status 在 scope.json 不可读时报稳定码切仍给出账目', async () => {
   const d = await dirDeps()
   // A directory named scope.json is unreadable as a file on every platform.
   await mkdir(join(d.dir, 'scope.json'))
   const status = await getStatus(d)
-  assert.ok(status.degraded.includes('scope-degraded'))
+  assert.ok(status.degraded.includes('ERR_SCOPE_READ_FAILED'))
   assert.equal(status.scope.revision, 0)
   assert.deepEqual(status.saved, {
     substitution: 0,

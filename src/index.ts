@@ -14,12 +14,13 @@
  *
  * @module dsh-boost
  */
-import { homedir } from 'node:os'
-import { join } from 'node:path'
 import type { ToolDefinition } from '@deepseek-ai/dsh-tools'
+import { protocolFixedCost } from './admission/fixed-cost.js'
+import { RetrievalLedger } from './admission/retrieval.js'
 import { resolveConfig } from './config.js'
 import { AnchorStore } from './gate/invalidate.js'
 import type { Plan } from './gate/plan.js'
+import { resolveBoostRoot } from './host/root.js'
 import { clearSession, SessionRuntime } from './hooks/llm-stream.js'
 import { PendingQueue } from './hooks/pending.js'
 import { registerHooks } from './hooks/post-execute.js'
@@ -30,6 +31,7 @@ import { resolveVisible, supportsStepWhen, workspaceIdOf } from './scope/resolve
 import type { WorkspaceRegistry } from './scope/resolve.js'
 import { ScopeStore } from './scope/store.js'
 import { boostTool } from './tools/boost.js'
+import type { BoostDeps, BoostHostFacts } from './tools/boost.js'
 import type { PluginContext } from './types.js'
 
 export const name = 'dsh-boost'
@@ -39,15 +41,6 @@ export const inject = ['tools', 'llm', 'systemPrompt'] as const
 /** Whether the host exposes both services the hook mounts attach to. */
 function canRegister(ctx: PluginContext): boolean {
   return typeof ctx.on === 'function' && typeof ctx.systemPrompt?.section === 'function'
-}
-
-/**
- * The plugin's data root: `<DSH_HOME>/boost`, with `~/.dsh/boost` as the
- * default when the environment variable is unset or blank (design §10).
- */
-function boostRoot(): string {
-  const configured = process.env.DSH_HOME?.trim()
-  return join(configured ? configured : join(homedir(), '.dsh'), 'boost')
 }
 
 /** One-line detail for a contained wiring failure. */
@@ -265,10 +258,7 @@ function wireSessionEvents(
  * Without step-level `when` a conditional registration would silently become
  * unconditional, so the whole family is skipped and the stable code is logged.
  */
-function registerBoostTool(
-  ctx: PluginContext,
-  deps: { scope: ScopeStore; receipts: ReceiptStore },
-): void {
+function registerBoostTool(ctx: PluginContext, deps: BoostDeps): void {
   if (!supportsStepWhen(ctx.tools)) {
     ctx.logger?.warn?.('ERR_HOST_NO_STEP_WHEN')
     return
@@ -292,13 +282,16 @@ export function apply(ctx: PluginContext, config: unknown): void {
 
   let hooksMounted = false
   try {
-    const root = boostRoot()
+    // One root rule for both stores (design §10); `resolveBoostRoot` is the
+    // only implementation, so `apply` and the hook stores cannot diverge.
+    const root = resolveBoostRoot()
     const scope = new ScopeStore(root)
     const receipts = new ReceiptStore(root)
     const anchors = new AnchorStore()
     const queue = new PendingQueue()
     const plans = new Map<string, Plan>()
     const sessions = new SessionRuntime(cfg.stepsPerTurn)
+    const retrievals = new RetrievalLedger()
     /** Session id → workspace id, populated by the visibility warm. */
     const workspaces = new Map<string, string>()
     /** Session id → the route the selector call inherits. */
@@ -311,6 +304,17 @@ export function apply(ctx: PluginContext, config: unknown): void {
     const hostEstimate = hostEstimatorOf(ctx)
     const estimateText = hostEstimate ?? estimateTextFallback
     const estimateKind = hostEstimate !== undefined ? 'host' : 'chars/4'
+
+    // Host capabilities, measured once. `status` renders these as stable codes;
+    // they are facts about this host, never inferred from usage. The fixed-cost
+    // probe starts here (startup time) and is awaited only by `status` — it is
+    // deliberately not on any request path.
+    const hostFacts: BoostHostFacts = {
+      hasTokenMeter: hostEstimate !== undefined,
+      hasSpill: spill !== undefined,
+      supportsStepWhen: supportsStepWhen(ctx.tools),
+    }
+    const fixedOverhead = protocolFixedCost()
 
     // The hook reads this synchronously, so it only ever returns the warmed
     // answer. The map alone is not the answer: a workspace disabled between
@@ -337,6 +341,7 @@ export function apply(ctx: PluginContext, config: unknown): void {
       plans,
       sessions,
       spill,
+      retrievals,
       estimateText,
       estimateKind,
       llm: ctx.llm,
@@ -356,7 +361,12 @@ export function apply(ctx: PluginContext, config: unknown): void {
     // After the hooks: `registerHooks` mounts the prompt section first and
     // throws on a duplicate, so a second `apply` aborts above before it can
     // register the tool twice.
-    registerBoostTool(ctx, { scope, receipts })
+    registerBoostTool(ctx, {
+      scope,
+      receipts,
+      host: hostFacts,
+      fixedOverhead: () => fixedOverhead,
+    })
   } catch (error) {
     // A second apply fails on the duplicate prompt section first (registerHooks
     // mounts it first), which means the plugin is already wired — not that

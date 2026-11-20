@@ -109,6 +109,7 @@ test('applied 结果带省略字节与码点，token 计量留给调用方（T23
     kind: 'applied',
     omittedBytes: t.omittedBytes,
     omittedCodePoints: t.omittedCodePoints,
+    locator: '/spill/read-1.txt',
   })
 })
 

@@ -934,6 +934,13 @@ export function clearSession(deps: HookDeps, sessionId: string): void {
   clearAnchors(deps, sessionId)
   clearPlans(deps, sessionId)
   try {
+    // Projection locators are session-scoped evidence: a disposed session must
+    // not leave its spill paths behind for the next session id to inherit.
+    deps.retrievals?.clear(sessionId)
+  } catch {
+    // Same: each clear is independent.
+  }
+  try {
     deps.sessionState?.clear(sessionId)
   } catch {
     // Same: each clear is independent.

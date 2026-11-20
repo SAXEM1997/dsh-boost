@@ -29,13 +29,20 @@
  *   them or the headline saving reads as zero. The substitution saving is read
  *   only from the settled line, because the synth-time line predates any
  *   measurement.
- * - `status.degraded` maps the receipt code a real producer writes
- *   (`projection-skipped:no-spill`) to its stable code (`ERR_HOST_NO_SPILL`).
- *   `ERR_HOST_NO_TOKENMETER` has no receipt channel and is left to Task 25's
- *   host probe rather than faked from the receipt stream.
- * - `runBoost` is pure orchestration over the two stores: no `ctx`, no host
- *   calls. The tool definition is therefore testable without a host, and the
- *   host probe lives in `src/index.ts`.
+ * - `status.degraded` is a list of **stable codes only** (`ERR_HOST_*` /
+ *   `ERR_SCOPE_*`). The scope store's internal `scope-degraded` label and the
+ *   receipt stream's `projection-skipped:*` are inputs, not output: a receipt
+ *   code is mapped to `ERR_HOST_NO_SPILL`, and a degraded scope read passes its
+ *   `ERR_SCOPE_*` code through. `ERR_HOST_NO_TOKENMETER` comes from the host
+ *   probe (`apply` measures whether the synchronous token meter exists) and,
+ *   independently, from the fixed-cost measurement being `'unknown'`;
+ *   `ERR_HOST_PLATFORM_UNSUPPORTED` is `isPosixOnly()` being false.
+ * - The fixed overhead is measured **once at startup** (`protocolFixedCost`)
+ *   and awaited by `status`; it is never on a request path (design §6.1).
+ * - `runBoost` is pure orchestration over the two stores plus the host facts
+ *   `apply` hands it: no `ctx`, no host calls beyond the one measurement. The
+ *   tool definition is therefore testable without a host, and the host probe
+ *   lives in `src/index.ts`.
  *
  * The command table is deliberately a plain record, one handler per
  * subcommand, so an unknown `cmd` is a lookup miss rather than a fallthrough.
@@ -43,6 +50,8 @@
  * @module dsh-boost/tools/boost
  */
 import type { JsonSchemaNode } from '@deepseek-ai/dsh-tools'
+import { protocolFixedCost } from '../admission/fixed-cost.js'
+import { isPosixOnly } from '../host/platform.js'
 import type { ProjectionMode } from '../projection/apply.js'
 import {
   ERR_SCOPE_FUTURE_VERSION,
@@ -78,18 +87,56 @@ const SCOPE_CODES: ReadonlySet<string> = new Set([
   ERR_SCOPE_LOCKED,
 ])
 
+/** Stable host degradation codes (design §9; the frozen set `status` reports). */
+const ERR_HOST_NO_SPILL = 'ERR_HOST_NO_SPILL'
+const ERR_HOST_NO_TOKENMETER = 'ERR_HOST_NO_TOKENMETER'
+const ERR_HOST_PLATFORM_UNSUPPORTED = 'ERR_HOST_PLATFORM_UNSUPPORTED'
+const ERR_HOST_NO_STEP_WHEN = 'ERR_HOST_NO_STEP_WHEN'
+
 /**
  * Receipt codes that mean the host is degraded, mapped to the stable code
  * `status` reports.
  *
  * `projection-skipped:no-spill` is the code the projection path records when
  * the spill backend is absent (design §5.4), so it is the real producer behind
- * `ERR_HOST_NO_SPILL`. `ERR_HOST_NO_TOKENMETER` has no receipt channel at all:
- * it is a host probe result and is added by Task 25, not invented here.
+ * `ERR_HOST_NO_SPILL`. The same code is also derived from the host probe when
+ * `projection: 'on'`; the two channels are deduplicated, not mutually exclusive.
  */
 const RECEIPT_DEGRADATION: ReadonlyArray<{ readonly code: string; readonly degraded: string }> = [
-  { code: 'projection-skipped:no-spill', degraded: 'ERR_HOST_NO_SPILL' },
+  { code: 'projection-skipped:no-spill', degraded: ERR_HOST_NO_SPILL },
 ]
+
+/**
+ * Host capabilities `apply` probes once and hands `status`.
+ *
+ * Every field is optional because `runBoost` is also usable without a host
+ * (unit tests, and the control tool built before `apply` wires the probe). An
+ * absent fact means "not probed", never "supported": the status code list then
+ * simply omits the corresponding code rather than guessing.
+ */
+export interface BoostHostFacts {
+  /** Whether `ctx.get('tokenMeter')` exposed the synchronous message estimator. */
+  hasTokenMeter?: boolean
+  /** Whether `ctx.get('spillStore')` exposed the projection backend. */
+  hasSpill?: boolean
+  /** Whether `ctx.tools.resolve` exists (step-level `when` support). */
+  supportsStepWhen?: boolean
+}
+
+/** The two stores `runBoost` orchestrates, plus the host facts it reports. */
+export interface BoostDeps {
+  scope: ScopeStore
+  receipts: ReceiptStore
+  /** Host capabilities measured by `apply`; absent when no host was probed. */
+  host?: BoostHostFacts
+  /**
+   * The one fixed-overhead measurement, started at plugin load.
+   *
+   * A function rather than a promise so `status` can await it lazily; the
+   * default reuses the module-level memoised measurement.
+   */
+  fixedOverhead?: () => Promise<number | 'unknown'>
+}
 
 /** The scope document's caller-writable fields. Everything else is store-owned. */
 const PATCH_FIELDS = ['mode', 'workspaceIds', 'shadow', 'projection'] as const
@@ -105,9 +152,6 @@ type BoostArgs = { cmd: BoostCmd; body?: unknown; baseRevision?: number }
 
 /** Successful report or a stable failure code — never a thrown error. */
 type BoostResult = { ok: true; data: unknown } | { ok: false; code: string }
-
-/** The two stores `runBoost` orchestrates. */
-type BoostDeps = { scope: ScopeStore; receipts: ReceiptStore }
 
 /** What `status` reports. Both switches are top-level on purpose: they differ. */
 export interface BoostStatus {
@@ -137,6 +181,25 @@ export interface BoostStatus {
   counts: Record<string, number>
   /** Stable degradation codes actually observed. */
   degraded: string[]
+  /**
+   * The protocol section's measured per-request cost.
+   *
+   * `'unknown'` when the host estimator is unreachable: the measurement is
+   * never fabricated (design §9). Status-time only; see
+   * `src/admission/fixed-cost.ts`.
+   */
+  fixedOverheadTokens: number | 'unknown'
+  /**
+   * The design's receipt-field spelling of `saved.retrievals`.
+   *
+   * Kept at the top level because the shadow-week operator reads the two
+   * ledgers by the names §5.3 gives them; `saved` keeps the original camelCase
+   * shape so existing consumers keep working. Both are derived from one
+   * aggregation, so they cannot drift.
+   */
+  projection_retrievals: number
+  /** The design's receipt-field spelling of `saved.projectionNet`. */
+  projection_net_tokens: number
 }
 
 /** A validated scope patch: only the caller-writable fields survive. */
@@ -207,12 +270,64 @@ async function aggregate(receipts: ReceiptStore): Promise<{
   }
 }
 
+/**
+ * The protocol section's fixed cost, never a thrown status.
+ *
+ * The production deps carry the promise `apply` started at load; the default
+ * is the same memoised measurement, so a direct `runBoost` (a unit test or a
+ * host that built the tool itself) still reports a real number. A rejection is
+ * `'unknown'`, for the same reason the estimator's own failure is.
+ */
+async function fixedOverheadOf(deps: BoostDeps): Promise<number | 'unknown'> {
+  try {
+    const measure = deps.fixedOverhead ?? protocolFixedCost
+    const value = await measure()
+    return typeof value === 'number' && Number.isFinite(value) ? value : 'unknown'
+  } catch {
+    return 'unknown'
+  }
+}
+
+/**
+ * The stable degradation codes for one status call.
+ *
+ * Inputs are the receipt-observed codes, the scope read's stable code, and the
+ * host facts. Receipt codes are already mapped; the scope store's internal
+ * `scope-degraded` label is deliberately **not** copied — the report's contract
+ * is stable codes only. Order is deterministic (receipts, scope, host) and the
+ * result is deduplicated, so one condition observed through two channels
+ * appears once.
+ */
+function degradationCodes(
+  observed: readonly string[],
+  read: Awaited<ReturnType<ScopeStore['read']>>,
+  host: BoostHostFacts | undefined,
+  fixedOverheadTokens: number | 'unknown',
+): string[] {
+  const codes: string[] = [...observed]
+  if (read.degraded !== undefined) codes.push(read.code ?? ERR_SCOPE_READ_FAILED)
+
+  if (!isPosixOnly()) codes.push(ERR_HOST_PLATFORM_UNSUPPORTED)
+  // Two independent signals: the host service is absent, or the pure estimator
+  // package is unreachable, so the fixed cost cannot be priced. Either way the
+  // plugin cannot measure, which is exactly what the code tells the operator.
+  if (fixedOverheadTokens === 'unknown' || host?.hasTokenMeter === false) {
+    codes.push(ERR_HOST_NO_TOKENMETER)
+  }
+  // `spillStore` matters only in apply mode; shadow mode never touches it
+  // (design §5.4), so reporting it while projection is `shadow` would be noise.
+  if (host?.hasSpill === false && read.doc.projection === 'on') codes.push(ERR_HOST_NO_SPILL)
+  if (host?.supportsStepWhen === false) codes.push(ERR_HOST_NO_STEP_WHEN)
+
+  return [...new Set(codes)]
+}
+
 /** `status`: the scope document plus the receipt ledgers, never a failure. */
 async function statusCommand(deps: BoostDeps): Promise<BoostResult> {
   const read = await deps.scope.read()
   const totals = await aggregate(deps.receipts)
-  const degraded =
-    read.degraded === undefined ? totals.degraded : [...totals.degraded, 'scope-degraded']
+  const fixedOverheadTokens = await fixedOverheadOf(deps)
+  const degraded = degradationCodes(totals.degraded, read, deps.host, fixedOverheadTokens)
   const data: BoostStatus = {
     scope: {
       mode: read.doc.mode,
@@ -224,6 +339,9 @@ async function statusCommand(deps: BoostDeps): Promise<BoostResult> {
     saved: totals.saved,
     counts: totals.counts,
     degraded,
+    fixedOverheadTokens,
+    projection_retrievals: totals.saved.retrievals,
+    projection_net_tokens: totals.saved.projectionNet,
   }
   return { ok: true, data }
 }
@@ -356,11 +474,11 @@ const COMMANDS: Record<BoostCmd, (deps: BoostDeps, args: BoostArgs) => Promise<B
  * an unexpected store failure cannot turn the user's only control surface into
  * a thrown tool error; it is not an expected path.
  */
-export async function runBoost(input: {
-  args: { cmd: BoostCmd; body?: unknown; baseRevision?: number }
-  scope: ScopeStore
-  receipts: ReceiptStore
-}): Promise<{ ok: true; data: unknown } | { ok: false; code: string }> {
+export async function runBoost(
+  input: BoostDeps & {
+    args: { cmd: BoostCmd; body?: unknown; baseRevision?: number }
+  },
+): Promise<{ ok: true; data: unknown } | { ok: false; code: string }> {
   try {
     const args = (input as { args?: unknown } | null | undefined)?.args
     const cmd = (args as { cmd?: unknown } | null | undefined)?.cmd
@@ -369,7 +487,7 @@ export async function runBoost(input: {
         ? COMMANDS[cmd as BoostCmd]
         : undefined
     if (handler === undefined) return { ok: false, code: ERR_BOOST_UNKNOWN_CMD }
-    return await handler(input, args as BoostArgs)
+    return await handler(input as BoostDeps, args as BoostArgs)
   } catch {
     return { ok: false, code: ERR_BOOST_INTERNAL }
   }
@@ -378,7 +496,7 @@ export async function runBoost(input: {
 /** Model-facing description: what each command does and what it returns. */
 const DESCRIPTION = [
   'Inspect or change dsh-boost state. Commands:',
-  'status reports the scope document, both switches (shadow, projection), receipt counts per code across all sessions, substitution and projection savings, and observed degraded codes;',
+  'status reports the scope document, both switches (shadow, projection), receipt counts per code across all sessions, the substitution ledger, the projection ledger as a net amount with its retrieval count, the measured fixed overhead in tokens, and the stable degraded codes;',
   'scope-get reads the full scope document;',
   'scope-set replaces the given scope fields with compare-and-swap; body = { mode?, workspaceIds?, shadow?, projection? }; version and revision are store-owned and rejected;',
   'shadow persists the shadow-week switch; body = boolean.',

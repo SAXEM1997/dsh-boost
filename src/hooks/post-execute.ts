@@ -70,12 +70,14 @@
  */
 import { worthSubstituting } from '../admission/ledger.js'
 import type { StepBudget } from '../admission/ledger.js'
+import type { RetrievalLedger } from '../admission/retrieval.js'
 import type { UsageLedger } from '../admission/usage.js'
 import { DEFAULT_CONFIG } from '../config.js'
 import { decide } from '../gate/decide.js'
 import { alreadySpilled, looksPruned } from '../gate/invalidate.js'
 import type { AnchorStore, ReceiptAnchors } from '../gate/invalidate.js'
 import type { Candidate, Plan } from '../gate/plan.js'
+import { isPosixOnly } from '../host/platform.js'
 import { PROTOCOL_NAME, PROTOCOL_ORDER, PROTOCOL_TEXT } from '../prompt/protocol.js'
 import { projectApply, projectShadow } from '../projection/apply.js'
 import type { FormatFooter, ProjectionMode, SpillBackend, SpillHandle } from '../projection/apply.js'
@@ -87,7 +89,8 @@ import type { ScopeDoc } from '../scope/doc.js'
 import type { ScopeStore } from '../scope/store.js'
 import { choose } from '../selector/jev.js'
 import type { LlmLike } from '../selector/jev.js'
-import type { AgentLike, BoostConfig, PluginContext, ToolFamily } from '../types.js'
+import { familyOf } from '../tools/family.js'
+import type { AgentLike, BoostConfig, PluginContext } from '../types.js'
 import type { TurnClock } from './clock.js'
 import { rejectIfTampered } from './execute.js'
 import { sessionBudget, sessionClock, sessionUsage, streamHook } from './llm-stream.js'
@@ -215,6 +218,17 @@ export interface HookDeps {
   sessionState?: ReceiptSessionState
   /** The host spill backend; absent skips apply-mode projection. */
   spill?: SpillBackend
+  /**
+   * Session → spill locators of the receipts this plugin projected.
+   *
+   * Its only producer is a real spill write (design §5.3): the applied outcome
+   * carries the locator, and a later `read`/`grep` naming it becomes a
+   * `projection-retrieval` receipt whose cost is subtracted from the projection
+   * net. Optional so a minimal assembly degrades to uncounted retrievals rather
+   * than crashing; `apply` constructs one and `clearSession` drops a session's
+   * set on disposal.
+   */
+  retrievals?: RetrievalLedger
   /** Token estimator; absent skips projection accounting entirely. */
   estimateText?: (t: string) => number
   /**
@@ -240,6 +254,8 @@ type PostExecuteExec = {
   name?: string
   callId?: string
   agent?: AgentLike | undefined
+  /** Parsed tool arguments; the retrieval matcher reads them (Task 25). */
+  arguments?: unknown
 }
 
 /** The normalized result fields canonicalisation reads. */
@@ -625,14 +641,105 @@ async function scopeDocOf(deps: HookDeps): Promise<ScopeDoc> {
   }
 }
 
-/** A tool name to projection family; the ssh host tool keeps its MCP name (T25 centralises). */
-function familyOf(tool: string | undefined): ToolFamily | undefined {
-  if (tool === undefined) return undefined
-  if (tool === 'read' || tool === 'grep' || tool === 'glob' || tool === 'bash' || tool === 'ssh') {
-    return tool
+// ---------------------------------------------------------------------------
+// Retrieval accounting
+// ---------------------------------------------------------------------------
+
+/** The calls that can retrieve a spilled artifact (design §5.3). */
+const RETRIEVAL_TOOLS: ReadonlySet<string> = new Set(['read', 'grep'])
+
+/** The conservative remaining-step count for a live retrieval, or the default. */
+function retrievalHorizon(deps: HookDeps): number {
+  const configured = deps.config?.horizonSteps
+  return typeof configured === 'number' && Number.isFinite(configured) && configured >= 0
+    ? Math.floor(configured)
+    : DEFAULT_CONFIG.horizonSteps
+}
+
+/**
+ * The recorded cost of one retrieval, or `undefined` when it cannot be priced.
+ *
+ * Design §5.3: `Σ(取回调用 token + 取回内容 × 剩余步数)`. Live, the real
+ * remaining-step count is unknown, so the configured conservative horizon is
+ * used (the same default admission uses, never the actual count). The call's
+ * own block is priced from its name and arguments; the retrieved content is
+ * priced from the canonical receipt. A missing/non-finite estimate is omitted
+ * rather than fabricated, so `status` subtracts nothing it did not measure.
+ */
+function retrievalCostOf(
+  deps: HookDeps,
+  exec: PostExecuteExec,
+  content: string,
+): number | undefined {
+  const estimate = estimatorOf(deps)
+  if (estimate === undefined) return undefined
+
+  const contentTokens = safeEstimate(estimate, content)
+  if (contentTokens === undefined) return undefined
+
+  let params = ''
+  try {
+    params = JSON.stringify(exec.arguments) ?? ''
+  } catch {
+    params = ''
   }
-  if (tool === 'mcp__ssh__execute-command') return 'ssh'
-  return undefined
+  const callTokens = safeEstimate(estimate, `${exec.name ?? 'tool'} ${params}`)
+  if (callTokens === undefined) return undefined
+
+  const total = callTokens + contentTokens * retrievalHorizon(deps)
+  return Number.isFinite(total) ? total : undefined
+}
+
+/**
+ * Count a `read`/`grep` that names one of this session's spill locators.
+ *
+ * `appendReceipt` is the store's only write path, and `kind:'projection'` with
+ * `retrieved:true` is exactly what `boost status` aggregates as
+ * `projection_retrievals` and `retrievalCost`. No `saved_projection_tokens` is
+ * written: this line documents a cost, not another gross saving.
+ *
+ * Runs before the scope gate on purpose. A projected receipt consumed model
+ * context whether or not the workspace is still visible, so its retrieval must
+ * still be counted; dropping it because visibility changed would flatter the
+ * net account after the fact.
+ */
+async function recordProjectionRetrieval(
+  deps: HookDeps,
+  exec: PostExecuteExec,
+  result: PostExecuteResult | undefined,
+  sessionId: string,
+): Promise<void> {
+  try {
+    const name = exec?.name
+    if (typeof name !== 'string' || !RETRIEVAL_TOOLS.has(name)) return
+    const ledger = deps.retrievals
+    if (ledger == null || typeof ledger.locate !== 'function') return
+    const locator = ledger.locate(sessionId, exec.arguments)
+    if (locator === undefined) return
+
+    const receipt = canonicalise(result?.content ?? [], result?.isError === true)
+    const cost = retrievalCostOf(deps, exec, receipt.text)
+    const entry: ReceiptInput = {
+      version: 1,
+      ts: new Date().toISOString(),
+      sessionId,
+      turn: clockTurnOf(deps, sessionId),
+      kind: 'projection',
+      code: 'projection-retrieval',
+      tool: name,
+      retrieved: true,
+      locator,
+    }
+    if (cost === undefined) {
+      entry.estimate = 'unknown'
+    } else {
+      entry.retrievalCost = cost
+      entry.estimate = deps.estimateKind ?? 'chars/4'
+    }
+    await appendReceipt(deps, entry)
+  } catch {
+    // A retrieval is evidence, never a precondition of the tool result.
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -841,7 +948,8 @@ function selectorReceiptOf(deps: HookDeps, ctx: DecisionContext): string {
   const points = Array.from(text)
   if (points.length <= SELECTOR_RECEIPT_MAX_CHARS) return text
 
-  const family = familyOf(ctx.exec.name)
+  const toolName = ctx.exec.name
+  const family = toolName === undefined ? undefined : familyOf(toolName)
   const params = family !== undefined ? deps.config.projection[family] : undefined
   const configured = params !== undefined ? params.headChars + params.tailChars : 0
   const total = Math.min(
@@ -1024,6 +1132,23 @@ async function decideSubstitution(
       shadow: ctx.doc.shadow,
     })
   } catch {
+    return { shadowCommitted: false }
+  }
+
+  // Substitution synthesises a dispatch and expects POSIX process semantics;
+  // on Windows it is refused **before** the selector, admission and budget, so
+  // the path cannot spend anything to decline. Shadow mode is record-only and
+  // stays available: it changes nothing the model sees. The stable operator
+  // signal is `boost status`'s `ERR_HOST_PLATFORM_UNSUPPORTED`; this receipt
+  // keeps the refusal auditable per call rather than silently doing less.
+  if (!isPosixOnly() && !ctx.doc.shadow) {
+    await appendReceipt(
+      deps,
+      ledgerEntry(ctx, 'skip', 'substitution-unavailable', {
+        stepId: 'root',
+        reason: 'platform-unsupported',
+      }),
+    )
     return { shadowCommitted: false }
   }
 
@@ -1267,7 +1392,8 @@ async function projectDecision(
   const mode: ProjectionMode = ctx.doc.projection
   if (mode === 'off') return decision
 
-  const family = familyOf(ctx.exec.name)
+  const toolName = ctx.exec.name
+  const family = toolName === undefined ? undefined : familyOf(toolName)
   if (family === undefined) return decision
   const target = projectionTargetOf(decision, receipt, ctx.result)
   if (target === undefined) return decision
@@ -1324,6 +1450,9 @@ async function projectDecision(
     })
 
     if (outcome.kind === 'applied') {
+      // Remember the artifact's only address: this is what makes a later read
+      // of it a counted retrieval instead of a free one (design §5.3).
+      if (outcome.locator !== undefined) deps.retrievals?.record(ctx.sessionId, outcome.locator)
       const before = safeEstimate(estimate, target)
       const after = safeEstimate(estimate, content)
       // The authoritative names are the design's (§5.3): a projection receipt
@@ -1434,16 +1563,21 @@ async function postExecute(
   // cached judgement the protocol section reads; a miss is false (fail-closed,
   // design §5.5).
   const sessionId = sessionIdOf(exec)
-  if (sessionId === undefined || !isActiveSession(deps, sessionId)) {
-    // A cold judgement is fail-closed, but it must not be silent: the shadow
-    // week needs to distinguish "the plugin chose not to act" from "the plugin
-    // was never asked". The no-agent branch above writes the same code.
-    await appendSkipNoScope(
-      deps.receipts,
-      exec,
-      sessionId ?? '',
-      sessionId === undefined ? 0 : clockTurnOf(deps, sessionId),
-    )
+  if (sessionId === undefined) {
+    // The agent exists but carries no usable session id, so neither the scope
+    // gate nor the retrieval ledger can attribute this call. Fail closed and
+    // keep the pass visible; the no-agent branch above does the same.
+    await appendSkipNoScope(deps.receipts, exec)
+    return decision
+  }
+
+  // Retrieval accounting runs before the visibility gate: a projected receipt
+  // already consumed context, so its retrieval is part of the ledger even if
+  // the workspace stopped being visible before the read arrived.
+  await recordProjectionRetrieval(deps, exec, result, sessionId)
+
+  if (!isActiveSession(deps, sessionId)) {
+    await appendSkipNoScope(deps.receipts, exec, sessionId, clockTurnOf(deps, sessionId))
     return decision
   }
 
