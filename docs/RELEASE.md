@@ -22,21 +22,43 @@ npm pack --dry-run
 npm pack
 ```
 
-顺序不能反：**先 `npm pack --dry-run`，再 `npm pack`**。`npm pack` 只校验包名与版本；缺 `files`
-条目、缺 `dist/` 它仍可能 exit 0。产物完整性必须显式检查：
+`npm ci` 依赖已提交的 `package-lock.json`，先 `npm ci` 再打包才能复现同一棵依赖树（TypeScript、
+`tsx`、`@types/node` 都由 lockfile 钉住）。`package.json` 的 `prepack` 会在每次 `npm pack`
+（含 `--dry-run`）前执行 `npm run build`，所以干净 clone 上即使 `dist/` 不存在，打出的包也会
+包含构建产物；`prepublishOnly` 不再是唯一的构建防线。
+
+`npm pack` 只校验包名与版本；缺 `files` 条目它仍可能 exit 0。因此产物完整性必须显式检查，且
+**不能**用“任意一行匹配”的 `grep -E`：`tar -tzf … | grep -E '…|…|…'` 在五个必需文件只命中
+一个时也 exit 0。用排序后的清单做集合相等比较：
 
 ```bash
-test -f dist/index.js
-test -f dist/index.d.ts
-tar -tzf dsh-boost-0.1.0.tgz | grep -E 'package/(dist/index\.js|dist/index\.d\.ts|cordis\.patch\.yml|NOTICE|LICENSE)$'
+required=$(printf '%s\n' \
+  package/LICENSE \
+  package/NOTICE \
+  package/cordis.patch.yml \
+  package/dist/index.js \
+  package/dist/index.d.ts | sort)
+actual=$(tar -tzf dsh-boost-0.1.0.tgz \
+  | grep -E '^package/(dist/index\.js|dist/index\.d\.ts|cordis\.patch\.yml|NOTICE|LICENSE)$' \
+  | sort)
+if [ "$actual" != "$required" ]; then
+  echo "tarball manifest mismatch; missing:"
+  comm -23 <(printf '%s\n' "$required") <(printf '%s\n' "$actual")
+  exit 1
+fi
+test "$(printf '%s\n' "$actual" | grep -c .)" -eq 5
 ```
+
+`[ "$actual" != "$required" ]` 是集合相等判定：少一项、多一项、顺序不同都会失败；最后的计数把
+“五行都在”写成显式断言。`test -f dist/index.js` / `dist/index.d.ts` 仍建议保留，但它们是本地
+构建目录的检查，不能证明 tarball 里有这两项。
 
 验收前的硬约束（设计 §11）：
 
 - `package.json` 的 `name`、`cordis.patch.yml` 行的 `id`、行的 `name`、导出插件的 `name` 四者完全一致；
   宿主按 `row.id == entry.options.id && row.name == entry.options.name` 判定"已装配"，缺一个会被**静默跳过**。
 - `version` 必须存在，否则 `npm pack` 在第一步就报 `Invalid package, must have name and version`。
-- `files` 与实际布局一致：`scripts/` 与 `test/` 是 dev-only，**不**进包；`dist/` 由 `prepublishOnly` 构建。
+- `files` 与实际布局一致：`scripts/` 与 `test/` 是 dev-only，**不**进包；`dist/` 由 `prepack` 构建。
 
 ## 2. 空项目安装（isolated 布局）
 
@@ -53,16 +75,69 @@ npm_config_cache=/tmp/npmcache npm install /path/to/dsh-boost-0.1.0.tgz
 # 确认安装布局是扁平的、没有上层 node_modules 兜底：
 npm ls --all | head -40
 test -d node_modules/dsh-boost
+
+# 看 peer 实际解析到哪个 rc：范围必须同时接受 rc.4 与 rc.5，不能钉死一个版本。
+npm ls @deepseek-ai/dsh-llm @deepseek-ai/dsh-tools
+
+# 插件在无宿主进程时也必须能作为模块加载：
+node --input-type=module -e "const m = await import('dsh-boost'); console.log(m.name)"
+
+# M3 回归：宿主用 Node resolver 读元数据，这两个路径必须能解析。
+node --input-type=module -e "console.log(import.meta.resolve('dsh-boost/package.json'))"
+node --input-type=module -e "console.log(import.meta.resolve('dsh-boost/locale/en.json'))"
 ```
 
-随后在一个一次性的 `DSH_HOME` 里装配（不碰真实 profile）：
+最后两条 `import.meta.resolve` 缺一不可：`exports` 不声明 `./package.json` / `./locale/*.json` 时
+Node 抛 `ERR_PACKAGE_PATH_NOT_EXPORTED`，宿主的 `readPluginMeta` 把该错误当成“文件不存在”，
+插件的名称、描述与 locale 字典就全部回退成空。
+
+随后在一个一次性的 `DSH_HOME` 里装配（不碰真实 profile）。`--profile` 是 `dsh plugin` 的**必填**
+选项，且要放在 `add` 这个被透传的 pnpm 子命令**之前**；写成 `dsh plugin add <path>` 会在安装前
+因缺少必填项失败：
 
 ```bash
 export DSH_HOME=/tmp/dsh-boost-accept/dsh-home
 mkdir -p "$DSH_HOME"
-dsh plugin add /tmp/dsh-boost-accept/node_modules/dsh-boost
-# 让宿主真正加载一次插件（任一工具回合即可），然后看 boost status。
+dsh plugin --profile accept add /tmp/dsh-boost-accept/node_modules/dsh-boost
+# 确认宿主确实把这一行并入了装配计划：
+dsh --profile accept --dump-config | grep -A2 'id: dsh-boost'
 ```
+
+### 2.0 先让插件对测试工作区生效
+
+刚初始化的 `scope.json` 是 `{mode:'selected', workspaceIds:[], shadow:true, projection:'shadow'}`
+（`src/scope/doc.ts`）。工作区列表为空时插件对任何会话都不可见：投影根本不会发生，§2.1 的
+“投影照常裁剪”和 §2.2 的 `projection-skipped:no-spill` / `ERR_HOST_NO_SPILL` 都无法观察到
+（`ERR_HOST_NO_SPILL` 只在 `projection === 'on'` 时加入 `degraded`）。先加入测试工作区。
+
+工作区 id 是宿主注册表里的 UUID，不是路径。从 `$DSH_HOME/storages/workspace.json` 的
+`tables.workspaces` 找到路径为测试工作区的条目：
+
+```bash
+node -e '
+const s = require(process.env.DSH_HOME + "/storages/workspace.json")
+for (const [id, w] of Object.entries(s.tables.workspaces)) console.log(id, w.path)
+'
+```
+
+`boost` 是**模型工具调用**，不是 shell 命令：包里没有 `bin`，在终端敲 `boost` 只会得到
+`command not found`。在 agent 会话里直接发送下面三句用户消息，让模型依次调用它：
+
+```text
+请调用 boost 工具：{"cmd":"status"}
+请调用 boost 工具：{"cmd":"scope-set","baseRevision":<上一步返回的 scope.revision>,"body":{"mode":"selected","workspaceIds":["<测试工作区 id>"],"shadow":true,"projection":"on"}}
+请调用 boost 工具：{"cmd":"status"}
+```
+
+最后一次 `status` 必须显示 `scope.workspaceIds` 含该 id、`shadow` 为 `true`、`projection` 为
+`"on"`。这三项是后续所有观察的前置条件；只看“我记得设了”不算数。
+
+> 降级验收要在**宿主实际解析依赖的那棵树**里移除包。用 `dsh plugin --profile accept` 装进 profile
+> 时，宿主在 `$DSH_HOME/profiles/accept` 下解析；`/tmp/dsh-boost-accept` 的 `npm uninstall`
+> 只改了另一份副本，不能证明宿主缺包。用
+> `dsh plugin --profile accept remove <pkg>` 移除，或用
+> `find "$DSH_HOME/profiles/accept/node_modules" -maxdepth 4 -name '<pkg>'` 确认它本来就不在
+> profile 里（可选 peer 未被安装时就是这种情况）。
 
 `boost status` 是验收的观察面：它输出 `shadow` / `projection` 两个开关、按 `code` 的收据计数、替换账与
 投影账（投影账为净额并附 `projection_retrievals`）、实测固定开销 token，以及稳定降级码。插件本身不说话，
@@ -71,10 +146,16 @@ dsh plugin add /tmp/dsh-boost-accept/node_modules/dsh-boost
 ### 2.1 卸载 `@deepseek-ai/dsh-token-meter`
 
 ```bash
+# 二选一：宿主从 isolated 项目解析，或从 profile 解析（§2 的 dsh plugin 布局）。
 cd /tmp/dsh-boost-accept
 npm uninstall @deepseek-ai/dsh-token-meter
 npm ls @deepseek-ai/dsh-token-meter || true   # 必须确认真的不存在
+# profile 布局：
+dsh plugin --profile accept remove @deepseek-ai/dsh-token-meter || true
+find "$DSH_HOME/profiles/accept/node_modules" -maxdepth 4 -name 'dsh-token-meter' -print
 ```
+
+以宿主实际解析的那棵树里的 `npm ls` / `find` 结果为准；另一棵树的“已卸载”不算证据。
 
 预期（设计 §9 / §11）：
 
@@ -91,8 +172,12 @@ npm ls @deepseek-ai/dsh-token-meter || true   # 必须确认真的不存在
 ### 2.2 卸载 `@deepseek-ai/dsh-spill-policy`
 
 ```bash
+# 与 2.1 相同，先确认宿主从哪棵树解析。
+cd /tmp/dsh-boost-accept
 npm uninstall @deepseek-ai/dsh-spill-policy
 npm ls @deepseek-ai/dsh-spill-policy || true
+dsh plugin --profile accept remove @deepseek-ai/dsh-spill-policy || true
+find "$DSH_HOME/profiles/accept/node_modules" -maxdepth 4 -name 'dsh-spill-policy' -print
 ```
 
 预期（设计 §5.4 / §11）：
@@ -112,8 +197,8 @@ npm ls @deepseek-ai/dsh-spill-policy || true
 每条路径至少保留：
 
 ```bash
-# 一次 status 的完整输出
-dsh ...            # 触发一次工具回合
+# 一次 status 的完整输出：在 agent 会话里发送“请调用 boost 工具：{"cmd":"status"}”，
+# 把工具返回的 JSON 原样贴进证据（不要只写结论）。
 # 收据里对应 code 的计数（可以直接数行）
 grep -c '"code":"projection-skipped:no-spill"' "$DSH_HOME"/boost/receipts/*.jsonl
 grep -c '"code":"ERR_HOST_NO_TOKENMETER"' "$DSH_HOME"/boost/receipts/*.jsonl
@@ -121,6 +206,22 @@ grep -c '"code":"ERR_HOST_NO_TOKENMETER"' "$DSH_HOME"/boost/receipts/*.jsonl
 
 若 `ERR_MODULE_NOT_FOUND` 出现，直接在 isolated 目录里跑 `node -e "import('dsh-boost')"` 复现并记录栈；
 hoisted 布局下的"通过"不算通过。
+
+### 2.4 安装矩阵记录（2026-11-20，HEAD `8765f0f` + 本修复）
+
+`dsh-llm` 的 peer 改用与另外三个 peer 相同的范围
+`">=0.2.2-rc.1 <0.3.0-0"`；`devDependencies` 的精确钉法保留（registry 的 `latest` 是
+`0.0.1-rc.1`，属于另一套旧 API，不能跟随）。两侧各在空项目里从 tarball 安装一次：
+
+| 场景 | 命令 | 结果 |
+|---|---|---|
+| **修复前**，空项目 + rc.5 解析链 | `npm install` 旧 tarball | **exit 1**，`ERESOLVE`：`Found: dsh-llm@0.2.2-rc.4`，而 `dsh-tools@rc.5` 的 peer 要求 `dsh-llm@0.2.2-rc.5`；错误里出现 `peer dsh-llm@"0.2.2-rc.4" from dsh-boost` |
+| **rc.5**，空项目直接装新 tarball | `npm install ./dsh-boost-0.1.0.tgz` | **exit 0**；`dsh-llm@0.2.2-rc.5`、`dsh-tools@0.2.2-rc.5`；`import('dsh-boost')` 返回 `name/inject/apply`；`package.json` 与 `locale/en.json` 均可 `import.meta.resolve` |
+| **rc.4**，先装四件套 rc.4 再装新 tarball | `npm install @deepseek-ai/dsh-{tools,llm,spill-policy,token-meter}@0.2.2-rc.4`，再 `npm install ./dsh-boost-0.1.0.tgz` | **exit 0**；解析保持 rc.4，未被升级；模块加载与两个元数据路径解析同上 |
+| **实际装配命令** | `DSH_HOME=/tmp/… dsh plugin --profile accept add <tarball 或包目录>` | **exit 0**；`dsh --profile accept --dump-config` 中出现 `id: dsh-boost` / `name: dsh-boost` 行 |
+
+本表记录的是 **install / peer 解析 / 模块加载 / 宿主装配**这一半；§2.1、§2.2 的降级矩阵要在
+agent 会话里由模型调用 `boost` 才能观察（步骤已在 §2.0 给出），本次未在无交互的 shell 中伪造。
 
 ## 3. 20 任务回归门（只规定过程，不附带任务集）
 
@@ -136,34 +237,61 @@ hoisted 布局下的"通过"不算通过。
 1. 准备**恰好 20 条**任务；两轮使用同一宿主版本、同一模型路由、同一工作区快照。多一条会让 19/21
    通过也过门，门就比设计弱；判定按 20 条做。
 2. 基线轮：`shadow: true`、`projection: 'off'`（或默认 `selected+[]`）。
-3. 开启轮：按 §6 的分批顺序打开替换族（先 `read`，再 `grep`/`glob`，最后 `bash`/`ssh`），
-   `projection: 'on'`；每族一个观察窗。
+3. 开启轮先把 `projection` 置为 `'on'`（`boost` 的 `scope-set`，见 §2.0）。**不存在按族开关**：
+   `projection` 是一个全局模式，`resolveConfig` 总是补齐五个族（read/grep/glob/bash/ssh），配置里
+   漏写某族也不会让它“关闭”。替换白名单固定为 read/grep/glob；**bash/ssh 不是替换族**，它们只受
+   投影影响，永远不会被替换。要分批观察，只能改各族的 `triggerChars`：回执长度必须超过该族的
+   trigger 才会被裁剪，所以把暂不观察的族 `triggerChars` 调高到测试回执长度以上，等于让该族
+   保持原样；下一窗口再调回来。覆盖写在 profile 的用户 patch 层
+   （`$DSH_HOME/profiles/<name>/cordis.patch.yml`）的 dsh-boost 行 `config` 里——patch 会整块替换
+   `config`，必须把五个族都写全——然后重启宿主。先观察 read，再观察 grep/glob；bash/ssh 不参与
+   替换批次。
 4. 记录每条任务的完成状态与是否 `isError=false`；统计两轮都完成且无错的任务数。
-5. 对开启轮每条 `kind:'projection'` 且 `code:'projected'` 的回执，按页脚 locator 取回原文，比较：
-   `取回字节数 == 页脚 count + 保留窗口字节数`。任一条不成立即 pass 失败。
+5. `kind:'projection'` 回执**不带 locator**：`before` / `after` / `saved_projection_tokens` /
+   `unit` / `estimate` 是它全部的账目字段。locator 只出现在模型可见的页脚和进程内 retrieval
+   ledger 里，所以回执无法和 locator 直接 join。对开启轮每条 `code:'projected'` 的回执，按可见
+   页脚取 locator、在**磁盘上**量原文：
+   - 从该工具结果的页脚 `(... Full formatted result stored at: <locator>. ...)` 取 locator；
+   - **不要**用 `read <locator>` 的输出计数：那本身是一次 `read`，会被再次投影，输出不是原文，
+     也不是完整 artifact；
+   - 在磁盘上量原文：`wc -c <locator>`（locator 是宿主 spill 后端落盘的完整原文文件路径）；
+   - 页脚 `Omitted N bytes` 的 N 是**省略的 UTF-8 字节数**；保留窗口字节数要从可见投影里分别
+     取头部和尾部两段文本，用 `printf '%s' "$head" | wc -c` 与 `printf '%s' "$tail" | wc -c`
+     量，**不是** `headChars + tailChars`：页脚按字节报数，首行
+     `[output … chars; showing first … and last …]` 按字符报数，中文/emoji 下两者不相等；
+   - 判定：`wc -c <locator>` == 页脚 N + 头部窗口字节数 + 尾部窗口字节数。任一条不成立即 pass
+     失败；locator 不是当前机器可直接访问的文件路径时，这一条记为“未能复核”，不能算通过。
 6. 结论只写"过门 / 未过门"；**不要**给 20 个任务算成功率或显著性——分辨率是 5 个点，判定不了 1 个百分点。
    v1 不声称守住了 A1 的 1pp。
 
 回归门是"没有灾难性回退"的门，不是"成功率没降"的证明。
 
-## 4. reasoning 兄弟块风险（必须在影子周第一次真实运行前确认）
+## 4. reasoning 兄弟块风险（必须在第一次开启替换的真实回合确认）
 
 替换出来的合成工具回执进入历史后，下一次真实请求若走 Anthropic 兼容的 thinking 模式，服务端可能要求
 assistant 的 `tool_use` 必须带兄弟 `thinking` 块。我们的合成回合目前没有 `replayState`，真实的
 pi-ai `transformMessages` 会丢掉 thinking 块。
+
+**影子周不能验证这条。** 影子期 `decideSubstitution` 返回 `shadowCommitted`，`projectDecision`
+只记录、不改写 content，整个影子周不会合成任何回合；因此 `content[].thinking` 的 400 在结构上
+不可能出现。在影子周检查只会永远读到“未见”，再被记成通过，随后可能在没有任何检查的情况下开启
+替换。这条检查必须放到**第一次开启替换的真实回合**：把 `shadow` 设为 `false` 后
+（`boost` 的 `{"cmd":"shadow","baseRevision":<rev>,"body":false}`），第一个被替换的只读调用就是
+判定点；此后的每个替换观察窗也要继续记录。
 
 **判定信号**：出现一个 **400**，且错误消息包含 `content[].thinking`。这表示被替换回合的 thinking 块
 **没有到达线上**（不是参数错、不是模型错）。
 
 处置：
 
-1. 立即在该路由上**关闭替换**（`shadow` 可留，替换不可），改用投影 + 普通模型回合；
+1. 立即在该路由上**关闭替换**（`shadow` 设回 `true`；投影不受影响，可继续开），改用普通模型回合；
 2. 保留该 400 的原始请求/响应与 session id，作为证据；
 3. 在修复前不要重开：修复方向是给合成消息一个能保住 thinking 块的 `api`/`replayState`，或在该路由上
    永久不合成 `tool_use` 回合；
 4. 投影不受这条风险影响，可继续开。
 
-验收时把"是否见过 `content[].thinking` 400"写成明确的是/否；**没见到**也要写"未见"，不能留空。
+验收时把"第一次开启替换后是否见过 `content[].thinking` 400"写成明确的是/否；**没见到**也要写
+“未见”，不能留空，也不能把影子周的“未见”当作结论。
 
 ## 5. 影子周与统计复算
 
@@ -203,7 +331,7 @@ node scripts/shadow-report.mjs --dir "$DSH_HOME/boost/receipts"
 快照按**一个会话一行**序列化：数组内的每个 session 对象占一行，diff 里可逐条 review；解析后的数字与
 单行 JSON 完全相同。
 
-复算（CI 用这个，不碰会话目录）：
+复算（手工可重复，不碰会话目录；本仓库没有配置 CI 流水线，不存在“CI 用这个”的自动步骤）：
 
 ```bash
 npm run stats
@@ -233,17 +361,21 @@ node scripts/session-stats.mjs \
 tool share 变动约 ±1.3pp。这是选择边界差，不是公式差；设计稿说的"<1% 漂移"只适用于同一选择规则的
 重跑，不描述提交的这个聚合。
 
-快照一旦提交就是权威：`--snapshot` 不重新选样，CI 只复算已提交的聚合。若复算值与设计稿 §2.1 有出入，
+快照一旦提交就是权威：`--snapshot` 不重新选样，复算只复算已提交的聚合。若复算值与设计稿 §2.1 有出入，
 按快照的实际值报告，**不得**改快照去凑设计稿数字。
 
 ## 6. 发布检查清单
 
-- [ ] `npm run build` 干净，`dist/index.js` 与 `dist/index.d.ts` 存在
+- [ ] `npm ci` 成功（lockfile 与 `package.json` 一致），`npm run build` 干净，`dist/index.js` 与 `dist/index.d.ts` 存在
 - [ ] `npm pack --dry-run` 与 `npm pack` 均成功，`version` 非空
-- [ ] isolated 空项目安装成功，`node -e "import('dsh-boost')"` 无 `ERR_MODULE_NOT_FOUND`
+- [ ] tarball 的排序清单比较通过（§1），五个必需文件一个不少
+- [ ] isolated 空项目安装成功（rc.4 与 rc.5 各一次），`node -e "import('dsh-boost')"` 无 `ERR_MODULE_NOT_FOUND`
+- [ ] `import.meta.resolve('dsh-boost/package.json')` 与 `…/locale/en.json` 均可解析（M3）
+- [ ] `dsh plugin --profile <name> add <path>` 成功，`--dump-config` 里有 `id: dsh-boost` 行
+- [ ] 测试工作区已写入 `scope.workspaceIds`，`shadow: true`、`projection: 'on'` 经 `boost status` 确认
 - [ ] 卸 `dsh-token-meter`：替换拒绝、投影可用、`ERR_HOST_NO_TOKENMETER`、账目 `unknown`
 - [ ] 卸 `dsh-spill-policy`：超限回执不投影、`projection-skipped:no-spill`、`ERR_HOST_NO_SPILL`
-- [ ] 两条降级路径都在 isolated 布局下验证，并保留 status/收据证据
+- [ ] 两条降级路径都在宿主实际解析的依赖树里验证，并保留 status/收据证据
 - [ ] 20 任务门按 §3 跑过，pass 谓词逐字对照，结论只有"过门/未过门"
-- [ ] 影子周第一次真实运行检查 `content[].thinking` 400；若有，替换在该路由关闭
+- [ ] 第一次开启替换的真实回合检查 `content[].thinking` 400（不是影子周）；若有，替换在该路由关闭
 - [ ] `npm run stats` 在干净 clone 上可复算 §2.1 聚合

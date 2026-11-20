@@ -40,8 +40,7 @@
  *
  * @module dsh-boost/hooks/synthesize
  */
-import { ToolCallId } from '@deepseek-ai/dsh-llm'
-import type { StreamChunk, ToolCallBlock } from '@deepseek-ai/dsh-llm'
+import type { StreamChunk, ToolCallBlock, ToolCallId } from '@deepseek-ai/dsh-llm'
 import type { PendingEntry } from './pending.js'
 
 /** Stable failure code when a pending entry's arguments cannot be JSON-encoded. */
@@ -64,14 +63,16 @@ function reasoningText(e: PendingEntry): string {
  *
  * `arguments` must be the very string that `argumentsDelta` streamed — passing
  * it in rather than serialising again also guarantees the delta and the block
- * cannot disagree if a getter is non-deterministic. The id is branded through
- * the host's own constructor, so the block's `id` has the `ToolCallId` type
- * the host declares.
+ * cannot disagree if a getter is non-deterministic. `ToolCallId` is a
+ * compile-time brand over `string` (`string & { readonly [BRAND]: 'ToolCallId' }`
+ * in `@deepseek-ai/dsh-llm/brand`), so the id is cast locally rather than
+ * produced by the host's constructor: importing the constructor as a value
+ * would make the root export a load-time dependency of every user.
  */
 function toolCallBlock(e: PendingEntry, argsJson: string): ToolCallBlock {
   return {
     type: 'tool-call',
-    id: ToolCallId(e.callId),
+    id: e.callId as ToolCallId,
     name: e.name,
     arguments: argsJson,
   }
