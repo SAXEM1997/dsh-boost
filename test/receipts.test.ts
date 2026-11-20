@@ -86,15 +86,38 @@ test('连续 3 次写失败后停止替换（成功一次即清零）（fail-clo
   assert.equal(ok.failures(), 0)
 })
 
-test('半行在读取时丢弃并从该偏移截断（R51）', async () => {
+test('半行在读取时丢弃但读取不改写分片（R51 / row 32）', async () => {
   const root = await freshRoot()
   const s = new ReceiptStore(root)
   await s.append(rec('a'))
-  await appendFile(join(root, 'receipts', 'a.jsonl'), '{"version":1,"half":')
+  const path = join(root, 'receipts', 'a.jsonl')
+  await appendFile(path, '{"version":1,"half":')
+  const before = await readFile(path, 'utf8')
+
+  assert.equal(await s.count('a'), 1, 'the unfinished tail is not a receipt')
+  assert.equal(
+    await readFile(path, 'utf8'),
+    before,
+    'a read path must not truncate: a concurrent append could be cut',
+  )
+})
+
+test('row 32：读取后再补全那条半行，补全的字节仍可读', async () => {
+  const root = await freshRoot()
+  const s = new ReceiptStore(root)
+  await s.append(rec('a', { turn: 0 }))
+  const path = join(root, 'receipts', 'a.jsonl')
+  // A concurrent writer has emitted the first half of a valid line.
+  await appendFile(path, '{"version":1,"turn":1,"sessionId":"a","kind":"shadow","code":"ok","tail":"')
+
   assert.equal(await s.count('a'), 1)
-  const text = await readFile(join(root, 'receipts', 'a.jsonl'), 'utf8')
-  assert.equal(text.endsWith('\n'), true)
-  assert.equal(text.includes('"half"'), false)
+  // The writer completes the line after the read. A read that truncated the
+  // prefix would have cut these bytes off and lost the receipt.
+  await appendFile(path, 'done"}\n')
+  assert.equal(await s.count('a'), 2)
+  const turns: number[] = []
+  for await (const r of s.scan('a')) turns.push(r.turn)
+  assert.deepEqual(turns, [0, 1])
 })
 
 test('超限轮转保留当前 + .1 两份（R47）', async () => {
@@ -291,18 +314,17 @@ test('空 sessionId 的分片也能被 scan() 读回', async () => {
   assert.equal(await s.count(''), 1)
 })
 
-test('.1 分片里的半行同样在读取时丢弃并截断', async () => {
+test('.1 分片里的半行同样只在读取时丢弃，不改写分片', async () => {
   const root = await freshRoot()
   const s = new ReceiptStore(root, { maxLines: 1 })
   await s.append(rec('a', { turn: 0 }))
   await s.append(rec('a', { turn: 1 }))
   const rotated = join(root, 'receipts', 'a.1.jsonl')
   await appendFile(rotated, '{"version":1,"half":')
+  const before = await readFile(rotated, 'utf8')
 
   assert.equal(await s.count('a'), 2)
-  const text = await readFile(rotated, 'utf8')
-  assert.equal(text.endsWith('\n'), true)
-  assert.equal(text.includes('"half"'), false)
+  assert.equal(await readFile(rotated, 'utf8'), before, 'rotated shards are never repaired by a read')
 })
 
 test('flush 把失败期间缓冲的收据补写落盘，且不抛错', async () => {
@@ -318,6 +340,86 @@ test('flush 把失败期间缓冲的收据补写落盘，且不抛错', async ()
   assert.equal(await s.count('a'), 1)
   // 空 store 的 flush 同样是 no-op，不抛错
   await new ReceiptStore(await freshRoot()).flush()
+})
+
+test('row 3：6000 层深的 args 仍有收据且不计失败（深度有界 + 标记）', async () => {
+  const root = await freshRoot()
+  const s = new ReceiptStore(root)
+  let deep: Record<string, unknown> = { leaf: 'x' }
+  for (let i = 0; i < 6000; i += 1) deep = { next: deep }
+  // The premise: a recursive serialiser cannot survive this tree.
+  assert.throws(() => JSON.stringify(deep), RangeError)
+
+  await s.append(rec('a', { args: deep }))
+
+  assert.equal(s.failures(), 0, 'a deep argument must not count as a write failure')
+  assert.equal(s.stopped(), false)
+  const line = JSON.parse((await readFile(join(root, 'receipts', 'a.jsonl'), 'utf8')).trim())
+  assert.equal(line.args_depth_truncated, true, 'the depth cut is visible, not silent')
+  const serialised = JSON.stringify(line.args)
+  assert.match(serialised, /"truncated_depth":64/)
+  // The stored tree is shallow enough to be rewritten and read back.
+  let node: any = line.args
+  for (let guard = 0; guard < 100; guard += 1) {
+    if (node === null || typeof node !== 'object' || !('next' in node)) break
+    node = node.next
+  }
+  assert.equal(node.truncated_depth, 64)
+})
+
+test('row 33：自有 __proto__ 键参与 hash 与落盘', async () => {
+  const base = { sessionId: 'a', turn: 1, stepId: 'A', tool: 'read' }
+  const first = JSON.parse('{"__proto__":"first"}') as Record<string, unknown>
+  const second = JSON.parse('{"__proto__":"second"}') as Record<string, unknown>
+  assert.equal(Object.hasOwn(first, '__proto__'), true)
+
+  const h1 = receiptHash({ ...base, args: first })
+  const h2 = receiptHash({ ...base, args: second })
+  assert.notEqual(h1, h2, 'an own __proto__ key must not be swallowed by the prototype setter')
+
+  const root = await freshRoot()
+  const s = new ReceiptStore(root)
+  await s.append(rec('a', { args: first }))
+  const line = JSON.parse((await readFile(join(root, 'receipts', 'a.jsonl'), 'utf8')).trim())
+  assert.equal(line.receipt_hash, h1)
+  assert.equal(line.args.__proto__, 'first', 'the stored args keep the own key')
+})
+
+test('row 34：一个不可读分片不中断整库扫描，readErrors() 计数', async () => {
+  const root = await freshRoot()
+  const s = new ReceiptStore(root)
+  await s.append(rec('a'))
+  await s.append(rec('b'))
+  // A directory with a shard's name is unreadable as a file (EISDIR).
+  await mkdir(join(root, 'receipts', 'bad.jsonl'))
+
+  const rows: any[] = []
+  for await (const r of s.scan()) rows.push(r)
+  assert.deepEqual(rows.map((r) => r.sessionId).sort(), ['a', 'b'])
+  assert.equal(s.readErrors(), 1)
+
+  // An explicit session still works and an unreadable one degrades to empty.
+  assert.equal(await s.count('a'), 1)
+  assert.equal(await s.count('bad'), 0)
+  assert.equal(s.readErrors(), 2)
+})
+
+test('row 39：整库 scan 有分片上限，超出的分片被明确跳过而不是无界扫描', async () => {
+  const root = await freshRoot()
+  await mkdir(join(root, 'receipts'), { recursive: true })
+  const total = 300
+  for (let i = 0; i < total; i += 1) {
+    const name = `s${String(i).padStart(3, '0')}`
+    await writeFile(join(root, 'receipts', `${name}.jsonl`), `${JSON.stringify(rec(name))}\n`)
+  }
+
+  const rows: any[] = []
+  const s = new ReceiptStore(root)
+  for await (const r of s.scan()) rows.push(r)
+  assert.equal(rows.length, 256, 'the whole-store scan is capped')
+  assert.equal(s.readErrors(), 0)
+  // A named session is still addressable even when its shard is past the cap.
+  assert.equal(await s.count('s299'), 1)
 })
 
 // ---------------------------------------------------------------------------

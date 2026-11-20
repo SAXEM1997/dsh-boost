@@ -8,10 +8,10 @@
  * `[A-Za-z0-9_-]` (reversibly, one `%XX` per UTF-8 byte) because a host-supplied
  * session id may contain `/` or `..` and the store must never write outside
  * `receipts/`; the receipt body keeps the original id. The store is therefore
- * append-only (reads may only cut an incomplete tail), crash-safe (a line that
- * was never finished is not a receipt), bounded (current + `.1`, hard limits),
- * and fail-closed (three consecutive write failures stop substitution rather
- * than running without an audit trail).
+ * append-only (a read never writes; it ignores an unfinished tail), crash-safe
+ * (a line that was never finished is not a receipt), bounded (current + `.1`,
+ * hard limits), and fail-closed (three consecutive write failures stop
+ * substitution rather than running without an audit trail).
  *
  * ## Write path
  *
@@ -30,10 +30,25 @@
  * ## Read path
  *
  * `.1` is read before the current shard, so `scan` yields oldest receipts
- * first. A trailing line without `\n` is discarded and the file is truncated
- * back to the last newline; a corrupt line in the middle is skipped. Rotated
- * shards are read through the same path, so a half line left by a crash before
- * rotation is handled identically.
+ * first. A trailing line without `\n` is **ignored** and the shard is left
+ * untouched: a read is concurrent with the writer, and truncating from a
+ * snapshot can cut a line another append just completed. Only the next write
+ * path repairs the shard (`stateFor` truncates to the last newline before
+ * appending). A corrupt line in the middle is skipped. Rotated shards are read
+ * through the same path; nothing ever appends to `.1`, so its half line simply
+ * stays ignored.
+ *
+ * ## Retention
+ *
+ * Shards are an audit trail and are never pruned: one shard set per session
+ * stays on disk for the life of the root. A host that never emits
+ * `session/disposed` therefore leaves the per-session maps (`states`,
+ * `disposed`) and `scan`'s shard list growing with the session count. The maps
+ * are bounded per session and evicted by `disposeSession`; a whole-store
+ * `scan` is additionally capped at {@link MAX_SCAN_SHARDS} sorted shards so
+ * `boost status` cannot walk an unbounded directory, while `scan(sessionId)`
+ * still addresses any one shard. The cap drops shards from that aggregate
+ * scan only; nothing is deleted.
  *
  * The store imports only `node:` builtins and knows no host services: the
  * caller resolves the root (the plugin passes `$DSH_HOME/boost`).
@@ -123,6 +138,27 @@ const MAX_RECEIPT_ARGS_CODE_POINTS = 2048
 /** Hard cap on the in-memory replay buffer (see `recordFailure`). */
 const MAX_PENDING_LINES = 100
 /**
+ * Depth bound for model-written `args`.
+ *
+ * The plan parser refuses args deeper than 64 levels, but a call that did not
+ * come from a plan (the host's own `exec.arguments`) can be arbitrarily deep.
+ * Walking it recursively would throw a `RangeError` and lose the receipt, and
+ * `JSON.stringify` would throw the same way; deeper subtrees are replaced by
+ * `{ truncated_depth: 64 }` before hashing or storing. The cut is visible in
+ * the receipt as `args_depth_truncated: true`.
+ */
+const MAX_RECEIPT_ARGS_DEPTH = 64
+/**
+ * Shards a whole-store `scan` visits at most.
+ *
+ * Shards are never deleted (the audit trail is the product), so a long-lived
+ * host accumulates one per session forever. `scan()` with no id is the
+ * status/report path; capping it keeps that path's work and memory bounded.
+ * The kept shards are the first N sorted encoded names; named scans are not
+ * capped.
+ */
+const MAX_SCAN_SHARDS = 256
+/**
  * How many disposed session ids the store remembers.
  *
  * A late `post-execute` can land seconds after `session/disposed` (a selector
@@ -139,7 +175,14 @@ const NEWLINE = 0x0a
  * `args` is part of the payload on purpose: without it, two different calls of
  * the same tool in one turn would collide. A missing `args` hashes like `{}`,
  * and object keys are sorted recursively so insertion order cannot change the
- * hash.
+ * hash. An own `__proto__` key is an ordinary key, not the prototype setter.
+ *
+ * Args deeper than {@link MAX_RECEIPT_ARGS_DEPTH} are cut with a marker before
+ * hashing, exactly as they are before storing: otherwise the recursive walk or
+ * `JSON.stringify` would throw and the receipt (the audit evidence) would be
+ * lost. Two trees that differ only below the bound therefore hash alike; the
+ * plan parser refuses such trees, and a call whose args are deeper did not come
+ * from a plan.
  */
 export function receiptHash(r: {
   sessionId: string
@@ -153,27 +196,50 @@ export function receiptHash(r: {
     turn: r.turn,
     stepId: r.stepId,
     tool: r.tool,
-    args: r.args ?? {},
+    args: boundArgs(r.args ?? {}).value,
   }
-  return createHash('sha256').update(stableJson(payload)).digest('hex').slice(0, 16)
+  return createHash('sha256').update(JSON.stringify(payload)).digest('hex').slice(0, 16)
 }
 
-/** JSON with object keys sorted recursively; `undefined` members are dropped as `JSON.stringify` would. */
-function stableJson(value: unknown): string {
-  return JSON.stringify(sortKeys(value))
+/** Whether a bounded walk had to replace a subtree deeper than the cap. */
+interface BoundState {
+  depthTruncated: boolean
 }
 
-function sortKeys(value: unknown): unknown {
-  if (Array.isArray(value)) return value.map(sortKeys)
+/**
+ * The sorted, depth-bounded copy of `value`.
+ *
+ * Keys are sorted recursively so insertion order cannot change the hash;
+ * `undefined` members are dropped as `JSON.stringify` would. The copy is built
+ * with `defineProperty`-equivalent semantics (`Object.create(null)`) because
+ * plain assignment would let an own `__proto__` key hit the prototype setter and
+ * vanish, hashing two different calls alike.
+ *
+ * Recursion is safe because the depth is capped at
+ * {@link MAX_RECEIPT_ARGS_DEPTH}: at most 65 frames regardless of the input.
+ * A deeper subtree becomes `{ truncated_depth: 64 }`.
+ */
+function sortKeys(value: unknown, state: BoundState, depth: number): unknown {
+  if (depth > MAX_RECEIPT_ARGS_DEPTH) {
+    state.depthTruncated = true
+    return { truncated_depth: MAX_RECEIPT_ARGS_DEPTH }
+  }
+  if (Array.isArray(value)) return value.map((child) => sortKeys(child, state, depth + 1))
   if (value !== null && typeof value === 'object') {
-    const sorted: Record<string, unknown> = {}
+    const sorted: Record<string, unknown> = Object.create(null)
     for (const key of Object.keys(value).sort()) {
       const child = (value as Record<string, unknown>)[key]
-      if (child !== undefined) sorted[key] = sortKeys(child)
+      if (child !== undefined) sorted[key] = sortKeys(child, state, depth + 1)
     }
     return sorted
   }
   return value
+}
+
+/** Bound and sort `value`, reporting whether the depth cap cut anything. */
+function boundArgs(value: unknown): { value: unknown; depthTruncated: boolean } {
+  const state: BoundState = { depthTruncated: false }
+  return { value: sortKeys(value, state, 1), depthTruncated: state.depthTruncated }
 }
 
 /** First 256 code points; never slice UTF-16 units, which would split a surrogate pair. */
@@ -196,6 +262,14 @@ function buildReceipt(r: ReceiptInput): Receipt {
     preview: previewOf(r.preview),
   }
   if (receipt.kind === 'projection') receipt.unit = 'raw'
+  // Bound before `capArgs`: its `JSON.stringify` would throw on a tree deeper
+  // than the engine's recursion limit. The stored copy is the bounded one, so
+  // a reader can parse it and the depth cut is visible.
+  if (receipt.args !== undefined) {
+    const bounded = boundArgs(receipt.args)
+    receipt.args = bounded.value
+    if (bounded.depthTruncated) receipt.args_depth_truncated = true
+  }
   return capArgs(receipt)
 }
 
@@ -288,33 +362,22 @@ async function ensureDirectory(dir: string): Promise<void> {
 }
 
 /**
- * The complete-line prefix of `data`.
+ * The complete-line prefix of `data`, computed without touching the file.
  *
  * A trailing line without `\n` was never finished, so it is not a receipt:
  * `size` is the byte offset just past the last newline (zero when the first
- * line is unfinished). The tail is truncated from `path`; a failed repair is
- * ignored for reads (`repairFailure: 'ignore'`) but propagates for writes, so
- * an append never lands after a crashed half line.
+ * line is unfinished). This is pure because the read path must never write: it
+ * snapshots the file while a writer may be appending, and truncating from that
+ * snapshot can cut a line the writer just completed. Only `stateFor` (the write
+ * path) acts on `size < data.length`.
  */
-async function completePrefix(
-  path: string,
-  data: Buffer,
-  repairFailure: 'throw' | 'ignore' = 'throw',
-): Promise<{ valid: Buffer; size: number }> {
-  let size = data.length
+function completePrefix(data: Buffer): { valid: Buffer; size: number } {
   const lastNewline = data.lastIndexOf(NEWLINE)
-  if (size > 0 && lastNewline !== size - 1) {
-    size = lastNewline + 1
-    try {
-      await truncate(path, size)
-    } catch (error) {
-      if (repairFailure === 'throw') throw error
-    }
-  }
+  const size = lastNewline + 1
   return { valid: data.subarray(0, size), size }
 }
 
-/** Read a shard, discarding (and truncating) an unfinished tail line. */
+/** Read a shard, ignoring an unfinished tail line without modifying the file. */
 async function readShard(path: string): Promise<Receipt[]> {
   let data: Buffer
   try {
@@ -326,7 +389,7 @@ async function readShard(path: string): Promise<Receipt[]> {
     throw error
   }
 
-  const { valid } = await completePrefix(path, data, 'ignore')
+  const { valid } = completePrefix(data)
   const receipts: Receipt[] = []
   for (const line of valid.toString('utf8').split('\n')) {
     if (line === '') continue
@@ -376,6 +439,8 @@ export class ReceiptStore {
 
   /** *Consecutive* write failures; reset by any successful append. */
   private failureCount = 0
+  /** Shard reads that failed and were skipped by a scan (EACCES, EISDIR, …). */
+  private readFailureCount = 0
   private linesSinceSync = 0
   private readonly pending: PendingLine[] = []
   private readonly states = new Map<string, ShardState>()
@@ -429,6 +494,19 @@ export class ReceiptStore {
   }
 
   /**
+   * Shard reads that a scan skipped because the file was unreadable.
+   *
+   * A single unreadable shard (EACCES, a directory named `x.jsonl`, …) must
+   * not abort the whole scan: `boost status` would turn that into
+   * `ERR_BOOST_INTERNAL` for the entire ledger. Scans skip the shard and count
+   * it here so status can report a stable degraded code. The counter is
+   * cumulative for the instance (a repeated scan counts again).
+   */
+  readErrors(): number {
+    return this.readFailureCount
+  }
+
+  /**
    * Yield readable receipts, oldest first: `.1` before the current shard.
    *
    * The optional `sessionId` is encoded to its shard name; the receipts keep
@@ -439,10 +517,31 @@ export class ReceiptStore {
    */
   async *scan(sessionId?: string): AsyncIterable<Receipt> {
     await this.chain
-    const shards = sessionId === undefined ? await this.listShardNames() : [encodeSegment(sessionId)]
+    let shards: string[]
+    if (sessionId === undefined) {
+      try {
+        shards = await this.listShardNames()
+      } catch {
+        // An unreadable receipts directory is a degraded status answer, not a
+        // thrown tool error. Count it and yield nothing.
+        this.readFailureCount += 1
+        return
+      }
+      // Bounded status scan; named scans below still address any one shard.
+      shards = shards.slice(0, MAX_SCAN_SHARDS)
+    } else {
+      shards = [encodeSegment(sessionId)]
+    }
     for (const base of shards) {
       for (const rotated of [true, false]) {
-        for (const receipt of await readShard(shardFile(this.root, base, rotated))) {
+        let receipts: Receipt[]
+        try {
+          receipts = await readShard(shardFile(this.root, base, rotated))
+        } catch {
+          this.readFailureCount += 1
+          continue
+        }
+        for (const receipt of receipts) {
           yield receipt
         }
       }
@@ -592,9 +691,10 @@ export class ReceiptStore {
     }
 
     // A crash left a partial line; appending after it would make the next
-    // receipt unreadable too. `completePrefix` cuts it before counting and
+    // receipt unreadable too. The write path repairs it before counting and
     // writing, and propagates a failed repair so this append fails instead.
-    const { valid, size } = await completePrefix(path, data)
+    const { valid, size } = completePrefix(data)
+    if (size < data.length) await truncate(path, size)
     const state: ShardState = { lines: countNewlines(valid), bytes: size }
     this.states.set(sessionId, state)
     return state
