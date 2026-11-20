@@ -118,6 +118,8 @@ const DEFAULT_MAX_BYTES = 8 * 1024 * 1024
 const DEFAULT_MAX_LINES = 20_000
 /** Fail-closed threshold: after this many *consecutive* write failures, stop substituting. */
 const STOPPED_AFTER_FAILURES = 3
+/** `args` is model-written; cap what a receipt line carries (identity hashes the full value). */
+const MAX_RECEIPT_ARGS_CODE_POINTS = 2048
 /** Hard cap on the in-memory replay buffer (see `recordFailure`). */
 const MAX_PENDING_LINES = 100
 /**
@@ -194,7 +196,34 @@ function buildReceipt(r: ReceiptInput): Receipt {
     preview: previewOf(r.preview),
   }
   if (receipt.kind === 'projection') receipt.unit = 'raw'
-  return receipt
+  return capArgs(receipt)
+}
+
+/**
+ * Bound the `args` a receipt carries.
+ *
+ * The model writes the arguments, so an otherwise-valid plan can carry a
+ * multi-kilobyte blob into every receipt line. The hash is over the **full**
+ * args (computed before this runs), so identity is unaffected by the cap; the
+ * stored copy is what an operator reads, and a `truncated_json` marker with
+ * `args_truncated` says so plainly rather than silently shortening a command.
+ */
+function capArgs(receipt: Receipt): Receipt {
+  if (receipt.args === undefined) return receipt
+  const json = JSON.stringify(receipt.args)
+  if (json === undefined || Array.from(json).length <= MAX_RECEIPT_ARGS_CODE_POINTS) return receipt
+  return {
+    ...receipt,
+    args: { truncated_json: capCodePoints(json, MAX_RECEIPT_ARGS_CODE_POINTS) },
+    args_truncated: true,
+  }
+}
+
+/** Cap a string by code point so a surrogate pair is never split. */
+function capCodePoints(value: string, cap: number): string {
+  const points = Array.from(value)
+  if (points.length <= cap) return value
+  return `${points.slice(0, Math.max(0, cap - 1)).join('')}…`
 }
 
 /** One receipt as one newline-terminated JSON line. */

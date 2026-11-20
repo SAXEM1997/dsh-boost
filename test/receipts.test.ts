@@ -32,6 +32,36 @@ test('preview 截到 256 code point', async () => {
   assert.equal(Array.from(line.preview).length, 256)
 })
 
+test('args 超长时落盘截断并标记，但 hash 仍按完整 args 算', async () => {
+  const root = await freshRoot()
+  const s = new ReceiptStore(root)
+  const args = { path: '/a', blob: 'x'.repeat(4096) }
+  await s.append(rec('a', { args }))
+  const line = JSON.parse((await readFile(join(root, 'receipts', 'a.jsonl'), 'utf8')).trim())
+
+  assert.equal(line.args_truncated, true)
+  assert.ok(Array.from(JSON.stringify(line.args)).length <= 2100, 'the stored copy stays bounded')
+  assert.match(line.args.truncated_json, /…$/)
+  // Identity is unaffected: the hash is over the full args, so two calls that
+  // differ only after the cap still hash differently even though the stored
+  // copies are identical.
+  assert.equal(
+    line.receipt_hash,
+    receiptHash({ sessionId: 'a', turn: 1, stepId: 'A', tool: 'read', args }),
+  )
+  const other = receiptHash({ sessionId: 'a', turn: 1, stepId: 'A', tool: 'read', args: { ...args, blob: `${'x'.repeat(4096)}y` } })
+  assert.notEqual(line.receipt_hash, other)
+})
+
+test('短 args 原样保留，不标记截断', async () => {
+  const root = await freshRoot()
+  const s = new ReceiptStore(root)
+  await s.append(rec('a', { args: { path: '/a' } }))
+  const line = JSON.parse((await readFile(join(root, 'receipts', 'a.jsonl'), 'utf8')).trim())
+  assert.deepEqual(line.args, { path: '/a' })
+  assert.equal(line.args_truncated, undefined)
+})
+
 test('count 与 scan 可读回，scan(undefined) 跨会话', async () => {
   const root = await freshRoot()
   const s = new ReceiptStore(root)
