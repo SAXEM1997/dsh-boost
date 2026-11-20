@@ -151,8 +151,12 @@ so 772 is the true per-request cost there.
 
 ## Shadow week
 
-The design chose **shadow first**: record for a week without changing what the model sees, then
-decide whether to project and substitute for real. `scope.json` has two independent switches:
+The design chose **shadow first**: record for a week — no synthesized turns, no skipped calls,
+projection priced but never applied — then decide whether to project and substitute for real.
+**"Changes nothing the model sees" would be false**: whenever a workspace is visible the protocol
+section (379 tokens) is injected into the system prompt, and a multi-candidate plan still makes a
+**real selector call** (a separate auxiliary model request). By design the shadow week saves
+nothing; it produces only the four ratios below. `scope.json` has two independent switches:
 
 | Switch | Value | Behaviour |
 |---|---|---|
@@ -184,8 +188,12 @@ The recommended sequence:
 
    `scope-set` patches only the fields you pass; everything else stays as it was. Receipts now get
    replaced, while substitution decisions are still recorded only.
-4. **Turn on substitution**: after confirming there is no `content[].thinking` 400 as described in
-   [`docs/RELEASE.md`](docs/RELEASE.md) §4, switch the shadow off:
+4. **Turn on substitution**: just switch the shadow off — **checking before the switch is a
+   no-op**: the shadow week never synthesizes a turn, so a `content[].thinking` 400 is
+   structurally impossible and a check made before switching it off can only ever read "not
+   seen". After `shadow` becomes `false`, check for that 400 in the **first genuinely
+   substituted round** as described in [`docs/RELEASE.md`](docs/RELEASE.md) §4, and keep
+   recording it in every substitution window after that:
 
    ```json
    { "cmd": "shadow", "body": false, "baseRevision": 2 }
