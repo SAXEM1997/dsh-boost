@@ -2,15 +2,14 @@
 
 通过**工具回执投影**与**确定性只读替换**降低 DeepSeek Harness（DSH）的 token 消耗。
 
-> **状态：骨架。** 插件元数据、patch 行、配置面与共享类型已落地；投影与替换的行为模块尚未实现，
-> 当前版本不要在正式 profile 上启用。
+> **状态：v1 已实现。** 投影、替换与控制面均已落地；`npm run build` 干净，测试套件全部通过。
 
 ## 它解决什么
 
-DSH 每次模型请求都会回放全部历史。实测 300 个最长会话：每步平均回放 19.4 万 token
-（每请求均值 194,473 / 中位 185,590），其中 97.1% 的输入是缓存读；工具回执是体积主体
-（bash 63.0%、read 20.8%、ssh 9.1%）。返回给模型的原始回执里，真正会被下一步用到的部分
-远少于它的体积。
+DSH 每次模型请求都会回放全部历史。本机 300 个最长会话的实测聚合（`npm run stats`，快照时刻
+`2026-11-19T03:13:21Z`）：54,141 步、54,088 个请求，合计 10,575,904,022 raw token。按步均值
+195,340 token，按请求均值 195,531、中位 187,681；97.01% 的输入是缓存读。工具回执是体积主体
+（bash 61.75%、read 22.13%、ssh 10.01%），而下一步真正会用到的部分通常远小于回执本身。
 
 插件做两件事：
 
@@ -20,22 +19,155 @@ DSH 每次模型请求都会回放全部历史。实测 300 个最长会话：�
    直接提交，不再向模型要一次决策；多候选时用一个只允许返回单个标签的选择器。
 
 v1 的预期收益区间是 **3.5%（保底）– 10.0%（上界）**，按 raw `totalTokens` 计。
+这是设计阶段的区间，不是保证；影子周用实测收窄它。
+
+## 前置条件
+
+- Node.js `>=22.18.0`，DSH `>=0.2.2-rc.1 <0.3.0-0`（两者都在 `package.json` 的 `engines` 里）。
+- **替换只在 POSIX 上可用。** Windows（`win32`）上替换被拒绝，`boost status` 的 `degraded`
+  会带 `ERR_HOST_PLATFORM_UNSUPPORTED`；投影不依赖平台，仍然工作。
+- v1 面向 web profile；不支持 desktop profile。
 
 ## 安装
 
-插件以 npm 包发布，包内携带 `cordis.patch.yml`；`dsh plugin add` 解析安装后，会在 profile 的
-patch 层插入一行 `dsh-boost`。
+`dsh plugin` 要求指定 profile，剩下的参数原样转发给该 profile 目录里的 pnpm：
 
-行身份是硬约束：patch 行的 `id`、`name`、插件导出名与 npm 包名四者必须一致。宿主只按
-`row.id === entry.options.id && row.name === entry.options.name` 判定"已装配"，缺一个就被**静默跳过**。
+```bash
+# 已发布到 registry 时
+dsh plugin --profile <name> add dsh-boost
 
-`@deepseek-ai/dsh-llm` 在 `peerDependencies` 与 `devDependencies` 中都固定为 `0.2.2-rc.4`：
-registry 的 `latest` 标签指向 `0.0.1-rc.1`，那是无关的旧 API，用范围会装错。
+# 或从本地 checkout 安装（先构建；dist/ 不入库）
+npm run build
+dsh plugin --profile <name> add /absolute/path/to/dsh-boost
+```
+
+例如 web profile：`dsh plugin --profile web add dsh-boost`。`dsh plugin` 把操作转发给 pnpm，
+所以 pnpm 必须在 PATH 上。
+
+包里的 `dsh.bundle.patch` 指向 `cordis.patch.yml`，所以安装后宿主会把它登记为 profile 的一个
+bundle，patch 的 `insert` 行落在 profile root 上。**装完必须重启 DSH**：插件在宿主启动时加载，
+已经在运行的会话看不到 `boost` 工具；web profile 就是重启 `dsh web`。
+
+## 启用
+
+装上之后插件默认**不做事**。`scope.json` 不存在时使用 `DEFAULT_SCOPE`：
+
+```json
+{ "version": 2, "revision": 0, "mode": "selected", "workspaceIds": [], "shadow": true, "projection": "shadow" }
+```
+
+`workspaceIds` 为空时没有可见工作区：协议段不注入，投影与替换都原样放行。`boost` 工具本身
+是唯一的 scope 豁免，因此没有工作区时仍然可以调用它来启用。
+
+`boost` 是**模型工具，不是 shell 命令**——这个包没有 `bin`。在对话里让 agent 调用它，例如：
+
+> 调用 boost 工具，参数 `{"cmd":"status"}`，把 JSON 结果给我。
+
+首次 `status` 应看到 `ok: true`；`data.scope.workspaceIds` 为空、`revision` 为 `0`，`shadow` 为
+`true`、`projection` 为 `"shadow"`，`counts` 为空。`degraded` 里出现 `ERR_SCOPE_READ_FAILED`
+是正常的：`scope.json` 还不存在，插件正落在 fail-closed 默认值上。第一次成功的 `scope-set`
+会创建这个文件。
+
+然后列出要暴露的工作区：
+
+```json
+{
+  "cmd": "scope-set",
+  "body": {
+    "mode": "selected",
+    "workspaceIds": ["<workspace-id>"],
+    "shadow": true,
+    "projection": "shadow"
+  },
+  "baseRevision": 0
+}
+```
+
+- `workspaceIds` 是宿主的 workspace UUID，不是路径；宿主通过 workspace registry 把 agent 的
+  cwd 映射成这个 id。找不到 UUID 且是单用户机器时，可以用 `"mode": "global"` 放开到所有
+  **已定义**的工作区；没有工作区的会话仍然不可见。
+- `baseRevision` 取你刚读到的 `data.scope.revision`（首次写入是 `0`）。这是 compare-and-swap：
+  revision 过期会返回 `ERR_SCOPE_REVISION_CONFLICT`，重读 `status` 再试。
+- `body` 里的 `version` 与 `revision` 是 store 自有的，带这两个字段会被拒绝。
+
+写入成功后再 `status` 一次，健康输出应当满足：
+
+- `ok: true`，`data.scope.workspaceIds` 含刚写入的 id，`data.scope.revision` 变成 `1`（每次写加一）。
+- `data.shadow` 为 `true`，`data.projection` 为 `"shadow"`——正是影子周的状态。
+- `data.degraded` 为空（POSIX、宿主有 token meter 与 spill 后端时）；`estimate_kind` 为
+  `"host"`，`fixedOverheadTokens` 是一个数字，不是 `"unknown"`。
+- `data.counts` 一开始为空，正常工具调用后会累积，例如出现 `projection-shadow` 条目。
+
+节选（数值示意；账目字段有省略）：
+
+```json
+{
+  "ok": true,
+  "data": {
+    "scope": { "mode": "selected", "workspaceIds": ["<workspace-id>"], "revision": 1 },
+    "shadow": true,
+    "projection": "shadow",
+    "degraded": [],
+    "fixedOverheadTokens": 772,
+    "estimate_kind": "host",
+    "counts": {}
+  }
+}
+```
+
+`fixedOverheadTokens` 是启动时实测的每请求固定开销（协议段 + `boost` 工具 schema；本 checkout
+为 772）。它不是从使用量里推断的。
+
+## 影子周
+
+设计选择**影子优先**：先用一周只记账、不改模型看到的内容，再决定是否真的投影与替换。
+`scope.json` 里有两个独立开关：
+
+| 开关 | 取值 | 行为 |
+|---|---|---|
+| `shadow` | `true` | 替换决策只记账（`kind:'shadow'` 收据），不合成、不跳过任何调用 |
+| | `false` | 守卫满足的 `read` / `grep` / `glob` 调用会被真正替换 |
+| `projection` | `off` | 完全不投影 |
+| | `shadow` | 只计算“如果投影会省多少”，不改模型可见 content，不写 spill |
+| | `on` | 先把完整原文交给宿主 spill 后端，再把回执换成 head + 页脚 + tail |
+
+推荐的顺序：
+
+1. **第一周**：按上面的 `scope-set` 使用 `shadow: true`、`projection: 'shadow'`，照常工作。
+2. **读报告**：在仓库 checkout 里跑
+   `node scripts/shadow-report.mjs --dir "${DSH_HOME:-$HOME/.dsh}/boost/receipts"`。
+   这个脚本是 dev-only，不在 npm tarball 里。它输出四个标签：
+   `saveableRatio`（只读白名单真正能兑现的替换比例）、`byFamily`（按候选工具族的命中率）、
+   `candidateRecall`（候选集召回）、`retrievalUpperBound`（取回率上界；影子期没有真正投影，
+   结构上恒为 `0`）。
+3. **打开投影**：报告支持的话，保持 `shadow: true`，把 `projection` 改成 `'on'`：
+
+   ```json
+   { "cmd": "scope-set", "body": { "projection": "on" }, "baseRevision": 1 }
+   ```
+
+   `scope-set` 只覆盖你传入的字段，其余保持不变。此时回执开始真正被替换，但替换决策仍然只记账。
+4. **再打开替换**：按 [docs/RELEASE.md](docs/RELEASE.md) §4 确认没有出现 `content[].thinking` 的 400 之后，
+   把影子关掉：
+
+   ```json
+   { "cmd": "shadow", "body": false, "baseRevision": 2 }
+   ```
+
+`projection: 'on'` 依赖宿主的 spill 后端。后端缺失时，超限回执**不投影**，原文完整进入历史
+（收据 `projection-skipped:no-spill`，`status.degraded` 带 `ERR_HOST_NO_SPILL`）。影子模式
+不需要 spill。
 
 ## 配置
 
-`cordis.patch.yml` 里的 `config` 是**整体替换**，不做深合并：缺键回落插件默认值，列出的键就是
-该 profile 的完整配置面。没有列出的工具族一律不投影。
+`cordis.patch.yml` 里的 `config` 是**整体替换**，不做深合并：缺键回落插件默认值。但要注意：
+`resolveConfig` 会用默认值填满**全部五个工具族**（`read` / `grep` / `glob` / `bash` / `ssh`），
+所以**删掉一个族不是关掉它**——删掉 `projection.bash` 只会让 bash 按默认的 4000/2000/500
+投影。要真正关掉一个族，把它的 `triggerChars` 提到你所有回执之上；投影的字节上限是 256 KiB，
+`300000` 足以让该族全部不触发（不存在 per-family 的 off 键）。
+
+配置里的 `projection.*` 是**窗口**，不是开关；开关在 `scope.json` 的 `projection` 字段，
+由 `boost scope-set` 写。
 
 | 键 | 默认值 | 作用 |
 |---|---|---|
@@ -43,36 +175,136 @@ registry 的 `latest` 标签指向 `0.0.1-rc.1`，那是无关的旧 API，用�
 | `projection.grep.*` | 700 / 400 / 100 | `grep` 窗口 |
 | `projection.glob.*` | 700 / 400 / 100 | `glob` 窗口 |
 | `projection.bash.*` | 4000 / 2000 / 500 | `bash` 窗口 |
-| `projection.ssh.*` | 2000 / 1200 / 300 | `mcp__ssh__execute-command` 窗口 |
+| `projection.ssh.*` | 2000 / 1200 / 300 | `mcp__ssh__*`（如 `mcp__ssh__execute-command`）窗口 |
 | `admission.thresholdTokens` | 1024 | 每个候选进入替换所需的最小净节省；唯一候选的确定性提交豁免 |
 | `selector.maxTokens` | 512 | 多候选选择器的输出预算（输入 + 输出上界从节省里扣） |
 | `stepsPerTurn` | 8 | 每个 turn 的替换步数上限 |
 | `horizonSteps` | 20 | 算不出会话历史均值时的剩余步数 horizon |
 | `historyTurns` | 5 | 求步数均值所用的最近 turn 数 |
 
-不变量：`triggerChars ≥ headChars + tailChars + 页脚（约 110B） + 1`。窗口不得大于等于触发阈值，
-否则会出现"触发了却裁不动"的净亏区间。
+字符按 Unicode 码点计。错误回执与超过 256 KiB 的回执不投影。
+
+不变量不是 `triggerChars ≥ headChars + tailChars + 1`。真实替换串是 head line + head + 页脚 +
+tail + 3 个换行；页脚由宿主 `formatSpillNotice` 生成，约 190 字符（68 字符 locator、5 位省略
+字节数、宿主固定 retrieval hint）。grep/glob 默认 400+100 时：
+`400 + 100 + 50（head line） + 192（页脚） + 3 = 745 > 700`。于是刚过 700、约 745 以下的回执
+会被 `truncate` 判定“可裁”，但 `projectApply` 组装后并不短于原文，直接返回原文——这是死区，
+不是净亏。运行时的 `assembled.length >= text.length` 检查保证投影绝不会让回执变长；要消除
+死区，把 `triggerChars` 提到至少这个和（例如 grep/glob 用 800），或缩小窗口。页脚长度会随
+locator 与数字位数浮动。
+
+（`projection: 'shadow'` 定价只含 `(Omitted N bytes.)` 省略句，不含 locator/页脚全文，所以
+影子账的 `after` 是下界；apply 路径在写入后还会再核对一次。）
+
+## Bundle patch
+
+`cordis.patch.yml` 只有一条 `insert`，落在 profile root 上：
+
+```yaml
+- insert:
+    - id: dsh-boost
+      name: 'dsh-boost'
+      config:
+        projection:
+          read:  { triggerChars: 3000, headChars: 2000, tailChars: 500 }
+          grep:  { triggerChars: 700,  headChars: 400,  tailChars: 100 }
+          glob:  { triggerChars: 700,  headChars: 400,  tailChars: 100 }
+          bash:  { triggerChars: 4000, headChars: 2000, tailChars: 500 }
+          ssh:   { triggerChars: 2000, headChars: 1200, tailChars: 300 }
+        admission: { thresholdTokens: 1024 }
+        selector:  { maxTokens: 512 }
+        stepsPerTurn: 8
+        horizonSteps: 20
+        historyTurns: 5
+```
+
+宿主判定“这一行已装配”的条件是两个**独立**的等式：
+
+```text
+row.id   === entry.options.id
+row.name === entry.options.name
+```
+
+`id` 与 `name` **不需要彼此相等**：宿主自己的 `dsh-mcp-btwy` patch 就写成 `id: dsh-mcp-server`、
+`name: dsh-mcp-btwy`。本包让四个名字全部保持为 `dsh-boost`（npm 包名、导出的插件 `name`、
+patch 行的 `id` 与 `name`）。任一等式不成立，宿主会**静默跳过**该行，不报错。
+
+## 状态、回滚与卸载
+
+状态在 `$DSH_HOME/boost/`（`$DSH_HOME` 未设置时回退 `~/.dsh`）：
+
+- `scope.json`——暴露面的唯一事实来源（version 2，带 revision）。
+- `scope.lock`——写路径的短锁，正常写入结束后删除。
+- `receipts/<encoded-session>.jsonl`——追加式收据，只存元数据与回执前 256 个码点的
+  preview，不存 stdout 全文。
+
+`projection: 'on'` 时，完整原文在替换发生**之前**写入宿主的 spill 后端，页脚 locator 可以用
+`read` / `grep` 取回。投影不会丢掉唯一副本；spill 写入失败就不替换（收据记 `spill-failed`，
+页脚失败记 `footer-failed`）。
+
+回滚与停用：
+
+- **关掉两个行为**（不再投影、不再替换，但已选工作区仍会注入协议段，替换决策仍写影子收据，
+  固定开销照旧）：
+
+  ```json
+  { "cmd": "scope-set", "body": { "projection": "off", "shadow": true }, "baseRevision": 1 }
+  ```
+
+- **只关掉某个工作区（真正惰性）**：把它从 `workspaceIds` 移除；列表为空时协议段、投影、
+  替换全部停止。
+
+  ```json
+  { "cmd": "scope-set", "body": { "workspaceIds": [] }, "baseRevision": 2 }
+  ```
+
+- **卸载插件**：`dsh plugin --profile <name> remove dsh-boost`，然后重启 DSH。
+- 删除 `$DSH_HOME/boost` 会清掉 scope 与收据（回到默认），但不会删除宿主 spill 后端里已经
+  写出的原文文件。
 
 ## 宿主依赖
 
 `inject` 是硬依赖：`tools`、`llm`、`systemPrompt`——缺任一，插件加载失败。
 
-| 服务 | 形态 | 缺失时 |
+| 依赖 | 形态 | 缺失时 |
 |---|---|---|
-| `tokenMeter` | 软（`ctx.get('tokenMeter')`） | 拒绝启用替换；投影仍可用，投影账记 `unknown`（不伪造数字），`ERR_HOST_NO_TOKENMETER` |
-| `spillStore` | 软（`ctx.get('spillStore')`） | `projection: 'on'` 时超限回执不投影（保住证据），`projection-skipped:no-spill`，`ERR_HOST_NO_SPILL` |
-| `tools.resolve` 的步骤级 `when` | 软探测 | 整族不注册，`ERR_HOST_NO_STEP_WHEN` |
+| `tokenMeter` | 软（`ctx.get('tokenMeter')`） | 拒绝替换；投影仍可用，投影账记 `unknown`（不伪造数字）；`status.degraded` 带 `ERR_HOST_NO_TOKENMETER` |
+| `spillStore` | 软（`ctx.get('spillStore')`） | `projection: 'on'` 时超限回执不投影（保住证据），`projection-skipped:no-spill`；`status.degraded` 带 `ERR_HOST_NO_SPILL` |
+| `@deepseek-ai/dsh-token-meter/estimate` | 软（动态 import） | 固定开销无法测量，`fixedOverheadTokens` 为 `'unknown'`；`status.degraded` 带 `ERR_HOST_NO_ESTIMATOR` |
+| `win32` 平台 | 运行时检查 `isPosixOnly()` | 拒绝替换，投影照常；`status.degraded` 带 `ERR_HOST_PLATFORM_UNSUPPORTED` |
+| `tools.resolve` 的步骤级 `when` | 软探测 | 整族（含 `boost` 工具）不注册，`ERR_HOST_NO_STEP_WHEN`；它通常出现在注册警告里，`status` 本身不可用 |
+
+`ERR_HOST_NO_TOKENMETER` 与 `ERR_HOST_NO_ESTIMATOR` 是**两件不同的事**，不要合并：
+前者是宿主服务（`ctx.get('tokenMeter')`）不存在，替换被拒绝；后者是纯估算包
+`@deepseek-ai/dsh-token-meter/estimate` 不可达，只影响固定开销的数字。一个可以存在而另一个
+不存在；合并会把操作者引到错误的宿主上。`ERR_HOST_NO_SPILL` 只在 `projection: 'on'` 时报告，
+影子模式不碰 spill，报它只会制造噪音。
 
 `tokenMeter` 与 `spillStore` 不能写进 `inject`：宿主没有该服务时插件会直接加载失败，
-"拒绝替换、投影照做、保住证据"的降级路径就不可达。
+“拒绝替换、投影照做、保住证据”的降级路径就不可达。
+
+## v1 的边界
+
+- 只做两件事：**就地替换工具回执**，以及**替换只读调用**（`read` / `grep` / `glob`）。
+- **不批量执行工具调用**（没有 PTC / `run_code`，设计 N1）。
+- **不去重、不合并工具调用**（设计 N5）。
+- **不支持 desktop profile**（设计 D6）。
+- 不替换、也不接管 DSH 的压缩、剪枝与 spill 决策（设计 N3）；投影只改模型可见 content，
+  原文仍借宿主 spill 存放。
+- 不做模型训练或权重改动（N2）；不追求论文里的 87.93%（N4）。
+- 不承诺 10%：3.5% 是保底线，10% 是全程存活的理想上界；影子周实测只用于收窄区间。
 
 ## 文档
+
+以下文档在**仓库**里，不在 npm tarball 里（`files` 只带 `dist`、`src`、`locale`、
+`cordis.patch.yml`、两份 README、`LICENSE`、`NOTICE`）。在 npm 页面上请从仓库读取。
 
 | 文档 | 内容 |
 |---|---|
 | [设计稿](docs/superpowers/specs/2026-11-18-dsh-token-efficiency-design.md) | 目标、证据、架构、契约、度量、风险、发布形态 |
 | [宿主契约附录](docs/superpowers/plans/2026-11-18-host-contracts.md) | 逐条抄自宿主源码的接口准绳 |
 | [三层委派研究](docs/research/2026-11-18-three-tier-delegation.md) | 缓存、路由阈值、压缩、校验的 25 条一手来源 |
+| [发布验收](docs/RELEASE.md) | `npm pack` / isolated 安装、两条软依赖降级路径、20 任务回归门、影子周与统计复算 |
 
 ## 许可证
 

@@ -2,7 +2,7 @@
   "name": "dsh-boost",
   "description": "通过工具回执投影与确定性只读替换降低 DeepSeek Harness 的 token 消耗。",
   "config.projection.read.triggerChars": "read 回执超过该字符数才投影。",
-  "config.projection.read.headChars": "read 回执保留的头部队列字符数。",
+  "config.projection.read.headChars": "read 回执保留的头部字符数。",
   "config.projection.read.tailChars": "read 回执保留的尾部字符数。",
   "config.projection.grep.triggerChars": "grep 回执超过该字符数才投影。",
   "config.projection.grep.headChars": "grep 回执保留的头部字符数。",
