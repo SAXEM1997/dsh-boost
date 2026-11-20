@@ -7,11 +7,13 @@
  * packs exactly what `npm publish` would upload and then proves the artifact:
  *
  *   1. the tarball is an exact allowlist: every entry is accounted for by a
- *      source file (`dist/`), a declared locale, or a fixed root file. An
- *      unexpected entry such as `package/dist/ghost.js` fails by name;
+ *      source file (`dist/`), a declared locale, a fixed root file, or the
+ *      bundle patch `package.json` declares. An unexpected entry such as
+ *      `package/dist/ghost.js` fails by name;
  *   2. it contains `dist/index.js` (the publish guard) and every dist entry
  *      the source tree declares, not just the `exports` map's `dist/index.js`;
- *   3. `exports`, `main` and `types` targets all exist in the installed tree;
+ *   3. `exports`, `main` and `types` targets all exist in the installed tree,
+ *      and the file named by `dsh.bundle.patch` exists there too;
  *   4. it installs into a throwaway project with `--ignore-scripts` (so a
  *      malicious/broken lifecycle script cannot run in CI), and that install
  *      is probed: `import` (ESM), `require` (Node's require(esm)), and both
@@ -62,6 +64,9 @@ const REQUIRED_LOCALES = ['en.json', 'zh.json']
 /**
  * Root files `npm publish` must upload. `README.en.md` and `README.md` are
  * hand-maintained, not derivable from `src/`, so they stay an explicit list.
+ * The bundle patch is *not* here: `package.json` owns its path, so the
+ * allowlist derives that entry from `dsh.bundle.patch` instead of trusting a
+ * hardcoded filename.
  */
 const ROOT_ENTRIES = [
   'package/package.json',
@@ -69,8 +74,33 @@ const ROOT_ENTRIES = [
   'package/NOTICE',
   'package/README.md',
   'package/README.en.md',
-  'package/cordis.patch.yml',
 ]
+
+/**
+ * The bundle patch a manifest declares, normalized to a package-relative path.
+ *
+ * `dsh.bundle.patch` is how the host finds the row this package inserts, so a
+ * manifest that names a missing file is a broken install even though every
+ * `exports` target still resolves. Requiring a string here also keeps the
+ * allowlist honest: the entry is derived from the field, never hardcoded.
+ */
+function bundlePatchOf(manifest, label) {
+  const patch = manifest?.dsh?.bundle?.patch
+  if (typeof patch !== 'string') {
+    throw new Error(`${label}: dsh.bundle.patch must be a string, got ${typeof patch}`)
+  }
+  const normalized = patch.startsWith('./') ? patch.slice(2) : patch
+  if (
+    normalized === '' ||
+    normalized.startsWith('/') ||
+    normalized.split('/').includes('..')
+  ) {
+    throw new Error(
+      `${label}: dsh.bundle.patch must be a non-empty package-relative path, got ${JSON.stringify(patch)}`,
+    )
+  }
+  return normalized
+}
 
 const npm = process.platform === 'win32' ? 'npm.cmd' : 'npm'
 
@@ -140,6 +170,7 @@ function sourceFiles() {
  */
 function expectedTarballEntries() {
   const expected = new Set(ROOT_ENTRIES)
+  expected.add(`package/${bundlePatchOf(pkg, 'package.json')}`)
   for (const file of sourceFiles()) {
     const stem = `package/dist/${file.replace(/\.ts$/, '')}`
     expected.add(`${stem}.js`)
@@ -164,7 +195,8 @@ function assertTarballAllowlist(listed) {
     if (!expected.has(entry)) {
       throw new Error(
         `tarball entry is not in the allowlist: ${entry}\n` +
-          'expected only the fixed root files, locale JSON, and one .js/.js.map/.d.ts per src/*.ts',
+          'expected only the fixed root files, the manifest-declared bundle patch, locale JSON, ' +
+          'and one .js/.js.map/.d.ts per src/*.ts',
       )
     }
   }
@@ -207,6 +239,12 @@ function assertDeclaredTargets(installed, installedPkg) {
     const target = installedPkg[field]
     if (typeof target === 'string') assertFile(join(installed, target), field)
   }
+}
+
+/** The manifest-declared bundle patch must be present in the installed tree. */
+function assertBundlePatch(installed, installedPkg) {
+  const patch = bundlePatchOf(installedPkg, 'installed package.json')
+  assertFile(join(installed, patch), `dsh.bundle.patch -> ${patch}`)
 }
 
 /** The consumer probe: shape, both module systems, and both locales. */
@@ -394,6 +432,9 @@ function verify({ tarball, tarballName, packed }) {
 
     assertDeclaredTargets(installed, installedPkg)
     checks.push({ name: 'exports-targets', install: 'ignore-scripts' })
+
+    assertBundlePatch(installed, installedPkg)
+    checks.push({ name: 'bundle-patch', install: 'ignore-scripts' })
 
     runProbe(primary, 'ignore-scripts', checks)
     runTypecheck(primary, 'ignore-scripts', checks)

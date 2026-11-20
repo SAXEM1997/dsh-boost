@@ -1,9 +1,17 @@
 {
   "name": "dsh-boost",
   "version": "0.1.0",
-  "description": "Cut DSH token usage by projecting tool receipts and skipping deterministic read-only calls. Install as dsh-boost@^0.1.0: the registry latest tag still points at the incompatible 0.0.1-rc.1.",
+  "description": "Cut DSH token usage by projecting tool receipts and skipping deterministic read-only calls.",
   "type": "module",
   "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/SAXEM1997/dsh-boost.git"
+  },
+  "homepage": "https://github.com/SAXEM1997/dsh-boost",
+  "bugs": {
+    "url": "https://github.com/SAXEM1997/dsh-boost/issues"
+  },
   "keywords": [
     "dsh",
     "dsh-plugin",

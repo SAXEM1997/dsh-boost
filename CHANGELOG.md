@@ -17,13 +17,10 @@ Design rationale lives in `docs/superpowers/specs/`; the release-acceptance proc
 
 ## [0.1.0] - 2026-11-20
 
-<!-- 版本链接暂缺：github.com/SAXEM1997/dsh-boost 不存在（404），实际远端是内网 GitLab
-     （gitlab.ai.isv.iridesc.cn:23000/zyx/dsh-boost），且两边都还没有 v0.1.0 标签，
-     任何 releases/tag 或 compare 链接今天都会 404。发布标签后恢复
-     [Unreleased]/[0.1.0] 链接定义。 / Version links omitted for now: the GitHub repo does
-     not exist (404), the real remote is the internal GitLab, and neither has a v0.1.0 tag,
-     so any releases/tag or compare URL would 404 today. Restore the [Unreleased]/[0.1.0]
-     link definitions once a tag is published. -->
+<!-- 版本链接暂缺：还没有 v0.1.0 标签，任何 releases/tag 或 compare 链接今天都会 404。
+     发布标签后恢复 [Unreleased]/[0.1.0] 链接定义。 / Version links omitted for now: there
+     is no v0.1.0 tag yet, so releases/tag and compare URLs would 404 today. Restore the
+     [Unreleased]/[0.1.0] link definitions once a tag is published. -->
 首个可用版本。默认作用域是 `selected` + 空工作区列表：不投影、不替换、不注入协议段——但
 **不是零成本**：`boost` 工具只要插件装配就注册，其 schema（本 checkout 实测 399 token）
 随**每个**模型请求常驻。装上但未启用是一个每请求 399 token 的小额净支出。
@@ -81,16 +78,14 @@ of 399 tokens per request.
 - **零 peerDependencies 的安装面**：包不声明任何 peerDependencies——安装只新增 `dsh-boost`
   本体，不再拉出重复的 `@deepseek-ai/*` 宿主树；运行时能力由宿主提供，缺了走降级。
   `exports` 同时带 `require`/`default`（Node ≥ 24.9 的 require(esm) 可用）；`src/` 不进包，
-  `dist` 的 sourcemap 内联源码。registry 的 `latest` 改指 0.1.0 之前请安装
-  `dsh-boost@^0.1.0`（发布者执行 `npm publish`，或对已按其它 tag 发布的 0.1.0 运行
-  `npm dist-tag add dsh-boost@0.1.0 latest`）。
+  `dist` 的 sourcemap 内联源码。0.1.0 是首次发布：发布后 registry 的 `latest` 即 0.1.0，
+  所以 `dsh-boost@^0.1.0` 就是正确的安装规格。
   Zero-peerDependencies install surface: the package declares no peerDependencies — installing
   it adds only `dsh-boost` itself and no longer pulls a duplicate `@deepseek-ai/*` host tree;
   the host provides the runtime capabilities and gaps degrade. `exports` also maps
   `require`/`default` (Node >= 24.9 require(esm) works); `src/` is no longer shipped and the
-  `dist` source maps inline the sources. Until the registry `latest` points at 0.1.0, install
-  `dsh-boost@^0.1.0` (the publisher runs `npm publish`, or `npm dist-tag add dsh-boost@0.1.0
-  latest` once 0.1.0 is out under another tag).
+  `dist` source maps inline the sources. 0.1.0 is the first release: once published, the
+  registry `latest` tag is 0.1.0, so `dsh-boost@^0.1.0` is simply correct.
 
 ### 已知限制 Known limitations
 
@@ -98,7 +93,12 @@ of 399 tokens per request.
   Substitution is POSIX-only; on Windows it is refused while projection still works.
 - 不含工具批量调用（PTC）、不做工具调用去重、不支持 desktop profile。
   No batched tool calls, no deduplication of tool calls, no desktop profile.
-- 模型路由若为 Anthropic 兼容 thinking 模式，合成回合缺少 sibling `thinking` 块可能被拒；上线
-  首轮需按 `docs/RELEASE.md` 检查含 `content[].thinking` 的 400。
-  On an Anthropic-compatible thinking route, a synthesized turn without a sibling `thinking` block
-  may be rejected; check for a 400 mentioning `content[].thinking` in the first substitution round.
+- 模型路由若为 Anthropic 兼容 thinking 模式，合成回合**会**先发一个 `reasoning` 块，但该消息没有
+  `replayState`；pi-ai 的 `transformMessages` 会在上线前丢掉这个块，服务端仍可能看到没有 sibling
+  `thinking` 的 `tool_use` 并返回含 `content[].thinking` 的 400。上线首轮需按 `docs/RELEASE.md`
+  检查这个 400。
+  On an Anthropic-compatible thinking route the synthesized turn **does** emit a `reasoning` block
+  first, but the message has no `replayState`; pi-ai's `transformMessages` drops the block before the
+  wire, so the server may still see a `tool_use` without a sibling `thinking` and return a 400
+  mentioning `content[].thinking`. Check for that 400 in the first substitution round, per
+  `docs/RELEASE.md`.
