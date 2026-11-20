@@ -39,11 +39,12 @@ of 399 tokens per request.
   host's spill backend, and the footer carries a locator that retrieves it. Five families, each
   with its own trigger and window.
 - **确定性替换**：模型可在一条消息里写一份计划，把下一步的若干个候选（字面量参数 + 回执局部守卫）
-  一次声明完；守卫由代码判定，单一候选直接提交，多候选交给一次一 token 的选择器。替换只覆盖
-  `read` / `grep` / `glob` 三个只读工具。
+  一次声明完；守卫由代码判定，单一候选直接提交，多候选交给一次单标签选择器（一次辅助请求，
+  输出预算 512 token，输入另计）。替换只覆盖 `read` / `grep` / `glob` 三个只读工具。
   Deterministic substitution: the model declares a plan with literal arguments and receipt-local
   guards; code evaluates the guards, a single eligible candidate commits, several go to a
-  one-token selector. Substitution is limited to three read-only tools.
+  single-label selector — one auxiliary request, 512-token output budget plus its input.
+  Substitution is limited to three read-only tools.
 - **影子模式**：`shadow: true` 时替换决策只记账，不合成回合。投影由**独立的** `projection`
   字段控制；默认 `projection: 'shadow'` 同样只记账、不改模型可见内容，真正投影要显式设为
   `'on'`。影子周按设计零节省，用于上线前的观察周。
@@ -56,10 +57,13 @@ of 399 tokens per request.
   revision 校验，冲突返回稳定码而不是覆盖。
   The `boost` control tool: `status`, `scope-get`, `scope-set`, `shadow`. Every write is
   revision-checked; a conflict returns a stable code instead of overwriting.
-- **可审计的收据**：每次决定写一行 JSONL，含计划目标、守卫、绑定后的参数、回执预览与节省量；
-  写入按会话分片、崩溃安全、**连续 3 次**写失败即停止替换（fail-closed）。
-  Auditable receipts: one JSONL line per decision with the plan goal, guards, bound arguments, a
-  receipt preview and the saving. Sharded per session, crash-safe, and fail-closed after 3
+- **可审计的收据**：每次决定写一行 JSONL。替换类收据含计划目标与守卫、绑定后的参数、回执预览
+  与节省量；投影类与跳过类收据含参数与预览，但**不带**计划证据。写入按会话分片、崩溃安全、
+  **连续 3 次**写失败即停止替换（fail-closed）。
+  Auditable receipts: one JSONL line per decision. Substitution receipts carry the plan goal and
+  guards, the bound arguments, a receipt preview and the saving; projection and skip receipts
+  carry arguments and a preview but **no** plan evidence. Sharded per session, crash-safe, and
+  fail-closed after 3
   consecutive write failures.
 - **失败即可见的降级**：`boost status` 暴露稳定的 `ERR_HOST_*` 码与 `protocol_suppressed`
   计数，所以"插件没生效"与"宿主缺能力"可以区分开。收据分片读不出来时另报
