@@ -1,6 +1,8 @@
 # dsh-boost 实现计划
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use subagent-driven-development (recommended) or executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+>
+> **2026-11-21 设计回写**：本计划保留 2026-11-18 的任务拆分；实现已在后续提交中收窄——`llm` 改软依赖、删除 `supportsStepWhen` / `ERR_HOST_NO_STEP_WHEN`、不声明 `peerDependencies`、Node `>=24.9.0`。任务正文与设计稿 §13 冲突时，以设计稿为准。
 
 **Goal:** 让 DSH 插件在工具回执进入上下文前做追加式投影、对只读三件套做确定性替换，按 raw token 记账。
 
@@ -8,15 +10,15 @@
 
 **Task Map:** 共 28 个任务——T1–T22 是单元层（每个都能独立 RED→GREEN），T23a/b/c 是装配层（协议层 / post-execute / llm-stream 三段，拆开是为了让每段能独立 RED→GREEN），T24–T26 是集成、降级与发布门。
 
-**Tech Stack:** TypeScript 5.6 / ESM / Node ≥ 22.18 / `node --test` + `tsx` / cordis 插件 API（`@deepseek-ai/dsh-tools`、`dsh-llm`、`dsh-system-prompt`）。
+**Tech Stack:** TypeScript 5.6 / ESM / Node ≥ 24.9.0 / `node --test` + `tsx` / cordis 插件 API（`@deepseek-ai/dsh-tools`、`dsh-llm`、`dsh-system-prompt`）。
 
 **Spec:** `docs/superpowers/specs/2026-11-18-dsh-token-efficiency-design.md`（下称"设计稿"，行号引用以该文件为准）
 **Clarifications:** `docs/superpowers/clarifications/2026-11-18-dsh-token-efficiency.md`
 
 ## Global Constraints
 
-- TypeScript 严格模式；`"type": "module"`；Node `>=22.18.0`。
-- 不引运行时依赖（`dependencies` 为空）。宿主包走 `peerDependencies`，`dsh-spill-policy` / `dsh-token-meter` 标 `optional`（设计稿 §11）。
+- TypeScript 严格模式；`"type": "module"`；Node `>=24.9.0`。
+- 不引运行时依赖（`dependencies` 为空）。宿主包只进精确 pin 的 `devDependencies`，**不声明 `peerDependencies`**；`dsh-spill-policy` / `dsh-token-meter` 用 `await import(...)` 包 try/catch（设计稿 §11：声明 peer 会让 npm 装第二份宿主树）。
 - 所有宿主管线之外的模块必须是**纯函数**，输入输出只含字符串/对象，便于表驱动测试。
 - 一切失败**回退主模型**，不猜（§5.2-3）。
 - v1 替换白名单只有 `read` / `grep` / `glob`；投影覆盖 `read` / `grep` / `glob` / `bash` / `ssh`（§5.2-5）。
@@ -84,11 +86,11 @@ Expected: FAIL，`Cannot find module '../src/index.ts'`
 
 - [ ] **Step 3: 建骨架**
 
-`package.json` 逐字采用设计稿 §11 的块（含 `version: 0.1.0`、`exports`、`peerDependencies` + `peerDependenciesMeta.optional`、`engines.dsh`、`dsh.bundle.patch`），只补 `"scripts": { "build": "tsc -p tsconfig.json", "test": "node --import tsx --test \"test/**/*.test.ts\"" }` 与 `devDependencies: { typescript, tsx, @types/node }`。**glob 必须加引号**：不加引号时 sh 只展开单层，根目录测试会被漏跑。
-**另需**：`peerDependencies` 与 `devDependencies` 都加上 `@deepseek-ai/dsh-llm`（`declare module` 合并与 T14 的 `GenerateOptions`/`StreamChunk` 类型都靠它；isolated 布局下缺它直接 TS2307）。源码内 import 一律用 `./x.js` 说明符——`module: NodeNext` 下写 `.ts` 会 TS5097、写裸 `./x` 会 TS2835，第一个跨模块 import 就会让 `npm run build` 失败。
+`package.json` 以设计稿 §11 为准（`version: 0.1.0`、`exports`、`engines.node: ">=24.9.0"`、`engines.dsh`、`dsh.bundle.patch`；**无 `dependencies`、无 `peerDependencies`**），只补 `"scripts": { "build": "tsc -p tsconfig.json", "test": "node --import tsx --test \"test/**/*.test.ts\"" }` 与 `devDependencies: { typescript, tsx, @types/node }`。**glob 必须加引号**：不加引号时 sh 只展开单层，根目录测试会被漏跑。
+**另需**：只在 `devDependencies` 里加 `@deepseek-ai/dsh-llm`（`declare module` 合并与 T14 的 `GenerateOptions`/`StreamChunk` 类型都靠它；isolated 布局下缺它直接 TS2307）。源码内 import 一律用 `./x.js` 说明符——`module: NodeNext` 下写 `.ts` 会 TS5097、写裸 `./x` 会 TS2835，第一个跨模块 import 就会让 `npm run build` 失败。
 `tsconfig.json`：`target: ES2023`、`module: NodeNext`、`strict: true`、`declaration: true`、`types: ["node"]`、`outDir: dist`、`rootDir: src`、`include: ["src"]`。`declaration` 缺失时 `prepublishOnly` 的 `test -f dist/index.d.ts` 必挂；`types: ["node"]` 让 `node:fs` / `Buffer` 通过编译。
 `src/index.ts` 只导出上面三个符号；`apply` 暂为空函数体加 `ctx.logger?.info?.('dsh-boost loaded')`。
-`cordis.patch.yml` 按 §5.3 的完整 config 面写，`maxInlineTokens` 不下发（那是宿主 spill 的键，不是本插件的）；行必须是 `- id: dsh-boost` + `name: 'dsh-boost'`（缺一个宿主就静默跳过，§11）。`README.md` 用中文写主文档、`README.en.md` 是英文对应版（§11.2）；`locale/zh.json` / `locale/en.json` 放配置项标题；`scripts/` 与 `test/regression/` 先放 `.gitkeep` 占位，由 T26 落内容。
+`cordis.patch.yml` 按 §5.3 的完整 config 面写，`maxInlineTokens` 不下发（那是宿主 spill 的键，不是本插件的）；行写 `- id: dsh-boost` + `name: 'dsh-boost'`（这是插件管理面的在役/可寻址归因，**不是加载条件**；宿主不按 id/name 匹配，§11）。`README.md` 用中文写主文档、`README.en.md` 是英文对应版（§11.2）；`locale/zh.json` / `locale/en.json` 只放 `meta.title` / `meta.description`；`scripts/` 与 `test/regression/` 先放 `.gitkeep` 占位，由 T26 落内容。
 
 - [ ] **Step 4: 运行确认通过**
 
@@ -1278,7 +1280,7 @@ Expected: FAIL，模块不存在
 
 - [ ] **Step 3: 实现**
 
-调 `llm.stream({ provider, model, reasoningEffort, purpose: SELECTOR_PURPOSE, maxTokens, messages: [...] })`（provider/model 透传边界请求自身的值），`for await` 只累加 `{type:'text-delta'}` 的 `text`；遇到 `{type:'finish', reason:{kind:'error'|'aborted'}}` 记 `error`；`Promise.race` 加 20s 默认超时。只接受**恰好等于某个候选 id 的单字符**；`?` 或其它 → `no-label`。系统提示逐字限定"只允许输出一个候选标签或 `?`"。`purpose` 已在 T1 经 `LlmRequestPurposeMap` 声明合并；网关拒绝 `purpose` 时，回退到不带 `purpose` 的同一 provider/model 重试一次（§5.1）；`BoostConfig.selector` 只有 `maxTokens`，没有 `model`。
+调 `llm.stream({ provider, model, reasoningEffort, purpose: SELECTOR_PURPOSE, maxTokens, messages: [...] })`（provider/model 透传边界请求自身的值），`for await` 只累加 `{type:'text-delta'}` 的 `text`；遇到 `{type:'finish', reason:{kind:'error'|'aborted'}}` 记 `error`；`Promise.race` 加 20s 默认超时。只接受**恰好等于某个候选 id 的单字符**；`?` 或其它 → `no-label`。系统提示逐字限定"只允许输出一个候选标签或 `?`"。`purpose` 已在 T1 经 `LlmRequestPurposeMap` 声明合并，且**始终发送、没有回退**：宿主的 header-preparation 插件消费它，不进入请求体，网关无法拒绝（设计 §5.1）；`BoostConfig.selector` 只有 `maxTokens`，没有 `model`。
 
 - [ ] **Step 4: 运行确认通过**
 
@@ -1993,7 +1995,7 @@ git push origin main   # remote 由 T1 布置（内网镜像）；GitHub 作为�
 - Create: `src/hooks/pending.ts`, `src/hooks/synthesize.ts`, `test/hooks-pending.test.ts`
 
 **Interfaces:**
-- Consumes: `StreamChunk`/`TokenUsage`/`ToolCallId`（`@deepseek-ai/dsh-llm/types`，T1 已加 peer 依赖）
+- Consumes: `StreamChunk`/`TokenUsage`/`ToolCallId`（`@deepseek-ai/dsh-llm/types`，T1 已加 dev 依赖）
 - Produces: `export interface PendingEntry { callId: string; candidateId: string; name: string; args: Record<string, unknown>; turn: number | string; step: number | string; createdAt: number }`——`step` 是**宿主回合内的步号**，不是插件自数的计数：同一候选在同一回合的两个不同步上替换时必须得到不同的 `callId`，否则宿主会落两条 `id` 相同的 assistant `tool_use`，Anthropic 风格的路由会直接拒绝。
 - Produces: `export class PendingQueue { set(sessionId: string, e: PendingEntry): void; take(sessionId: string): PendingEntry | undefined; peek(sessionId: string): PendingEntry | undefined; clear(sessionId: string): void; size(): number }`——键是 **sessionId**
 - Produces: `export function callIdFor(sessionId: string, turn: number | string, step: number | string, candidateId: string): string`——`sha256(JSON.stringify([sessionId, String(turn), String(step), candidateId]))` 前 16 位。**用 JSON 数组而不是 `/` 拼接**：拼接对分隔符有歧义（`('s','1','2/3','c')` 与 `('s','1/2',3,'c')` 同串）。
@@ -2300,7 +2302,7 @@ git commit -m "feat: host capability probes, family mapping, fixed-cost measurem
 
 **Files:**
 - Create: `scripts/shadow-report.mjs`, `scripts/session-stats.mjs`, `scripts/session-snapshot.json`, `test/scripts.test.ts`, `docs/RELEASE.md`
-- **未交付**：`test/regression/tasks.jsonl` 与 `test/regression/run.mjs`——2026-11-18 裁决（m00234）不搭回放集，20 任务门只作冒烟，清单与双跑脚本由操作方在发布前自备（见设计稿 §6.1）。T26 实际只交付了 `scripts/` 下的三个文件、`test/scripts.test.ts` 与 `docs/RELEASE.md`；`test/regression/` 仅有 `.gitkeep`。
+- **未交付**：`test/regression/tasks.jsonl` 与 `test/regression/run.mjs`（冒烟 runner），以及取回完整性检查。2026-11-18 裁决（m00234）的"不搭回放集"**只免除语料**；这两项都不需要语料，不能据此豁免（见设计稿 §6.1/§6.2）。T26 实际只交付了 `scripts/` 下的三个文件、`test/scripts.test.ts` 与 `docs/RELEASE.md`；`test/regression/` 仅有 `.gitkeep`，也没有 locator 取回核对测试。
 
 **Interfaces:**
 - Consumes: 收据格式（T7）、`boost status`（T19/T25）
@@ -2327,9 +2329,9 @@ Expected: FAIL，脚本不存在
 
 - [ ] **Step 3: 实现三个脚本 + 一个门**
 
-`shadow-report.mjs` 扫 `receipts/*.jsonl`，输出四类标签：真实可省比例、按族命中率、候选集召回、取回率上界（`取回调用数 / 投影回执数`）。
+`shadow-report.mjs` 扫 `receipts/*.jsonl`，输出四个键：`saveableRatio`（白名单可实现的替换决定占比）、`byFamily`（按族的 commits / decisions）、`candidateRecall`（候选集召回）、`retrievalUpperBound`（`取回调用数 / 已应用投影回执数`，**只在 `projection:'on'` 时有值**，影子期结构上恒 0）。它**不输出净节省率**，也没有总 token 分母；A4 裁决不由这个脚本承担（设计稿 §6.1）。
 `session-stats.mjs` 按 `session-snapshot.json` 复算 §2.1 全部统计。
-`test/regression/run.mjs`（**未交付**）原计划读 `tasks.jsonl`（20 条，每条 `{ id, prompt, expect }`），pass 谓词按设计稿 §6.1：`两轮都完成且 isError=false 的任务数 ≥ 19 ∧ 每条被投影回执可取回且字节数 = count + 保留窗口字节数`。2026-11-18 裁决不搭回放集，此脚本与清单不在交付物内。
+`test/regression/run.mjs`（**未交付**）原计划读 `tasks.jsonl`（20 条，每条 `{ id, prompt, expect }`），pass 谓词按设计稿 §6.1：`两轮都完成且 isError=false 的任务数 ≥ 19 ∧ 每条被投影回执可取回且字节数 = count + 保留窗口字节数`。2026-11-18 裁决的"不搭回放集"只免除语料，**不免除这个冒烟 runner 与取回完整性检查**；两者仍欠。
 `docs/RELEASE.md` 写清 `npm pack` → 空项目安装 → 分别卸掉 `dsh-spill-policy` / `dsh-token-meter` 验证两条降级路径（isolated 布局；hoisted 布局测不出 `ERR_MODULE_NOT_FOUND`）。
 
 - [ ] **Step 4: 运行确认通过**

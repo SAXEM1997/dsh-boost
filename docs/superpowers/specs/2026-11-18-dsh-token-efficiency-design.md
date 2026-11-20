@@ -63,10 +63,11 @@
 - G1：在真实会话上，provider 记账的 `totalTokens`（= uncached input + cacheRead + cacheWrite + output）相对基线下降。**全部按 raw token 计：cacheRead 也按 1 token 计，不打折、不算钱、不乘任何价格权重。** G1 拆成**两本账**，分别报告、不合并成一个乘法：
   - **替换账**（跳过调用）：跳过一步省的是**该步请求的 `totalTokens`（含 cacheRead）**。天花板两个数并列：步数份额 4.00%、token 份额 **2.70%**（白名单步均 131,851 token vs 全局步均 195,340）；经验换算率 0.675——20% 的步 ≈ 13.5% 的 token（实测），不能把步数份额直接当 token 份额。
   - **投影账**（缩小进入上下文的内容）：`被裁 token × (1 + 剩余步数)`，不乘价格、不乘权重，参数取 §5.3 默认值。**v1 只能给区间，不能给单点**：
-    - **上界 10.0% / 下界 3.5% 都是离线（ex-ante）估算，不是可复现的测量**：按本节方法学在一个 300 会话语料上离线算出。上界假设被裁内容在其后的平均剩余步数里**全程存活**——没有 compaction、没有 pruner 剪裁、没有模型重读；下界按 horizon 20 的保守口径（只回放 21 次）；两侧各加替换账 2.70%。
-    - **离线分项不可从交付物复现，本文不再把它们当数字引用**：那次离线运行自身的分项（候选 token 数、回执条数、剩余步数、回放次数、总 token 分母）没有进入交付物——`scripts/session-snapshot.json` 只存聚合计数（其复算总 `totalTokens` 为 10,575,904,022，与离线运行的分母本就不同：选择边界漂移，见 §2.1），不存每会话的投影候选字节（`receiptChars` 无逐条族归属，`toolChars` 只有会话级聚合），仓库里也没有脚本计算这些分项。保留的只有结论：**v1 目标区间 3.5%–10.0%**。
-    - **影子期实测值取代上下界**：上下界之间就是 compaction、pruner 剪裁与模型重读造成的损耗；影子周测得的投影账净额替换本节的估算区间，实测只用于收窄区间，不把 10% 改成硬承诺。
-  - **v1 验收：≥3.5% 保底、目标 10%**。3.5% 是保底线，10% 是全程存活的理想上界；不是"必须 10%"的硬承诺。发布决定仍按下面的 ②。
+    - **上界 10.0% / 下界 3.5% 都是离线（ex-ante）估算，不是可复现的测量**：按本节方法学在一个 300 会话语料上离线算出。上界假设被裁内容在其后的平均剩余步数里**全程存活**——没有 compaction、没有 pruner 剪裁、没有模型重读；下界按 horizon 20 的保守口径（只回放 21 次）。**两个数都加了替换账的 2.70%**：3.5% = 投影侧 0.8% + 替换账 2.70%，10.0% = 投影侧 7.3% + 替换账 2.70%。替换账的 2.70% 是 token 份额的**上限**，不是保底，不能作为 floor 的一部分。
+    - **诚实的 floor**：投影侧单独约 **0.8%** 毛额；扣掉每请求固定开销约 **0.4%**（778 / 195,531 = 0.398%，分子是协议段 379 + `boost` 工具 schema 399，见 D4）后，**净保底约 0.4%**。0.8% 与 0.4% 都是离线估算，不是测量。**目标 10.0%** 仍是理想上界（含替换账上限），不是硬承诺。
+    - **离线分项不可从交付物复现，本文不再把它们当数字引用**：那次离线运行自身的分项（候选 token 数、回执条数、剩余步数、回放次数、总 token 分母）没有进入交付物——`scripts/session-snapshot.json` 只存聚合计数（其复算总 `totalTokens` 为 10,575,904,022，与离线运行的分母本就不同：选择边界漂移，见 §2.1），不存每会话的投影候选字节（`receiptChars` 无逐条族归属，`toolChars` 只有会话级聚合），仓库里也没有脚本计算这些分项。保留的只有结论：**投影侧约 0.8% 毛额、净保底约 0.4%；目标上界 10.0%**。
+    - **影子期实测值取代上下界**（前提是未来版本补上总 token 分母；当前 `shadow-report.mjs` 不产出净额，见 §6.1）：上下界之间就是 compaction、pruner 剪裁与模型重读造成的损耗；影子周测得的投影账净额替换本节的估算区间，实测只用于收窄区间，不把 10% 改成硬承诺。
+  - **v1 验收：净保底约 0.4%（投影侧 0.8% − 固定开销 0.4%）、目标上界 10.0%**。替换账的 2.70% 只有实际发生替换才计入，不能预先加到保底里；10.0% 是全程存活的理想上界（含替换账上限），不是"必须 10%"的硬承诺。发布决定仍按下面的 ②。
   - 两账合计 **≥20% 是总目标**（含二期蒸馏），不是 v1 验收线。影子期结束时用实测值修正总目标的可达性判断。
 - G2：每一次"没问主模型"的决定都可审计（收据：计划、守卫、绑定、回执、节省量；替换与影子收据带 `plan` 目标与 `guards`，分别按 256 码点 / 8 条 / 每条 300 码点截断并显式标注，`args` 按 2048 码点截断且 `receipt_hash` 仍按完整值计算——截断只影响人读的那份拷贝，不改变身份）。
 - G3：默认不改变 agent 行为；干预必须显式开启，且只对只读动作（实现见 §5.5）。
@@ -79,7 +80,7 @@
 - N2：不做模型训练或权重改动。
 - N3：不替换 DSH 的压缩、剪裁、spill 等既有机制，也不接管它们的决策：投影只改模型可见的 `content`，原文借宿主 `spillStore` 存放（§5.4），不另建一套 spill 服务。
 - N4：不追求论文里 87.93% 的数字——那是整套配置（含上下文管理与收尾规则）之和，核心机制消融只占 20–27%。
-- N5：v1 不处理工具调用本身的去重/合并：原始需求里的"精简冗余工具调用"因此只覆盖一半（回放裁剪这一半），去重/合并留二期——用影子期记录的调用序列统计重复率再定。
+- N5：v1 不处理工具调用本身的去重/合并：原始需求里的"精简冗余工具调用"因此只覆盖一半（回放裁剪这一半），去重/合并留二期。**重议触发条件当前不可计算**：`scripts/shadow-report.mjs` 不统计调用序列重复率，收据也只存 `preview`（前 256 码点）与 `args`，没有可复现的重复率分母。要重议，先补一个按 `tool + canonical args` 哈希分组的重复率脚本（分母为可判定的相邻调用），并明确"重复"是跨 step 还是跨 turn；该脚本未交付，所以 v1 不能声称"等影子期重复率"。
 
 **澄清边界**：需求澄清永远在主模型回合内完成，不进入委派/跳过路径，因此澄清轮永不被替换。
 
@@ -88,7 +89,7 @@
 - A1：成功率下降超过 1 个百分点。**v1 不可判**（见 §6.1）：只读放行面小、20 任务门分辨率不足，v1 不声称守卫了 1pp。
 - A2：token 数降了但**缓存被破坏**——用可观测代理判定：**cache-miss token 的变化**（同类请求上，miss 占比不升）。
 - A3：出现无法归因的静默错误执行（守卫放行但参数是错的）。
-- A4：给每次请求注入的协议说明本身吃掉了收益（短会话倒亏）。
+- A4：给每次请求注入的协议说明本身吃掉了收益（短会话倒亏）。**v1 不可判 / 验收未交付**（见 §6.1）：固定开销本身可测（778 token/请求），但 `scripts/shadow-report.mjs` 没有总 token 分母，也不按会话分桶，产不出净节省率；没有这个分母就无法裁决短会话是否倒亏。
 
 ## 4. 方案与取舍
 
@@ -98,7 +99,7 @@
 |---|---|---|---|
 | A 影子优先 | 门照常做决定，但仍问主模型，只记账；一周后按真实数据决定是否开启 | 零质量风险、能拿到免费标签；一周内无收益 | **采用** |
 | B 直接干预 | 照搬 HarnessMM 插件，日常任务直接开，不区分只读/写 | 立刻见效；守卫写错会让 agent 走错路，且样本少难归因 | 二期（不限只读、不等影子的全量直接开） |
-| C 先建基准 | 20 个固定任务双跑 | 数字最硬；半天到一天搭环境，且不反映真实长会话 | **未采用**；20 任务门降级为操作方自备的发布前人工冒烟，清单与脚本不在交付物内（2026-11-18 裁决，m00234） |
+| C 先建基准 | 20 个固定任务双跑 | 数字最硬；半天到一天搭环境，且不反映真实长会话 | **未采用**；20 任务门降级为发布前人工冒烟。**"不搭回放集"只免除语料**；冒烟 runner 与取回完整性检查不需要语料，仍是未交付项（2026-11-18 裁决，m00234；§6.1/§6.2） |
 
 被否掉的方案：让 Jev 决定"下一步调哪个工具"（没有候选集时它就退化成第二个主模型，成本回到原点）；让 Jev 给"结果能否作为下一输入"打全局分（值传递只占 7.2%，且阈值不可迁移）。
 
@@ -170,15 +171,17 @@
 
 §5.2-3 的失败路径展开：
 
-| 失败 | 判定 | 动作 | 收据字段 |
+| 失败 | 判定 | 动作 | 收据字段 / 信号 |
 |---|---|---|---|
 | Jev 超时 / 异常 | 单次选择超过 20s（默认上限）或调用抛错 | abstain，回主模型 | `selector-abstain` / `selector-error` |
-| 收据写失败 | 落盘 append 抛错 | 内存缓冲；连续 **3 次** append 抛错即停止替换（fail-closed） | `receipt-write-failed` |
+| 收据写失败 | 落盘 append 抛错 | 内存缓冲；连续 **3 次** append 抛错即停止替换（fail-closed） | 不写收据（store 已停写，收据本身写不出去）；信号是 `boost status.receipts_stopped: true` |
 | 派发被拒（参数不符） | `tools/execute` 解析后实参 ≠ 解析后候选 | 该步不执行替换，下一步回主模型 | `dispatch-rejected` |
 | 守卫平凡 | 候选只有 `ok: true`，没有一个非平凡 guard | 判不合格，回退主模型 | `guard-trivial` |
 | scope 读 / 解析失败 | 文件缺失、JSON 坏、未知 version | 落到 `selected+[]`；`boost status` 暴露 degraded note | `scope-degraded` |
 | 宿主 compaction 后锚点丢失 | 计划引用的历史区间已被摘要替换 | 回主模型、清空 pending | `compaction-reset` |
 | 宿主 pruner 原位改写回执 | 计划引用的回执被换成 head + marker + tail（锚点仍在） | 回主模型、清空 pending | `pruned-reset` |
+
+`receipt-write-failed` 是本稿早期的收据码，交付物**不产出它**：连续 3 次 append 失败后收据 store 已停写，此时再写一条"写失败"收据自相矛盾。实现改用 `boost status.receipts_stopped: true`（`src/tools/boost.ts` 的 `receipts_stopped`，由 `src/receipts/store.ts` 的 `stopped()` 驱动）。这是实现侧的**有意收窄**：故障信号从一条收据变成 status 字段，因为前者在故障时不可写；替换路径在 `llm/stream` 里读同一个 `stopped()` 直接 fail-closed。
 
 **v1 guard 词表**：非 shell 工具没有 `exit_code` / `stderr`，照搬参照实现的 `GUARD_FIELDS`（`ok` / `exit_code` / `stdout_contains` / `stdout_equals` / `stderr_empty` / `json_equals`）会退化成空操作。v1 只收：
 
@@ -212,13 +215,13 @@
 
 | 杠杆 | 省下 | 是否乘剩余步数 |
 |---|---|---|
-| 跳过一次调用 | 该步请求的 `totalTokens`（含 cacheRead）；多候选时再**减去 Jev 的输入+输出上界**（512 token） | **否**，只作用于该步请求 |
+| 跳过一次调用 | 该步请求的 `totalTokens`（含 cacheRead）；多候选时再**减去 Jev 的输入 + 输出上限**：输出上限是 `selector.maxTokens`（默认 512），输入按实际发送的 system prompt + 候选清单 + 回执文本用宿主 estimator 计价（`selectorChargeOf` = `maxTokens + estimate(input)`，不是固定 512） | **否**，只作用于该步请求 |
 | 缩小进入上下文的内容 | 被裁 token ×（1 + 剩余步数） | 是 |
 | 模型蒸馏（二期） | 上式再减去：蒸馏调用的输入 + 输出 | 是，但要先减开销 |
 
 **替换**被允许，当且仅当**替换杠杆**的省下 > 该杠杆的新增开销 + 阈值（v1 为单一全局阈值 `admission.thresholdTokens`，分族按 §5.2-4 的裁决推迟）；蒸馏（二期）要先减开销，再过后验门。
 
-- **v1 不做货币计价**，只用 token 数做准入。`ctx.tokenMeter` 是计数/压力估算器，没有货币价格，不能拿来复算金额。若要费用护栏，由插件配置显式维护 per-route 费率（**可选，默认关闭，不参与验收**）。
+- **v1 不做货币计价，也没有费用护栏**：只用 token 数做准入。`ctx.tokenMeter` 是计数/压力估算器，没有货币价格，不能拿来复算金额；`src/config.ts` 里**没有 per-route 费率键**（也没有任何费用键）。这是 v1 的**有意简化**，不是"默认关闭的可选项"——要加费用护栏必须新增配置键、价格表和独立验收，留二期。
 - **剩余步数（两种口径，不许混）**：**报告 / 离线复算**用该回执之后的**实际剩余请求数**（§3 上界估算所用的"平均剩余步数 + 1 次回放"即此口径）；**运行期准入**用固定 horizon（默认 20 步）与会话历史均值二者取小做保守下界，不会高估收益。**会话历史均值 = 本会话最近 5 个 turn 的步数均值**，不足 5 个 turn 时直接用 horizon 20。
 - **投影按确定性策略执行，不参与准入判断，不产生逐次决策**（按工具族 + 字符阈值）；收益决策只发生在"是否替换"这一步。
 - **宿主 compaction 之后的步骤重新按未缓存前缀计**：压缩会把老区间换成摘要，从首个被替换 token 起整段前缀重算；投影账的"剩余步数"也按压缩后的上下文重新起算。
@@ -241,7 +244,7 @@
 | 参数 | 默认值 | 作用域 |
 |---|---|---|
 | 准入阈值 | 1,024 token | **全局单一**，作用于每个候选；**确定性单候选豁免**（`deterministic && 唯一候选`，对齐参照的 `admitted_deterministic`） |
-| Jev 输入+输出上界 | 512（见准入表） | 多候选时从节省里扣 |
+| Jev 输出上限 | 512（`selector.maxTokens`，见准入表）；输入按实际 prompt 估算、另计 | 多候选时从节省里扣 `maxTokens + estimate(input)` |
 | 替换步数上限 | 8 步 / turn | §5.2-6 |
 | 剩余步数 horizon | 20 | 算不出历史均值时 |
 | 会话历史均值 | 本会话最近 5 个 turn 的步数均值；不足 5 个 turn 用 20 | 与 horizon 取小 |
@@ -306,7 +309,7 @@ config:
 - **不依赖**与 `dsh-spill-policy` 的注册次序。准确说法是：**投影只替换模型可见的 `content`，原文由本插件存入 spill 后端，页脚由本插件生成**——任何一边先跑都不影响正确性。
 - `read` 走同一条路径。`dsh-spill-policy` 在 `tools/post-execute` 里对 `exec.name === 'read'` **直接跳过**（源码如此），不能指望它兜底；而 read 正是 v1 白名单之首。
 - 页脚格式必须复用宿主的 `formatSpillNotice`，不要手拼 `Full formatted result stored at:` 字符串。
-- `owner` 取 `exec.agent.session.header.id`：先判 `exec.agent` 是否为 `undefined`；为 `undefined` 时不投影（PTC 子派发等场景）。`Agent.session` 与 `Session.header` 都是非可选字段，不要再套可选的冗余链。缺 session id 时同样不投影（`projection-skipped:no-owner`）。
+- `owner` 取 `exec.agent.session.header.id`：先判 `exec.agent` 是否为 `undefined`；为 `undefined` 时不投影（PTC 子派发等场景）。`Agent.session` 与 `Session.header` 都是非可选字段，不要再套可选的冗余链。缺 agent / session id 时，hook 在更早的 scope 门就原样放行并记 `skip:no-scope`（§5.5），**不会**产出 `projection-skipped:no-owner`；`projectApply` 的 `no-owner` 分支只服务于它的直接调用契约（单元测试），生产路径到不了。
 - 顺序无关的代价是**多一次落盘**：只对确实要投影的回执落盘，未触发阈值的不落。
 - **大回执直接不投影**：`Buffer.byteLength(text, 'utf8') > 256 * 1024` 跳过（**按 UTF-8 字节计，不按 `text.length` 的 UTF-16 单元**——同一段 CJK 的字节数是单元数的 3 倍，用错口径会让上限浮动 2–4 倍）。先比 `text.length` 做粗筛（它是 code point 数的上界），只有确定要裁时才 `Array.from` 转 code point 数组（实测 1 MB 字符串做这一步 17.7 ms、约 9 MB 堆）。
 - **`projection: 'shadow'` 不依赖 `spillStore`**：影子模式不改 content、不调 `saveText`、不落盘，只用宿主 `tokenMeter` 的同步 `estimateMessage` 对原/裁剪文本做对比记账（meter 缺失时记 `unknown`，不伪造数字）；`projection-skipped:no-spill` 只在 `projection: 'on'` 且确实要落盘时触发。否则宿主没装 spill 包时影子期拿不到账。
@@ -316,6 +319,8 @@ config:
 1. **不许静默裁剪**：页脚必须写明省略量与取回路径。
 2. **取回是追加**：模型用一次新的 `read`/`grep` 去取，不改写历史。
 3. **缺 spill 后端就不投影**：`projection: 'on'` 且要落盘时，`spillStore` 缺失 → 超限回执**原样进入历史**（保住证据），记 `projection-skipped:no-spill`，`boost status` 标 degraded（`ERR_HOST_NO_SPILL`）。不允许"投影了但没有取回路径"。**shadow 不受此限**（见上）。
+
+**实际可产出的降级码只有四个**：`projection-skipped:no-spill`、`projection-skipped:no-footer`、`projection-skipped:spill-failed`、`projection-skipped:footer-failed`（由 `PROJECTION_DEGRADATIONS` + `projectionSkipCode` 生成）。`no-owner` 只存在于 `projectApply` 的直接调用契约，hook 不会产出；`error-receipt` / `family-not-configured` / `not-worth-it` 是普通跳过，不写收据。
 
 示例的 18,432 字符 ≈ 4,608 token，低于本部署的 `maxInlineTokens: 12500`（`dsh-base/cordis.patch.yml` 的 `spill-policy.config.maxInlineTokens`；宿主包无内置默认，省略即禁用），**宿主 spill 根本不会介入**——这正是本插件必须自己存原文的原因。反过来，也不能假设"超限了总有人兜底"。
 
@@ -332,16 +337,16 @@ config:
 
 ### 5.5 暴露面：全局 / 指定工作区
 
-插件不是装上就对所有工作区生效。暴露面直接用宿主原生的步骤级条件，不自造谓词：
+插件装配是**全局**的：`apply` 只挂一次钩子，不按工作区装卸。可见性在每个钩子内用 scope gate 判定；`boost` 工具是唯一的 scope 豁免，注册时用 `when: () => true` 常驻。协议段的可见性由 `systemPrompt/assemble` 的 scope 判定决定。
 
 ```ts
-ctx.tools.register({ name, description, parameters, execute }, { when })
+ctx.tools.register(definition, { when: () => true })   // 仅 boost 工具
 ```
 
-- `when(context: { agent, signal })` 由宿主**每个模型步骤**判定一次；判 false 的工具既不出现在声明里，也不能被派发。
-- 用 **`tools.resolve()` 是否存在**探测宿主是否支持步骤级 `when`；不支持时整族不注册并给出稳定原因码 `ERR_HOST_NO_STEP_WHEN`，**不得静默放行**。
-- 关键性质：**没有层要装卸、没有 agent 生命周期要跟、没有重查定时器**——配置一改、新 agent 一出现，下一步就生效。
-- 判定本身是**同步读取 `judgement ?? resolveNow(agent)` 并 fail-closed**；异步的 realpath 判定只用于改善结果，不得让判定等待。
+- `when` 在 v1 只用于 `boost` 的常量真条件；投影/替换**没有** per-tool step-level `when`。宿主每个模型步骤仍会走到钩子，钩子同步读缓存的 `scope.judgement(sessionId)`，false 即原样放行 / 不注入该段。
+- **不再探测 `tools.resolve()`**：旧稿的 `ERR_HOST_NO_STEP_WHEN` 分支已删除（探测条件恒真、分支不可达；`tools.register` 的 `when` 选项本身在所有受支持宿主上都存在）。
+- 关键性质：**没有层要装卸、没有重查定时器**；`systemPrompt/assemble` 在请求 1 就 warm 可见性，配置一改下一步生效；`session/disposed` 只清状态，不装卸插件。
+- 判定本身是**同步读取缓存的 judgement 并 fail-closed**；异步的 realpath 判定只用于改善结果，不得让判定等待。
 
 scope 文档（`version: 2`）：
 
@@ -349,7 +354,7 @@ scope 文档（`version: 2`）：
 {
   version: 2, revision: 0, updatedAt?: string,
   mode: 'selected' | 'global', workspaceIds: string[],
-  shadow: boolean,                          // boost shadow on|off 的持久化
+  shadow: boolean,                          // boost shadow 子命令的持久化
   projection: 'off' | 'shadow' | 'on',      // 投影三态
 }
 ```
@@ -362,7 +367,7 @@ scope 文档（`version: 2`）：
 
 1. **默认谁都不给**：`selected + []`。首次运行、读不到、解析失败，全部落到这一侧。
 2. **严格序 / 约束强度递减**：`selected+[]`、`selected+[W]`、`global` 的约束强度依次递减（左侧最严）；任何"读不了 / 判不了"都落到更严的一侧，绝不静默放宽。
-3. **未知 version 只读降级**：不覆盖、不重写，单独给一条 note 和稳定的拒绝码。version 1 的旧文件按"未知 version"处理，`boost scope set` 时才显式升级到 2。
+3. **未知 version 只读降级**：不覆盖、不重写，单独给一条 note 和稳定的拒绝码。version 1 的旧文件按"未知 version"处理，`boost scope-set` 时才显式升级到 2。
 4. **`scope.json` 是持久事实来源，内存只是已校验缓存**：每个 step 用 **mtime + revision** 校验缓存，不一致就重读；读失败/解析失败落 `selected+[]`。写路径 validate → prune → revision+1 → 写盘 → 换引用：**锁内临界区不再 await（同步写盘）**，`open(..., 'wx')` 只在锁获取阶段 await 一次。
 
 存储：`$DSH_HOME/boost/scope.json`，与收据同目录。
@@ -390,7 +395,7 @@ workspace 归属由 agent 的 cwd 映射到 workspace id。每个挂载点各有
 
 **唯一例外**：`boost` 工具本身**豁免 scope**（只读写本地配置文件、无外部副作用）；否则 `selected+[]` 之下用户没有启用入口。见 §11。
 
-**单一事实来源**：scope 只在 `scope.json`；patch config 不含 scope 字段。`boost scope set` 带 base revision 校验，冲突返回下面的稳定码——**不是 HTTP 409**：工具失败没有状态码，"409" 只是 revision 冲突的语义类比。
+**单一事实来源**：scope 只在 `scope.json`；patch config 不含 scope 字段。`boost scope-set` 带 base revision 校验，冲突返回下面的稳定码——**不是 HTTP 409**：工具失败没有状态码，"409" 只是 revision 冲突的语义类比。
 
 **拒绝码（枚举）**：`ERR_SCOPE_UNKNOWN_VERSION` / `ERR_SCOPE_FUTURE_VERSION` / `ERR_SCOPE_PARSE_FAILED` / `ERR_SCOPE_READ_FAILED` / `ERR_SCOPE_REVISION_CONFLICT` / `ERR_SCOPE_LOCKED`。
 
@@ -415,7 +420,7 @@ workspace 归属由 agent 的 cwd 映射到 workspace id。每个挂载点各有
 
 **主口径**：provider 记账的 `totalTokens` / **会话**（per-session；需要更细时按 per-turn 报），= uncached input + cacheRead + cacheWrite + output。四个字段是**互斥计数**：`inputTokens` 只含未缓存输入、不含 `cacheReadTokens`，所以不能拿 input+output 当总量。
 **"任务"的定义**：若沿用"任务"一词，**task = 一个 turn**；收据记 `sessionId` + `turn`，不再用没有定义的"任务"当分母。
-**次口径**：cache-miss token、费用（可选护栏，**不参与验收**）、首 token 延迟。
+**次口径**：cache-miss token；费用（**v1 未实现**：没有 per-route 费率键，不参与验收）；首 token 延迟（**v1 未实现**：没有代码、没有收据字段，不参与验收——与 A4 分桶的标注方式一致）。
 **收据三类**：分别记 `uncached` / `cacheRead` / `output`，不糊成单一 input 字段。
 **护栏**：完成判定（per-session；需要时按 turn 拆）的成功率、回退率、收据里"放行后被主模型推翻"的比例。
 
@@ -423,9 +428,9 @@ workspace 归属由 agent 的 cwd 映射到 workspace id。每个挂载点各有
 
 阶段：
 
-1. **影子（1 周）**：门做决定但照常问主模型，只写收据；`projection: 'shadow'`（只记投影前后 token，不落盘、不改 content）。产出：真实可省比例、按工具族的命中率、候选集召回、**取回率上界**（见 §6.1 的损害代理）。
+1. **影子（1 周）**：门做决定但照常问主模型，只写收据；`projection: 'shadow'`（只记投影前后 token，不落盘、不改 content）。产出以 `scripts/shadow-report.mjs` 的四个键为准：`saveableRatio`（白名单可实现的替换决定占比）、`byFamily`（按族的 commits / decisions）、`candidateRecall`（候选集召回）、`retrievalUpperBound`（on-mode 的取回调用 / 已应用投影回执）。**它不产出影子周净节省率，也没有总 token 分母**；A4 裁决因此未交付（见 §6.1）。
 2. **只读放行**：只对白名单工具真正跳过调用；`projection: 'on'` **按工具族分批开**——先 `read`，再 `grep`/`glob`，最后 `bash`/`ssh`，每族过一个观察窗再开下一族，不一次性全工具翻 `'on'`。
-3. **回归门**：20 个固定任务双跑，只当"没有灾难性回退"的门。固定任务集不构成可复现回放基准，不允许为其加断言式成功率指标。**当前未交付**：`tasks.jsonl` 与双跑脚本由操作方在发布前自备（2026-11-18 裁决：不搭回放集，只作冒烟）。取回完整性不变量目前无覆盖。
+3. **回归门**：20 个固定任务双跑，只当"没有灾难性回退"的门。固定任务集不构成可复现回放基准，不允许为其加断言式成功率指标。**裁决边界**：2026-11-18 的"不搭回放集"只免除**语料**，不免除冒烟 runner 与取回完整性检查——两者都不需要语料。**当前两者都未交付**：`test/regression/` 只有 `.gitkeep`（无 `tasks.jsonl`、无双跑脚本）；也没有任何测试/脚本验证"每条被投影回执可按页脚 locator 取回且字节数 = count + 保留窗口字节数"（`test/projection-apply.test.ts` 只断言页脚含 locator，不读回核对）。
 
 **两本账的放行依据不同，不能混**：
 
@@ -440,7 +445,7 @@ workspace 归属由 agent 的 cwd 映射到 workspace id。每个挂载点各有
 - **影子期产出的是标签，不是任务成败**：门与主模型的一致率、按工具族的命中率、候选集召回率。
 - **真实成败只能从回执和后续行为里推断**：被替换的动作是否报错、下一步主模型是否推翻了它、同一处是否被反复改写。
 
-**影子期的损害代理（投影专用）**：离线统计"模型后续 `read`/`grep` 的参数落在**会被裁掉的区间**内"的比例，作为**取回率上界**。它只扫收据、不改任何可见内容，成本接近零；取回率上界 × 投影账毛节省 = 最坏情况净节省的下界。
+**影子期的损害代理（投影专用）**：设计原意是离线统计"模型后续 `read`/`grep` 的参数落在**会被裁掉的区间**内"的比例，作为取回率上界。**交付物没有实现这个统计**：`scripts/shadow-report.mjs` 的 `retrievalUpperBound` 是 `retrievals / appliedProjections`——分子是 `kind:'projection'` 且 `retrieved:true` 的收据（一次精确命中本会话 spill locator 的取回），分母是未被取回的已应用投影收据；它只在 `projection:'on'` 时有值，影子期分子恒 0（投影收据是 `kind:'shadow'`）。所以它是**已观测取回率的下界**，不是取回损害的上界；也不能与毛节省相乘——单位是"取回调用 / 投影回执"，不是"被取回的 token 比例"。它只许可一个结论：on 模式下每个已应用投影至少观测到多少次取回；0 只说明没有观测到精确 locator 取回，不说明没有取回。要约束损害，需要另一套度量（每次取回的 offset/limit 是否落在被裁区间、取回内容 token 数），v1 未交付。
 
 v1 的裁决组合：
 
@@ -448,20 +453,20 @@ v1 的裁决组合：
 |---|---|---|
 | 收据 | 每次放行的前后状态 | 有没有静默错误 |
 | 抽样复核 | 每天抽 10 条放行记录人工看 | 语义上对不对 |
-| 20 任务回归门（**未交付，由操作方提供**） | 清单 `test/regression/tasks.jsonl` 双跑；**pass ⇔（两轮都完成且 `isError=false` 的任务数 ≥ 19）∧（每条被投影的回执都能用页脚 locator 取回，且取回字节数 = 页脚 `count` + 保留窗口字节数）** | 有没有灾难性回退；后半句即"无数据丢失"的可执行定义。**当前状态：`test/regression/` 只有 `.gitkeep`，清单与双跑脚本均未交付；后半句（取回完整性不变量）在全套测试中无任何覆盖，目前未验证。** 裁决（2026-11-18，m00234）：不搭回放集，20 任务门只作冒烟——清单与脚本由操作方在发布前自备 |
+| 20 任务回归门（**未交付**） | 清单 `test/regression/tasks.jsonl` 双跑；**pass ⇔（两轮都完成且 `isError=false` 的任务数 ≥ 19）∧（每条被投影的回执都能用页脚 locator 取回，且取回字节数 = 页脚 `count` + 保留窗口字节数）** | 有没有灾难性回退；后半句即"无数据丢失"的可执行定义。**当前状态：`test/regression/` 只有 `.gitkeep`，清单与双跑脚本均未交付；后半句（取回完整性不变量）在全套测试中无任何覆盖，目前未验证。** 裁决（2026-11-18，m00234）：**不搭回放集只免除语料**；冒烟 runner 与取回完整性检查不需要语料，仍是未交付项，不能据此豁免 |
 | 会话统计 | 相对 300 会话基线的 token 分布（按会话长度分层） | 省了多少 |
-| 固定开销预算 | 计划段 + `boost` 工具 schema 的每请求开销 ≤ 800 token；插件加载时用 `estimateSystemMessage` / `estimateToolsTokens`（`@deepseek-ai/dsh-token-meter/estimate`，**`await import(...)` 包 try/catch**）测一次，`boost status` 惰性 await 同一次测量——测量从不在请求路径上；没有 `chars/4` 回退（`estimate: 'unknown'` 比错数字有用）。实测 **778 / 800**（计划段 379 + schema 399；2026-11-20 复测，余量 22 token），写进 `boost status` | A4 的固定成本是否失控 |
-| 分桶净节省 | 按会话步数分桶：**≤5 / 6–50 / ≥51** 步，分别报净节省率；**短会话桶另用随机抽 300 个会话**（基线 top-300 里 ≤5 步会话为 0 个）；**样本 < 20 个会话的桶不出数** | 裁决 A4：短会话是否被长会话摊薄。**v1 未实现**：仓库内没有任何脚本产出分桶净节省。影子周结束后由 `scripts/shadow-report.mjs` 的聚合输出取代这一行——它给出影子周的总体净节省率，若需要分桶，再扩展该脚本按会话步数拆分 |
+| 固定开销预算 | 计划段 + `boost` 工具 schema 的每请求开销 ≤ 800 token；插件加载时用 `estimateSystemMessage` / `estimateToolsTokens`（`@deepseek-ai/dsh-token-meter/estimate`，**`await import(...)` 包 try/catch**）测一次，`boost status` 惰性 await 同一次测量——测量从不在请求路径上；没有 `chars/4` 回退（`estimate: 'unknown'` 比错数字有用）。实测 **778 / 800**（计划段 379 + schema 399；2026-11-20 复测，余量 22 token），写进 `boost status` | 固定成本是否失控；**A4 的净收益裁决不在此行**（需要 totalTokens 分母，见下行） |
+| 分桶净节省 | 按会话步数分桶：**≤5 / 6–50 / ≥51** 步，分别报净节省率；**短会话桶另用随机抽 300 个会话**（基线 top-300 里 ≤5 步会话为 0 个）；**样本 < 20 个会话的桶不出数** | 裁决 A4：短会话是否被长会话摊薄。**v1 未实现，且不可由交付物计算**：`scripts/shadow-report.mjs` 只输出 `saveableRatio` / `byFamily` / `candidateRecall` / `retrievalUpperBound` 四个比例，没有总 token 分母，也没有净节省率或分桶。A4 裁决未交付。未来版本要补：每会话 provider `totalTokens` 分母、每请求固定开销归因、按步数分桶 |
 
-**A4 是聚合口径**，不是单会话口径：长会话摊薄固定开销，短会话可能倒亏。v1 的分桶行未实现（见上表标注）；影子周的总体净节省率由 `scripts/shadow-report.mjs` 产出，作为 v1 对 A4 的实际裁决依据。若影子周数据显示短会话与长会话的净节省率差异显著，再实现分桶拆分。top-300 基线里没有 ≤5 步会话，必须换随机样本才能填满短会话桶；随机样本只用于 A4，不替换 G1 的 top-300 基线。
+**A4 是聚合口径**，不是单会话口径：长会话摊薄固定开销，短会话可能倒亏。v1 的分桶行与总体净节省率都未实现（见上表标注）；`scripts/shadow-report.mjs` 不能裁决 A4——它没有总 token 分母。固定开销本身可测（778 token/请求），但"短会话是否倒亏"需要 provider 记账的 per-session `totalTokens` 分母和按步数分桶，当前交付物没有。top-300 基线里没有 ≤5 步会话，必须换随机样本才能填满短会话桶；随机样本只用于 A4，不替换 G1 的 top-300 基线。
 
 ### 6.2 测试策略
 
 - **确定性组件**（绑定、守卫、准入记账、scope 严格序、拒绝码）：**表驱动单元测试**，一个输入表一组断言，不 mock 模型。
 - **挂钩交互**（合成回合、派发防篡改、失败回退）：**假宿主集成测试**，参照仓库已有的 controller + fake-host 两套可直接移植。
-- **scope 严格序与 `when` 逐步判定**：需要 fake host 模拟 **step 生命周期**——每一步调用一次 `when`、覆盖 `tools.resolve` 的同步/异步两条分支、以及"配置改了下一步生效"。现有 fake-host 只覆盖单次调用，测不了跨步判定，必须扩。
+- **scope 严格序与逐步可见性**：需要 fake host 模拟 **step 生命周期**——每一步走一次 scope gate、覆盖 `systemPrompt/assemble` 的可见性 warm 与 `tools.resolve` 的异步分支、以及"配置改了下一步生效"。现有 fake-host 只覆盖单次调用，测不了跨步判定，必须扩。
 - **软依赖降级**：在 isolated 布局（`npm pack` 后装进空项目）里分别卸掉 `@deepseek-ai/dsh-spill-policy` 与 `@deepseek-ai/dsh-token-meter`，验证投影跳过与替换拒绝两条路径；hoisted 布局会掩盖 `ERR_MODULE_NOT_FOUND`。
-- **20 任务门**（**未交付**）：`test/regression/` 仅有 `.gitkeep`；`tasks.jsonl` 与双跑脚本由操作方在发布前自备（2026-11-18 裁决：不搭回放集，只作冒烟），不接 CI、不做统计推断。**取回完整性不变量（每条被投影回执可按页脚 locator 取回且字节数 = count + 保留窗口字节数）目前未验证——没有测试、没有脚本覆盖它；它不是"已被 20 任务门覆盖"，而是"20 任务门本身未交付"。**
+- **20 任务门**（**未交付**）：`test/regression/` 仅有 `.gitkeep`；`tasks.jsonl` 与双跑脚本均未交付。**"不搭回放集"只免除语料，不免除冒烟 runner 与取回完整性检查**——两者都不需要语料，因此不能据此豁免。**取回完整性不变量（每条被投影回执可按页脚 locator 取回且字节数 = count + 保留窗口字节数）目前未验证——没有测试、没有脚本覆盖它；它不是"已被 20 任务门覆盖"，而是"20 任务门本身未交付"。**
 
 ## 7. 风险
 
@@ -479,10 +484,10 @@ v1 的裁决组合：
 
 | # | 决定 | 理由 | 代价 |
 |---|---|---|---|
-| D1 | 主口径用 token 数，费用作可选护栏 | 与"省 token"的原始目标一致；两个口径下优先级不同，混用会导致优化错方向 | 缓存被破坏这类费用异常不直接进主口径，只能靠护栏事后发现；费用配置默认关闭、不参与验收 |
+| D1 | 主口径用 token 数；**v1 不做费用口径**（没有费率配置，也不做费用护栏） | 与"省 token"的原始目标一致；两个口径下优先级不同，混用会导致优化错方向 | 缓存被破坏这类费用异常不直接进主口径，也没有费用护栏事后发现；费用口径留二期，需新增配置键与独立验收 |
 | D2 | 第一版只放行**只读**工具，替换白名单只到 `read` / `grep` / `glob` | 失败代价不对称：错放行一次可能不可逆，错回退只多花一次调用；只读白名单本身不可靠判定（`bash` 无法在派发层收窄、`web_fetch` 无 guard 字段），且本 profile 没有文件级快照，git 之外 `edit` 不可回滚 | 替换面收窄到三件套，v1 收益上限明显变小 |
 | D3 | 先影子一周，再开干预 | 没有标签就无法校准；影子期同时产出候选集召回数据 | 一周内零收益，且要维护影子路径与收据 |
-| D4 | 计划协议段**常驻**系统提示，稳定、中途不翻转 | 常驻段每次请求固定几百 token，相对一次 194k 回放约 0.29%（两端都按 raw token 计，cacheRead 不打折）。中途翻转会让整段前缀失效并重算，代价高两个数量级。所以"按需打开"是错的，"常驻且稳定"才对 | 每次请求固定多几百 token，短会话摊不回来 |
+| D4 | 计划协议段**常驻**系统提示，稳定、中途不翻转 | 实测固定开销 **778 token/请求**（协议段 379 + `boost` 工具 schema 399），相对每请求均值 195,531 token 为 **0.40%**（778 / 195,531 = 0.398%；只算协议段是 379 / 195,531 = 0.19%）。两端都按 raw token 计，cacheRead 不打折。中途翻转会让整段前缀失效并重算，代价高两个数量级。所以"按需打开"是错的，"常驻且稳定"才对 | 每次请求固定多几百 token，短会话摊不回来 |
 | D5 | 模板参数**先解析再比对** | `tools/execute` 拿解析后的实参与解析后的候选逐字比较，不是拿模板比；证书措辞改为"由声明的投影解析得到"，不再声称"逐字等于作者所写" | 模板表达力受限（只能填参数、不能造结构），bank 校验要同步改 |
 | D6 | 命名 `dsh-boost`，先只针对本 web profile；desktop 二期 | 复用现成插件的钩子层；测试面先减半 | desktop 一期不支持，后续适配要另补 |
 | D7 | 要能发布，仓库布局照 `dsh-cherry-bridge` | 见 §11：双语 README、npm public、工作区暴露面 | 发布面扩大：文档、许可证、NOTICE、兼容性承诺都要跟上 |
@@ -493,8 +498,8 @@ v1 的裁决组合：
 
 | 问题 | 答复 | 影响 |
 |---|---|---|
-| 只自用还是发布 | **发布，提交 GitHub** | 见 D7：双语 README、LICENSE、npm 元数据、工作区暴露面、更严格的失败兜底 |
-| 建回放集 | 先不搭 | 用收据 + 抽样复核 + 20 任务回归门（操作方自备） |
+| 只自用还是发布 | **发布，提交 GitHub**（**已交付**：公开仓 `https://github.com/SAXEM1997/dsh-boost` 已建；`0.1.0` 是首个发布版本，npm registry 上没有更早的 `dsh-boost` 版本） | 见 D7：双语 README、LICENSE、npm 元数据、工作区暴露面、更严格的失败兜底 |
+| 建回放集 | 先不搭（**只免除语料**） | 用收据 + 抽样复核 + 20 任务回归门；冒烟 runner 与取回完整性检查不需要语料，仍是未交付项（§6.1/§6.2） |
 
 剩余未定：无。
 
@@ -508,8 +513,8 @@ v1 的裁决组合：
   - 每行一条收据，带 `version`（收据 schema 版本，从 1 起）与 `receipt_hash`（对 `sessionId` / `turn` / `stepId` / 工具名 / 参数 的稳定哈希）。
   - **只存摘要与预览**：`preview` = 规范化回执的前 256 字符，**不存 stdout 全文**；全文只在 spill 后端（页脚 locator 指向它）。
   - 单文件上限默认 8 MiB 或 20,000 行；超限轮转为 `<encodeSegment(sessionId)>.1.jsonl`，保留最近 2 个。
-  - **每 N 行或每 turn 结束 `fsync` 一次**（不逐步 fsync，避免每步阻塞）；每行以 `\n` 结尾，**半行（无换行结尾）在读取时丢弃**并从该偏移截断，不猜内容。
-  - 写失败：内存缓冲；**连续 3 次 append 抛错**即停止替换（收据 `receipt-write-failed`，见 §5.2）。
+  - **每 N 行或每 turn 结束 `fsync` 一次**（不逐步 fsync，避免每步阻塞）；每行以 `\n` 结尾，**半行（无换行结尾）在读取时忽略，且不截断文件**——读与写者并发，按快照截断会切掉另一条刚完成的 append；只有下一次写路径才把分片截到最后换行再追加（`src/receipts/store.ts` 的 `stateFor`）。中间坏行跳过，不猜内容。
+  - 写失败：内存缓冲；**连续 3 次 append 抛错**即停止替换（fail-closed）。此时**不写** `receipt-write-failed` 收据——store 已停写，收据写不出去；信号是 `boost status.receipts_stopped: true`（见 §5.2）。
 - 所有模型调用走 `ctx.llm`，路由可配；默认复用边界请求自身的 route（现成插件已验证这条能避开 thinking-mode 网关的 400）。Jev 自调用带 `purpose: 'boost-selector'`（§5.1）。该 purpose 要先声明合并，否则编译期拒绝：
 
   ```ts
@@ -538,7 +543,7 @@ dsh-boost/
 ├── tsconfig.json        # build: tsc -p tsconfig.json
 ├── .gitignore           # 忽略 dist/、node_modules/
 ├── cordis.patch.yml     # bundle patch，装上即插入插件行
-├── locale/{zh,en}.json  # 设置项标签
+├── locale/{zh,en}.json  # 包元数据（meta.title / meta.description），不是设置项标签
 ├── scripts/             # §2.1 的统计复算
 │   ├── session-stats.mjs
 │   └── session-snapshot.json  # 300 个 sessionId + 字节数 + 统计日期
@@ -558,48 +563,68 @@ dsh-boost/
 - `engines.node` 为 `>=24.9.0`（不是 22.18）：测试与脚本用了 24 的内建能力。
 
 - **`version` 不能省**：缺 `version` 时 `npm pack` 直接报 `Invalid package, must have name and version`，发布链在第一步就断。`description` / `repository` / `keywords` 同理是 npm 页面与检索的最低要求；owner 沿用同作者的 `dsh-cherry-bridge` 命名空间。
-- **仓库现状（2026-11-20）**：只有一个 remote——内网 GitLab `https://gitlab.ai.isv.iridesc.cn:23000/zyx/dsh-boost`（私有）。公开的 GitHub 仓**尚不存在**，所以 `package.json` 故意不写 `repository`（指向 404 比不写更糟），`CHANGELOG` 的 compare 链接也已删除；等公开镜像建好再补回这两处。
+- **仓库现状（2026-11-21）**：公开 GitHub 仓 **`https://github.com/SAXEM1997/dsh-boost` 已建**，`package.json` 的 `repository` / `homepage` / `bugs` 指向它；开发镜像仍是内网 GitLab `https://gitlab.ai.isv.iridesc.cn:23000/zyx/dsh-boost`（私有）。**`0.1.0` 是首个发布版本**：npm registry 上没有更早的 `dsh-boost` 版本（`npm view dsh-boost versions` 返回 404），不存在需要迁移的旧发布线。
 - **`npm pack` 不校验 `files`**（实测删掉 `dist/` 仍 exit 0），所以产物完整性必须由 `scripts/verify-package.mjs` 显式检查 tar 清单，不能指望 pack。这条不变量现在由 `npm run verify:package` 承担，并被两个故意破坏的用例钉住（缺 `dist`、缺 locale 文件都必须让它红）。
 - **`dist/` 不入库**（`.gitignore` 忽略），干净 clone 上必须能 `npm run build`——布局里因此要有 `tsconfig.json`，缺它 `tsc -p` 直接 `TS5058`；`prepublishOnly` 已含 build，发布包不会缺 dist。
 - `engines.dsh` 由 dsh 插件加载器读取，npm 忽略此字段。
 - `files` 与实际布局一致：没有 `lib`，所以不列 `lib`；`scripts/` 与 `test/` 是 dev-only，不进包。
-- **`dsh-llm` 同时进 `devDependencies` 与 `peerDependencies`**：`StreamChunk` / `GenerateOptions` 的类型来自它，isolated 布局下缺它直接 `TS2307`。peer 用区间（与其余 host 包一致），dev 用精确 pin——registry 的 `latest` 标签对 `dsh-llm` 仍是 `0.0.1-rc.1`（另一套旧 API），浮动的 dev 依赖会静默编译到错误的类型上。
+- **`dsh-llm` 只进 `devDependencies`，用精确 pin**：`StreamChunk` / `GenerateOptions` 的类型来自它，isolated 布局下缺它直接 `TS2307`。它**不进 `peerDependencies`**（§11 开头：声明 peer 会让 npm 装第二份宿主树）；dev 用精确 pin，因为 registry 的 `latest` 标签对 `dsh-llm` 仍是 `0.0.1-rc.1`（另一套旧 API），浮动的 dev 依赖会静默编译到错误的类型上。
 - `$DSH_HOME` 未设置时回退 `~/.dsh`；三处状态按同一规则解析：`boost/scope.json`、`boost/scope.lock`、`boost/receipts/<encodeSegment(sessionId)>.jsonl`（§10；分片名用可逆百分号编码，避免 id 中的 `/` 或 `..` 写出 `receipts/`）。
 
 **依赖声明（`inject`）**：依赖形态在这里定死。
 
 | 依赖 | 形态 | 缺失时 |
 |---|---|---|
-| `tools` | **硬**（`export const inject = ['tools', 'llm', 'systemPrompt']`） | 插件加载失败 |
-| `llm` | **硬** | 插件加载失败 |
-| `systemPrompt` | **硬** | 插件加载失败（协议段常驻，缺它闸门无法解释） |
+| `tools` | **硬**（`export const inject = ['tools', 'systemPrompt']`） | 插件停在 pending：不调用 `apply`，也没有告警 |
+| `llm` | **软**（`ctx.get('llm')`，不进 `inject`） | 投影与准入照常；选择器记 `selector-unavailable`，该步回主模型 |
+| `systemPrompt` | **硬** | 插件停在 pending：不调用 `apply`，也没有告警（协议段常驻，缺它闸门无法解释） |
+| `workspaceRegistry` | **软**（`ctx.get('workspaceRegistry')`） | cwd 无法映射 workspace id，全部按不可见 fail-closed；`ERR_HOST_NO_WORKSPACE_REGISTRY` |
 | `tokenMeter` | **软**（`ctx.get('tokenMeter')`） | 拒绝启用替换；投影裁剪仍可用，但投影账的 token 估算记 `unknown`（不伪造数字），`ERR_HOST_NO_TOKENMETER` |
 | `spillStore` | **软**（`ctx.get('spillStore')`） | `projection: 'on'` 时超限回执**不投影**（保住证据），`projection-skipped:no-spill`，`ERR_HOST_NO_SPILL`，`boost status` 标 degraded；`projection: 'shadow'` 不受影响 |
-| `tools.resolve`（步骤级 `when`） | 软探测 | 整族不注册，`ERR_HOST_NO_STEP_WHEN`（§5.5） |
 
 `tokenMeter` **只能软依赖**：写进 `inject` 的话，宿主没这个服务时插件根本加载不起来，连"拒绝替换、投影照做"的降级都做不到。`spillStore` 同理——硬依赖会让"没有 spill 后端"直接变成启动失败，而正确行为是"不投影、保证据"。
 
-**两个可选 peer 包**：`@deepseek-ai/dsh-spill-policy` 与 `@deepseek-ai/dsh-token-meter` 写进 `peerDependencies`，并在 `peerDependenciesMeta` 标 `optional: true`；代码一律 `await import(...)` 包 try/catch。**只写静态 import 而不声明 peer 依赖**时，宿主没装该包会抛 `ERR_MODULE_NOT_FOUND`，降级路径不可达（本机 hoisted 布局把包提升到可解析位置，**测不出这个问题**）。验收必须在 isolated 布局（`npm pack` 后装进空项目）下做，见 §6.2。
+**两个可选包不写进 `peerDependencies`**：`@deepseek-ai/dsh-spill-policy` 与 `@deepseek-ai/dsh-token-meter` 一律 `await import(...)` 包 try/catch，从宿主树解析；声明 peer 会让 npm 装第二份宿主树（见本节开头）。**只写静态 import 而不走动态 import**时，宿主没装该包会抛 `ERR_MODULE_NOT_FOUND`，降级路径不可达（本机 hoisted 布局把包提升到可解析位置，**测不出这个问题**）。验收必须在 isolated 布局（`npm pack` 后装进空项目）下做，见 §6.2。
 
 **发布验收顺序**：先 `npm run verify:package`（打包、装进临时目录、`import()` 与 `require()` 各解析一次、核对 tar 清单）→ 再 `npm publish --dry-run` → 最后才真发。反过来做，缺字段时看到的是一句解析错误，不是包本身的问题。
 
-两条来自参照仓库 patch 注释、会静默失败的硬约束：
+两条会静默失效的硬约束（第一条常被误读成 `id` / `name` 匹配）：
 
-1. **行的 `id` 必须严格等于导出插件的 `name`，`name` 必须等于 npm 包名**。宿主只追加顶层 `insert` 行，再用 `row.id == entry.options.id && row.name == entry.options.name` 判定"已装配"；缺一个就被**静默跳过**（不报错）。
+1. **真正会静默失效的是硬 `inject`，不是 `id` / `name` 匹配**。宿主把顶层 `insert` 行直接推进装配计划，**不做 id/name 匹配**；`row.id == entry.options.id && row.name == entry.options.name` 是插件管理面的"在役/可寻址"归因，不是加载条件。反过来，cordis 对一个缺硬 `inject` 服务的插件会停在 **pending**：不调用 `apply`、不注册钩子、不注册工具，也**不发警告**。所以 `llm` 声明为软依赖（`ctx.get('llm')`）：缺它时投影与准入照常，只有选择器记 `selector-unavailable`；`tools` / `systemPrompt` 仍是硬依赖，因为缺它们插件本来就没有可用面。
 2. **patch 的 `config` 是整体替换，不是深合并**。删掉一个键不等于"沿用默认"，而是让装配层用自己的默认值。所以装配层必须对每个缺键回落默认值，且 `cordis.patch.yml` 里列出的就是该 profile 的完整配置面（键名见 §5.3）。
 
 ### 11.1 控制面
 
-第一版只给一个工具 `boost`，子命令：`status`、`scope get|set`（全局或工作区列表）、`shadow on|off`。配置文件仍是事实来源，工具只是它的安全写入口（走 §5.5 的 validate → prune → revision+1 → 原子写）。
+第一版只给一个工具 `boost`，子命令：`status`、`scope-get`、`scope-set`（全局或工作区列表）、`shadow`（body 为布尔值，取代 `shadow on|off` 两个子命令）。配置文件仍是事实来源，工具只是它的安全写入口（走 §5.5 的 validate → prune → revision+1 → 原子写）。
 
-`boost status` 必须输出：`shadow`、`projection`（§5.5 的两个持久字段）、`skip:no-scope` 与 `projection-skipped:*` 的计数、degraded 码（`ERR_HOST_NO_TOKENMETER` / `ERR_HOST_NO_SPILL`）、`estimateSystemMessage` 实测的固定开销 token、累计节省（替换账与投影账分开，**投影账报净额**，附 `projection_retrievals` 计数）。"开了影子/投影"不能只靠用户记忆核实。
+`boost status` 必须输出：`shadow`、`projection`（§5.5 的两个持久字段）、`skip:no-scope` 与 `projection-skipped:*` 的计数、degraded 码（`ERR_HOST_NO_TOKENMETER` / `ERR_HOST_NO_SPILL` / `ERR_HOST_NO_WORKSPACE_REGISTRY`）、`estimateSystemMessage` 实测的固定开销 token、累计节省（替换账与投影账分开，**投影账报净额**，附 `projection_retrievals` 计数）、以及 **`receipts_stopped`**（收据 store 连续 3 次写失败后为 `true`，见 §5.2）。"开了影子/投影"不能只靠用户记忆核实。
 
-`boost` 是 scope 的**唯一豁免**（§5.5）：只读写本地配置文件、无外部副作用；否则 `selected+[]` 下用户没有启用入口。`boost scope set` 复用 §5.5 的同一条写路径——**`scope.lock`（`open(..., 'wx')`）包住 read-verify-write**，带 base revision 校验，冲突或锁占用分别返回 `ERR_SCOPE_REVISION_CONFLICT` / `ERR_SCOPE_LOCKED`。
+`boost` 是 scope 的**唯一豁免**（§5.5）：只读写本地配置文件、无外部副作用；否则 `selected+[]` 下用户没有启用入口。`boost scope-set` 复用 §5.5 的同一条写路径——**`scope.lock`（`open(..., 'wx')`）包住 read-verify-write**，带 base revision 校验，冲突或锁占用分别返回 `ERR_SCOPE_REVISION_CONFLICT` / `ERR_SCOPE_LOCKED`。
 
 不做客户端设置页（二期）。理由：设置页要 `dsh.client`、UI 构建和 HMR 验证，成本远高于收益；工具 + 文件已经够用，且更容易测。
 
 ### 11.2 双语
 
 - `README.md` 中文为主，`README.en.md` 英文；两份内容对应，不互相引用。
-- `locale/zh.json` / `locale/en.json` 给设置项标签用（即使一期没有设置页，配置项标题仍走 locale）。
+- `locale/zh.json` / `locale/en.json` 只提供包级元数据 `meta.title` / `meta.description`；**不承载配置项标签**（v1 没有设置页，配置走 `cordis.patch.yml`，没有 locale 驱动的配置标题）。
 - 代码注释与提交信息用英文；面向用户的错误提示走 locale。
+
+## 12. v1 已知限制（已声明）
+
+- **启用路径有摩擦**：控制面只有模型可调的 `boost` 工具（没有 CLI、没有设置页）；`scope-set` 需要先拿到宿主的 workspace UUID（不是路径）；安装/升级插件后必须重启 DSH，已在运行的会话看不到 `boost` 工具。这些是**已声明的限制**，不是缺陷；v1 接受它们。
+- **没有费用口径**：没有 per-route 费率、没有费用护栏；只按 raw token 记账（§5.3 / D1）。
+- **没有首 token 延迟口径**：没有代码、没有收据字段（§6）。
+- **A4 不可判**：`shadow-report.mjs` 没有总 token 分母，也不分桶；固定开销可测，净节省率产不出来（§6.1）。
+- **去重/合并的重议触发不可计算**：没有重复率脚本（§3 N5）。
+- **冒烟 runner 与取回完整性检查未交付**："不搭回放集"只免除语料，这两项不需要语料，仍是未交付项（§6.1/§6.2）。
+- **Windows 只投影、不替换**；`llm` 缺失时选择器不可用（§11）。
+- **"更高质"未被测量**：v1 只把"质量不降"当设计意图，不是已验证结论（§1）。
+
+## 13. 本次评审回写（2026-11-21）
+
+本节把评审驱动的更正与设计原文分开；正文已按实现改正，这里只列改动与归类。
+
+- **实现是事实、设计是错**：A4 净节省率不可计算；`retrievalUpperBound` 是 on-mode 取回率下界，不是损害上界；D4 的 0.29% 改为 778 / 195,531 = 0.40%；半行读取不截断；selector 计费是 `maxTokens + input`；`projection-skipped:no-owner` 不可达；子命令是 `scope-get` / `scope-set` / `shadow`；locale 只有 `meta.*`；3.5% floor 拆成 0.8% − 0.4%；§5.5 的 `tools.resolve` / `ERR_HOST_NO_STEP_WHEN` 已删除；§11 的 `peerDependencies` 矛盾已删除，`llm` 改软。
+- **实现是有意收窄、设计记录之**：`receipt-write-failed` → `status.receipts_stopped`；费用护栏与 per-route 费率不做；首 token 延迟不做；A4 分桶不做；去重触发条件不做；"不搭回放集"只免除语料，冒烟 runner 与取回完整性检查仍欠；启用路径摩擦保留。
+- **发布状态更新**：公开 GitHub 仓 `https://github.com/SAXEM1997/dsh-boost` 已建；`0.1.0` 是首个发布版本。
+- 对应提交：本文件所在提交（`git log -1 -- docs/superpowers/specs/2026-11-18-dsh-token-efficiency-design.md`）；报告见 `.superpowers/sdd/2026-11-18-dsh-token-efficiency/fix-r2-design.md`。
