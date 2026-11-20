@@ -76,8 +76,9 @@ With no `workspaceIds` no workspace is visible: the protocol section is not inje
 hook returns the original. The `boost` tool itself is the one scope exemption, so it can always be
 called to enable a workspace.
 
-`boost` is a **model tool, not a shell command** — this package has no `bin`. In the conversation,
-ask the agent to call it, for example:
+`boost` is a **model tool, not a shell command** — this package has no `bin`, and every step of
+enabling it (status, scope-set, shadow) is a tool call inside the conversation; there is no CLI
+equivalent. In the conversation, ask the agent to call it, for example:
 
 > Call the boost tool with `{"cmd":"status"}` and show me the JSON.
 
@@ -103,9 +104,11 @@ Then list the workspace to expose:
 ```
 
 - `workspaceIds` are the host's workspace UUIDs, not paths; the host maps the agent's cwd to this
-  id through its workspace registry. If you cannot find the UUID and this is a single-user
-  machine, `"mode": "global"` widens the scope to every *defined* workspace; sessions with no
-  workspace stay invisible.
+  id through its workspace registry. **Finding the UUID is itself friction**: either ask the
+  host / dig through session records, or read `tables.workspaces` (the id ↔ path table) in
+  `$DSH_HOME/storages/workspace.json` yourself — v1 ships no command that does this for you. If
+  you cannot find the UUID and this is a single-user machine, `"mode": "global"` widens the
+  scope to every *defined* workspace; sessions with no workspace stay invisible.
 - `baseRevision` is `data.scope.revision` from the status you just read (`0` for the first write).
   This is compare-and-swap: a stale revision returns `ERR_SCOPE_REVISION_CONFLICT`; read `status`
   again and retry.
@@ -289,8 +292,12 @@ State lives in `$DSH_HOME/boost/` (`$DSH_HOME` falls back to `~/.dsh` when unset
 
 - `scope.json` — the single source of truth for the exposure surface (version 2, with revision).
 - `scope.lock` — the short-lived write lock, removed after a normal write.
-- `receipts/<encoded-session>.jsonl` — append-only receipts holding metadata and a preview of the
-  first 256 code points, not the full stdout.
+- `receipts/<encoded-session>.jsonl` — append-only receipts. Besides metadata, each line carries
+  a preview of the first 256 code points of the receipt (never the full stdout), **the bound
+  arguments `args` (model-written, capped to 2048 code points, stored as visibly truncated JSON
+  with an `args_truncated` flag when oversized — `write` / `edit` arguments can carry whole file
+  contents and land here too)**, the plan goal (≤256 code points), and the guards (≤8, each
+  ≤300 code points).
 
 With `projection: 'on'`, the complete original is written to the host spill backend **before** the
 replacement happens, and the footer locator can be read with `read` / `grep`. Projection never
@@ -333,6 +340,7 @@ plugin fail to load.
 
 | Dependency | Form | When missing |
 |---|---|---|
+| `workspaceRegistry` | soft (`ctx.get('workspaceRegistry')`) | **Nothing works at all**: a cwd can never map to a workspace id, so everything fails closed as invisible — no protocol section, projection and substitution all skipped, only `skip:no-scope` receipts accumulating; `status.degraded` reports `ERR_HOST_NO_WORKSPACE_REGISTRY`. This is the one code that explains "installed but nothing happens" |
 | `tokenMeter` | soft (`ctx.get('tokenMeter')`) | Substitution is refused; projection keeps working and its accounting records `unknown` (never a fabricated number); `status.degraded` reports `ERR_HOST_NO_TOKENMETER` |
 | `spillStore` | soft (`ctx.get('spillStore')`) | With `projection: 'on'`, an over-limit receipt is not projected (evidence preserved), `projection-skipped:no-spill`; `status.degraded` reports `ERR_HOST_NO_SPILL` |
 | `@deepseek-ai/dsh-token-meter/estimate` | soft (dynamic import) | Fixed overhead cannot be measured, so `fixedOverheadTokens` is `'unknown'`; `status.degraded` reports `ERR_HOST_NO_ESTIMATOR` |

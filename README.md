@@ -63,12 +63,14 @@ bundle，patch 的 `insert` 行落在 profile root 上。**装完必须重启 DS
 `workspaceIds` 为空时没有可见工作区：协议段不注入，投影与替换都原样放行。`boost` 工具本身
 是唯一的 scope 豁免，因此没有工作区时仍然可以调用它来启用。
 
-`boost` 是**模型工具，不是 shell 命令**——这个包没有 `bin`。在对话里让 agent 调用它，例如：
+`boost` 是**模型工具，不是 shell 命令**——这个包没有 `bin`，启用全程都要在对话里让模型调用
+它（status、scope-set、shadow 都是工具调用，没有 CLI 等价物）。例如：
 
 > 调用 boost 工具，参数 `{"cmd":"status"}`，把 JSON 结果给我。
 
 首次 `status` 应看到 `ok: true`；`data.scope.workspaceIds` 为空、`revision` 为 `0`，`shadow` 为
-`true`、`projection` 为 `"shadow"`，`counts` 为空。`degraded` 里出现 `ERR_SCOPE_READ_FAILED`
+`true`、`projection` 为 `"shadow"`，`counts` 为空（**仅限全新会话**——越界会话更早的工具调用
+已经各记过一条 `skip:no-scope`）。`degraded` 里出现 `ERR_SCOPE_READ_FAILED`
 是正常的：`scope.json` 还不存在，插件正落在 fail-closed 默认值上。第一次成功的 `scope-set`
 会创建这个文件。
 
@@ -88,7 +90,9 @@ bundle，patch 的 `insert` 行落在 profile root 上。**装完必须重启 DS
 ```
 
 - `workspaceIds` 是宿主的 workspace UUID，不是路径；宿主通过 workspace registry 把 agent 的
-  cwd 映射成这个 id。找不到 UUID 且是单用户机器时，可以用 `"mode": "global"` 放开到所有
+  cwd 映射成这个 id。**发现 UUID 本身有摩擦**：要么问宿主/翻会话记录，要么自己读
+  `$DSH_HOME/storages/workspace.json` 的 `tables.workspaces`（id ↔ path 的映射表）——v1 没有
+  任何命令替你做这件事。找不到 UUID 且是单用户机器时，可以用 `"mode": "global"` 放开到所有
   **已定义**的工作区；没有工作区的会话仍然不可见。
 - `baseRevision` 取你刚读到的 `data.scope.revision`（首次写入是 `0`）。这是 compare-and-swap：
   revision 过期会返回 `ERR_SCOPE_REVISION_CONFLICT`，重读 `status` 再试。
@@ -253,8 +257,10 @@ patch 行的 `id` 与 `name`）。任一等式不成立，宿主会**静默跳�
 
 - `scope.json`——暴露面的唯一事实来源（version 2，带 revision）。
 - `scope.lock`——写路径的短锁，正常写入结束后删除。
-- `receipts/<encoded-session>.jsonl`——追加式收据，只存元数据与回执前 256 个码点的
-  preview，不存 stdout 全文。
+- `receipts/<encoded-session>.jsonl`——追加式收据。除元数据外，每行还携带：回执前 256 个
+  码点的 preview（不存 stdout 全文）、**绑定后的参数 `args`（模型所写，截到 2048 个码点，
+  超长会以 `args_truncated` 标记的截断 JSON 落盘——`write` / `edit` 的参数可携带整段文件
+  内容，同样入账）**、计划 goal（≤256 码点）与守卫（≤8 条，各 ≤300 码点）。
 
 `projection: 'on'` 时，完整原文在替换发生**之前**写入宿主的 spill 后端，页脚 locator 可以用
 `read` / `grep` 取回。投影不会丢掉唯一副本；spill 写入失败就不替换（收据记 `spill-failed`，
@@ -291,6 +297,7 @@ patch 行的 `id` 与 `name`）。任一等式不成立，宿主会**静默跳�
 
 | 依赖 | 形态 | 缺失时 |
 |---|---|---|
+| `workspaceRegistry` | 软（`ctx.get('workspaceRegistry')`） | **什么都用不了**：cwd 永远映射不到工作区 id，一切按 fail-closed 视为不可见——协议段不注入、投影与替换全部跳过，只有 `skip:no-scope` 收据在涨；`status.degraded` 带 `ERR_HOST_NO_WORKSPACE_REGISTRY`。这是「装上了却什么都不发生」的唯一解释 |
 | `tokenMeter` | 软（`ctx.get('tokenMeter')`） | 拒绝替换；投影仍可用，投影账记 `unknown`（不伪造数字）；`status.degraded` 带 `ERR_HOST_NO_TOKENMETER` |
 | `spillStore` | 软（`ctx.get('spillStore')`） | `projection: 'on'` 时超限回执不投影（保住证据），`projection-skipped:no-spill`；`status.degraded` 带 `ERR_HOST_NO_SPILL` |
 | `@deepseek-ai/dsh-token-meter/estimate` | 软（动态 import） | 固定开销无法测量，`fixedOverheadTokens` 为 `'unknown'`；`status.degraded` 带 `ERR_HOST_NO_ESTIMATOR` |
