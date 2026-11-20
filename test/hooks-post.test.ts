@@ -1399,3 +1399,61 @@ test('M5 estimateKind 只有 host/unknown：chars/4 的类型关已封死', () =
   const removed: NonNullable<HookDeps['estimateKind']> = 'chars/4'
   assert.equal(removed, 'chars/4')
 })
+
+// ---------------------------------------------------------------------------
+// D1: a result that lands after the turn advanced must not leave the mark
+// ---------------------------------------------------------------------------
+
+test('D1 rollover settles the mark and drops the stale plan before a parallel result', async () => {
+  const env = setup()
+  env.plans.set(SESSION, { goal: 'turn-1', steps: [candidate('A', 'TRIGGER')] })
+  await runPost(env.host, 'TRIGGER')
+  assert.ok(env.queue.peek(SESSION), 'turn 1 committed a pending substitution')
+  assert.equal(env.usage.pendingCandidateId(), 'A')
+
+  // A plan parsed from a turn-1 response is still parked when the host advances;
+  // the first llm/stream of turn 2 has not run yet, so nothing has reconciled it.
+  env.plans.set(SESSION, { goal: 'stale', steps: [candidate('B', 'STALE')] })
+  env.clock.onModelRequest(2, 0)
+
+  // A parallel tool result lands after the turn advanced.
+  await runPost(env.host, 'STALE parallel result', { kind: 'accept' }, { callId: 'parallel' })
+  assert.equal(env.queue.peek(SESSION), undefined, 'the previous turn entry is dead')
+  assert.equal(
+    env.usage.pendingCandidateId(),
+    undefined,
+    'the rollover must settle the mark, not leave it for the new turn',
+  )
+  assert.equal(env.plans.has(SESSION), false, 'the stale plan must not fire on the new-turn receipt')
+
+  // The first real request of turn 2 carries a usage sample. A mark left behind
+  // would settle here and report a numeric saving for a substitution that never
+  // ran; with the rollover settled it has nothing to pair.
+  env.usage.request({ input: 41, cacheRead: 1, output: 1 })
+  for await (const _chunk of env.host.stream(SESSION)) {
+    // drain
+  }
+  assert.equal(
+    env.receipts.some((r) => r.kind === 'substitute-settled'),
+    false,
+    'a rollover is not a measurement',
+  )
+})
+
+test('D1 rollover keeps a plan the new turn already parsed', async () => {
+  // The stream hook reconciles the plan map on the first real request of a turn.
+  // When that has happened, `notePlanTurn` reports false and the parked plan is
+  // this turn's: clearing it would discard a valid decision.
+  const env = setup({ deps: { sessions: { notePlanTurn: () => false } } })
+  env.plans.set(SESSION, { goal: 'turn-1', steps: [candidate('A', 'TRIGGER')] })
+  await runPost(env.host, 'TRIGGER')
+  env.plans.set(SESSION, { goal: 'turn-2', steps: [candidate('B', 'NEW-TURN')] })
+  env.clock.onModelRequest(2, 0)
+
+  await runPost(env.host, 'NEW-TURN receipt', { kind: 'accept' }, { callId: 'parallel' })
+
+  const entry = env.queue.peek(SESSION)
+  assert.equal(entry?.candidateId, 'B', 'a plan parsed for this turn must still fire')
+  assert.equal(env.plans.has(SESSION), false, 'the plan remains one-shot after it fires')
+  assert.equal(env.usage.pendingCandidateId(), 'B', 'the new decision marks its own usage')
+})

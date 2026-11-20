@@ -1831,14 +1831,32 @@ async function postExecute(
     // the call we substituted, also becomes the candidate's receipt.
     const { rolledOver } = state.begin(sessionId, turn)
     if (rolledOver) {
-      // A pending entry from the previous turn can never match a call in this
-      // one, so it is dead weight; the reset path clears mid-turn (F2).
+      // A pending entry and its decision-time usage mark from the previous turn
+      // can never match a call in this one, so both are dead weight; the reset
+      // path does the same mid-turn (F2). The mark is settled **without** a
+      // settlement receipt, exactly like `resetInvalidatedPending` and
+      // `applyAbandon`: no substitution ran, so there is no saving to report.
+      // This branch is reachable with a live mark because a parallel tool
+      // result can land after the host advanced the turn but before this turn's
+      // first `llm/stream`, so the old "the stream always runs first" argument
+      // does not hold (D1).
+      settleDiscarded(deps, sessionId)
       clearAnchors(deps, sessionId)
       clearPending(deps, sessionId)
-      // The plan map is not cleared here: `llm/stream` already dropped the old
-      // turn's plan on this turn's first request, and the plan present now was
-      // parsed by that request's response. Clearing it here would discard a
-      // valid new-turn plan.
+      // The plan map is normally reconciled by `SessionRuntime.notePlanTurn` on
+      // the first real request of a turn. If that request has not run yet, a
+      // plan still in the map belongs to the previous turn and would fire
+      // against this new-turn receipt; drop it. When the request did run,
+      // `notePlanTurn` reports false and the plan present was parsed by that
+      // request's response: keep it, because clearing would discard a valid
+      // new-turn plan.
+      let planForThisTurn = false
+      try {
+        planForThisTurn = deps.sessions?.notePlanTurn(sessionId, turn) === false
+      } catch {
+        planForThisTurn = false
+      }
+      if (!planForThisTurn) clearPlan(deps, sessionId)
     }
     state.recordRoot(sessionId, turn, receipt)
     fileDispatchedReceipt(state, exec, sessionId, turn, receipt)
