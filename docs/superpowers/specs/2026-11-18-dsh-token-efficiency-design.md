@@ -8,7 +8,7 @@
 
 目标是在 DeepSeek Harness（DSH）上做一个插件，让**同样的任务用更少的 token 完成，且成功率不降**。参照 HarnessMM 的"已定决策复用"思路：工具回执回来时，如果下一步在规划时就已经确定，就不必再问一次大模型。**关于"更高质"**：原始需求第 3 条提到"上下文更精炼高质"，但 v1 没有任何指标能判定质量是否提升（A1 的成功率口径已声明不可判）。"更精炼"由投影的 before/after token 差度量；"更高质"在 v1 只是一个**未经检验的假设**——v1 最多声称"质量不降"（即"same or better"），这同样未被测量，只作为设计意图而非已验证的事实。判定质量所需的指标（如任务完成率、主模型对替换/投影结果的推翻率）在 §6.1 的护栏中定义，但 v1 不产出这些数字。
 
-参照对象的核心机制（EDG 计划 / GDR 守卫 / CCS 回调替换 / Jev 快选择）在 `ref-harnessmm/` 中已完整实现，并附带一个能跑的 DSH 插件 `dsh-plugin/harnessmm-desktop`。本项目是**移植 + 改造**，不是从零实现。（Jev = 选择器，见 §5.1 的术语约定。）
+参照对象的核心机制（EDG 计划 / GDR 守卫 / CCS 回调替换 / Jev 快选择）在 `ref-harnessmm/` 中已完整实现，并附带一个能跑的 DSH 插件 `dsh-plugin/harnessmm-desktop`。本项目是**移植 + 改造**：移植扁平候选银行、守卫、单候选提交与选择器；EDG 的图/链（`predecessor_id`）未移植（见 §5.2-6），不是从零实现。（Jev = 选择器，见 §5.1 的术语约定。）
 
 要解决的问题在两个方向上都存在：
 
@@ -146,7 +146,7 @@
 
 **Jev 的自调用怎么认**：Jev 自己的每次调用也走 `ctx.llm`，落进同一个 `llm/stream` waterfall，而该钩子的 options 里**没有 agent**（只有可选的 `sessionId`），所以必须显式标记。约定：Jev 的内部调用一律带 `purpose: 'boost-selector'`（`GenerateOptions.purpose`，经 `LlmRequestPurposeMap` 声明合并注册；`GenerateOptions` 没有 `metadata` 字段，不要用它）。`llm/stream` 的**第一条规则**是"`options.purpose !== undefined` → 直接 `next()` 原样放行，不合成回合、不记账、不结算"——不限于 `boost-selector`：宿主在**同一个 sessionId** 上还会发 `purpose: 'compaction'` 与 `purpose: 'session-title'`，把它们当成边界请求会污染测量（假的 `compaction-reset`、向摘要器里合成回合、以及压缩请求的 usage 被当成 `after` 样本）。没有这条规则，内部调用会被当成边界请求，形成递归合成。
 
-**`purpose` 的风险**：参照实现**刻意不发** `purpose` / `temperature`，担心 provider adapter 拒绝任一可选字段会让整次选择调用报废；本实现核实后相反：`purpose` **始终发送**，没有回退，也没有 sticky 标记——`purpose` 由宿主的 header-preparation 插件消费（`dsh-llm-pi-ai/lib/index.js:1964`），从不进入请求体，网关无法拒绝它。sticky 的"曾被拒"标记是进程级的，任何一次无关的 pre-text 失败都会清掉它；一旦清掉，选择器调用就不再带标记，钩子唯一的判别器失效，最坏情况下会把真实 turn 的待替换项合成进选择器调用。`purpose` 仍必须经 `LlmRequestPurposeMap` 注册，否则编译期拒绝。
+**`purpose` 的风险**：参照实现**刻意不发** `purpose` / `temperature`，担心 provider adapter 拒绝任一可选字段会让整次选择调用报废；本实现核实后相反：`purpose` **始终发送**，没有回退，也没有 sticky 标记——`purpose` 由宿主的 header-preparation 插件消费（`@deepseek-ai/dsh-llm-pi-ai/lib/index.js:1964`；该包不在本仓库的 `node_modules` 里，只在运行中的 DSH profile，故这条只能对着运行中的宿主核对——2026-11-21 已在 live profile 的同一行核实），从不进入请求体，网关无法拒绝它。sticky 的"曾被拒"标记是进程级的，任何一次无关的 pre-text 失败都会清掉它；一旦清掉，选择器调用就不再带标记，钩子唯一的判别器失效，最坏情况下会把真实 turn 的待替换项合成进选择器调用。`purpose` 仍必须经 `LlmRequestPurposeMap` 注册，否则编译期拒绝。
 
 **v1 不含快速模型蒸馏**：上表与 §5.3 杠杆表都标二期。理由：研究结论是 LLM 压缩器在短任务上让 token 增加 24–94%，而确定性遮蔽省 8.6%。
 
@@ -162,7 +162,7 @@
    - **替换的影子对全部工具记录**：影子期替换不设白名单，全量记账（投影仍只覆盖已配置族）。
 
    `bash` 移出替换白名单：`sandbox_permissions` 只能升不能降，"查询类 bash"没有可执行判定，派发层收窄不了；bash 的只读化等 read-only sandbox 验收通过后再开。`web_fetch` 同样移出：网络非确定性，现有 guard 字段对它没有定义。写操作一律不放行：本 profile 没有文件级快照，`edit` 到已存在文件在 git 之外无法回滚，"可回滚写"这个前提不成立。代价是收益变小，换来的是"错放行不会造成不可逆后果"。
-6. **每个 turn 有替换步数上限**（默认 8 步）。达到上限即"图耗尽"：回主模型，收据记 `steps-exhausted`。
+6. **每个 turn 有替换步数上限**（默认 8 步）。达到上限即步数耗尽（HarnessMM 的"图耗尽"；本实现没有图，只有每 turn 的步数预算）：回主模型，收据记 `steps-exhausted`。
 7. **"追加式"只约束插件自身**：插件不改写历史；宿主有两类外部失效源：
    - **compaction**：把老区间替换成摘要，且从首个被替换 token 起缓存失效。压缩后计划锚点丢失 → 回主模型、清空 pending、收据记 `compaction-reset`。
    - **tool-result-pruner**：本 profile 已启用 `dsh-compaction-tool-result-pruner`（`thresholdChars: 8192` / `head: 4096` / `tail: 1024`）。它把超限回执**原位**换成 head + marker + tail，且**保留锚点**——所以 pruner 造成的压缩不会触发 `compaction-reset`，而它恰恰是最常见的压缩结果。锚点还在但正文已变，模板/绑定必须判失效，收据记 `pruned-reset`。
@@ -188,7 +188,7 @@
 | guard | 语义 | 备注 |
 |---|---|---|
 | `ok` | 回执未标错（`isError` 为假） | **平凡**，单独使用不算 guard |
-| `text_contains` | 规范化文本含给定子串，区分大小写 | 子串由图上的确定性抽取给出，不接受模型现编 |
+| `text_contains` | 规范化文本含给定子串，区分大小写 | 子串是计划里的字面量，由主模型在计划时给出；选择器不能现编 |
 | `text_not_contains` | 规范化文本不含给定子串 | 用于排除错误页脚、堆栈、`[exit code: N]` |
 | `json_equals` | 整段文本是 JSON 时，按 JSON pointer 取值等于给定标量 | 解析失败即 guard 不成立（不是抛错） |
 
@@ -205,7 +205,7 @@
 | `"$single"` | 整段形如 `['value']` 的单元素字符串数组 | 多元素、非字符串、带尾随内容 |
 
 - `field` 是**任意标识符**（如 `name`、`path`）或两个保留值 `$scalar` / `$single`；标识符在文本中的形态是 `name:` 或 `name=`，`name` 只是示例，不是保留字。
-- `after`：`root` = 本步回执；`A`…`Z` = 图上第 N 步的回执（必须在本步之前；字母不在图里即判不可解析）。引用的回执必须**成功且只有单个 text block**，否则模板不可解析。
+- `after`：`root` = 本步回执；`A`…`Z` = 先前以该 id 的候选执行后留下的回执（必须是本步之前已执行候选；没有该 id 的回执即判不可解析）。引用的回执必须**成功且只有单个 text block**，否则模板不可解析。
 - 只取**字面量**：不做求值、不做正则替换、不做字段拼接。模板参数**先解析再比对**（D5）。
 - 抽取不到或有多解，一律回退主模型，不做"猜一个"。
 
@@ -309,7 +309,7 @@ config:
 - **不依赖**与 `dsh-spill-policy` 的注册次序。准确说法是：**投影只替换模型可见的 `content`，原文由本插件存入 spill 后端，页脚由本插件生成**——任何一边先跑都不影响正确性。
 - `read` 走同一条路径。`dsh-spill-policy` 在 `tools/post-execute` 里对 `exec.name === 'read'` **直接跳过**（源码如此），不能指望它兜底；而 read 正是 v1 白名单之首。
 - 页脚格式必须复用宿主的 `formatSpillNotice`，不要手拼 `Full formatted result stored at:` 字符串。
-- `owner` 取 `exec.agent.session.header.id`：先判 `exec.agent` 是否为 `undefined`；为 `undefined` 时不投影（PTC 子派发等场景）。`Agent.session` 与 `Session.header` 都是非可选字段，不要再套可选的冗余链。缺 agent / session id 时，hook 在更早的 scope 门就原样放行并记 `skip:no-scope`（§5.5），**不会**产出 `projection-skipped:no-owner`；`projectApply` 的 `no-owner` 分支只服务于它的直接调用契约（单元测试），生产路径到不了。
+- `owner` 取 `exec.agent.session.header.id`：先判 `exec.agent` 是否为 `undefined`；为 `undefined` 时不投影（PTC 子派发等场景）。宿主类型里 `Agent.session`（`@deepseek-ai/dsh-agent/lib/types/runtime-types.d.ts:168`）与 `Session.header`（`@deepseek-ai/dsh-session/lib/types/index.d.ts:158`）都是非可选字段。实现仍保留整条 `exec?.agent?.session?.header?.id`（`src/hooks/post-execute.ts:393`）：这是对运行期外部 exec 的防御——hook 参数由宿主提供，本地类型只是结构镜像，字段缺失时退化为 `skip:no-scope` 而不是抛错；类型上可省，运行期有意保留。缺 agent / session id 时，hook 在更早的 scope 门就原样放行并记 `skip:no-scope`（§5.5），**不会**产出 `projection-skipped:no-owner`；`projectApply` 的 `no-owner` 分支只服务于它的直接调用契约（单元测试），生产路径到不了。
 - 顺序无关的代价是**多一次落盘**：只对确实要投影的回执落盘，未触发阈值的不落。
 - **大回执直接不投影**：`Buffer.byteLength(text, 'utf8') > 256 * 1024` 跳过（**按 UTF-8 字节计，不按 `text.length` 的 UTF-16 单元**——同一段 CJK 的字节数是单元数的 3 倍，用错口径会让上限浮动 2–4 倍）。先比 `text.length` 做粗筛（它是 code point 数的上界），只有确定要裁时才 `Array.from` 转 code point 数组（实测 1 MB 字符串做这一步 17.7 ms、约 9 MB 堆）。
 - **`projection: 'shadow'` 不依赖 `spillStore`**：影子模式不改 content、不调 `saveText`、不落盘，只用宿主 `tokenMeter` 的同步 `estimateMessage` 对原/裁剪文本做对比记账（meter 缺失时记 `unknown`，不伪造数字）；`projection-skipped:no-spill` 只在 `projection: 'on'` 且确实要落盘时触发。否则宿主没装 spill 包时影子期拿不到账。
@@ -627,4 +627,5 @@ dsh-boost/
 - **实现是事实、设计是错**：A4 净节省率不可计算；`retrievalUpperBound` 是 on-mode 取回率下界，不是损害上界；D4 的 0.29% 改为 778 / 195,531 = 0.40%；半行读取不截断；selector 计费是 `maxTokens + input`；`projection-skipped:no-owner` 不可达；子命令是 `scope-get` / `scope-set` / `shadow`；locale 只有 `meta.*`；3.5% floor 拆成 0.8% − 0.4%；§5.5 的 `tools.resolve` / `ERR_HOST_NO_STEP_WHEN` 已删除；§11 的 `peerDependencies` 矛盾已删除，`llm` 改软。
 - **实现是有意收窄、设计记录之**：`receipt-write-failed` → `status.receipts_stopped`；费用护栏与 per-route 费率不做；首 token 延迟不做；A4 分桶不做；去重触发条件不做；"不搭回放集"只免除语料，冒烟 runner 与取回完整性检查仍欠；启用路径摩擦保留。
 - **发布状态更新**：公开 GitHub 仓 `https://github.com/SAXEM1997/dsh-boost` 已建；`0.1.0` 是首个发布版本。
+- **round 3 回写（2026-11-21）**：评审发现文档声称了代码没有的机制，故澄清表改正两处——定序不是"计划时冻结"（计划每回执一次性，主模型逐步决定；该结论降为未经验证的设计直觉），"EDG" 只移植了扁平候选银行、没有 `predecessor_id` 图链；§1/§5.2 同步去掉未移植的"图"语义（步数上限、守卫子串来源、`after` 的候选 id）；§5.4 说明 owner 可选链是对外部 exec 的运行期防御，并补上 `Agent.session` / `Session.header` 非可选的宿主出处；§5.1 的 `purpose` 引用注明只在 live profile 可核。
 - 对应提交：主回写 `0286371`；取回完整性措辞的后续修正见 `git log -1 -- docs/superpowers/specs/2026-11-18-dsh-token-efficiency-design.md`。报告见 `.superpowers/sdd/2026-11-18-dsh-token-efficiency/fix-r2-design.md`。
