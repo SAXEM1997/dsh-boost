@@ -91,7 +91,7 @@ export interface ScopeDoc {
   updatedAt?: string
   mode: 'selected' | 'global'
   workspaceIds: string[]
-  /** Shadow accounting switch (`boost shadow on|off`). */
+  /** Shadow accounting switch (`boost shadow` with a boolean body). */
   shadow: boolean
   /** Projection shape: off, accounting only, or real replacement. */
   projection: ProjectionMode
