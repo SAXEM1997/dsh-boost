@@ -420,6 +420,9 @@ tool share 变动约 ±1.3pp。这是选择边界差，不是公式差；设计�
 - 权限只有 `contents: read`，没有 registry token；`npm publish` 永远带 `--dry-run`，**从不发布**；
 - `v*` tag **不会**把任何东西推到 registry；打 tag 只是再跑一遍同一个 dry-run。
 
+注意：§1 的次安装会执行包内 lifecycle 脚本；`pull_request` 上也会执行。runner 是临时的、
+没有 registry token，但这仍是在跑不可信代码——不要给这个 job 加 secrets 或写权限。
+
 它**不**检查：真实发布所需的认证/2FA、registry 的 `latest` dist-tag、provenance/签名、装进真实
 DSH 宿主后的行为、§3 的 20 任务门、§5 的统计复算。workflow 是为公共 GitHub mirror 准备的；
 内部 GitLab remote 不执行它（见 yml 文件头）。
