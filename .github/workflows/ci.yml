@@ -4,8 +4,19 @@
 # staged for the public GitHub mirror (see the repository field in
 # package.json). It runs the same single command a maintainer runs locally:
 # `npm publish --dry-run` executes prepublishOnly -> `npm run ci` (typecheck,
-# test, clean build) -> `npm run verify:package` (pack, install with
-# --ignore-scripts, import/require, tarball manifest).
+# tests, clean build) -> `npm run verify:package` (exact tarball allowlist,
+# dist/index.js guard, exports targets, install with --ignore-scripts + probe +
+# TypeScript consumer, then a second install with lifecycle scripts enabled).
+#
+# It never publishes: the only npm publish invocation carries --dry-run, there
+# is no registry token, and a `v*` tag does not upload anything. See
+# docs/RELEASE.md §6.
+#
+# The committed lockfile resolves every tarball to registry.npmmirror.com.
+# `--registry` does not override those URLs, so rewrite the runner's copy to
+# npmjs before installing. The trade: CI depends on public npmjs and has no
+# mirror fallback; in exchange it runs on a runner that cannot reach the China
+# mirror, and integrity still verifies every tarball.
 name: ci
 
 on:
@@ -20,11 +31,20 @@ permissions:
 jobs:
   release-gate:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
           node-version: 24.9.0
           cache: npm
-      - run: npm ci
+      - name: Rewrite the runner's lockfile from npmmirror to npmjs
+        run: |
+          sed -i 's#https://registry.npmmirror.com/#https://registry.npmjs.org/#g' package-lock.json
+          if grep -q 'registry.npmmirror.com' package-lock.json; then
+            echo 'npmmirror URL left in package-lock.json' >&2
+            exit 1
+          fi
+          grep -q 'registry.npmjs.org' package-lock.json
+      - run: npm ci --registry=https://registry.npmjs.org/
       - run: npm publish --dry-run

@@ -1,11 +1,12 @@
 # dsh-boost 发布验收
 
-本文是 `dsh-boost` 0.1.0 的发布验收手册。它覆盖三件事：
+本文是 `dsh-boost` 0.1.0 的发布验收手册。它覆盖四件事：
 
 1. `npm run verify:package` 一条命令的打包与产物验收（§1），以及零 peerDependencies 现状下
    两条降级路径的验收方式（§2）；
 2. 20 任务回归门的**判定过程**与 pass 谓词（任务清单由操作者自备）；
-3. 影子周脚本的跑法、`session-snapshot.json` 的来源与复算方式。
+3. 影子周脚本的跑法、`session-snapshot.json` 的来源与复算方式；
+4. CI 到底做什么、不做什么，lockfile 的 China mirror 怎么处理，以及 npm 的发布旁路（§6）。
 
 > 记录在案的决定：本项目**不附带** 20 任务回放集，也不提供 `test/regression/run.mjs`。用户明确否决了
 > "搭回放集"（2026-11-18）。因此第 3 节只规定过程与判据，**不伪造任务集**。
@@ -20,39 +21,55 @@
 npm run verify:package
 ```
 
-`scripts/verify-package.mjs` 把机械验收一次做完（本 checkout 实测 exit 0：tarball 110 个条目，
-JSON 回执的 `checks` 七项全绿）：
+`scripts/verify-package.mjs` 把机械验收一次做完。它不依赖 `npm publish` 或 `prepublishOnly`，
+可以单独跑；前置条件只有一次 `npm ci`（后面 `npm pack` 的 `prepare` 需要仓库自己的 `tsc`）。
+本 checkout 实测 exit 0：tarball 110 个条目，回执里 8 条 `checks` 记录：
 
 1. `npm pack` 打出真实 tarball。`package.json` 的 `prepare` 会在 pack（含 `--dry-run`）前执行
-   `npm run build`（生命周期钩子名是 `prepare`；`prepack` 已不存在——`--dry-run` 同样触发
-   `prepare`，本机已复验），所以干净 clone 上即使 `dist/` 不存在，打出的包也会包含构建产物。
-2. 断言 11 个必需条目一个不少：`package.json`、`LICENSE`、`NOTICE`、`README.md`、
-   `README.en.md`、`cordis.patch.yml`、`dist/index.js`、`dist/index.d.ts`、`dist/index.js.map`、
-   `locale/en.json`、`locale/zh.json`。
-3. 断言 dev 树不进包：`src/`、`test/`、`scripts/`、`docs/`、`.superpowers/` 前缀一律拒绝，且
-   `dist/` 里不允许出现没有对应源文件的孤儿产物（stale build）。
-4. 把 tarball 装进一次性消费项目，带 `--ignore-scripts`——证明**装好的包内不做任何构建**，
-   tarball 里的 `dist/` 就是最终产物。
-5. 在该项目里 `import('dsh-boost')` 与 `require('dsh-boost')` 都拿到 `name` / `inject` /
-   `apply`：`exports` 的 `.` 条目同时带 `import` / `require` / `default`，Node ≥ 24.9 的
-   require(esm) 加载的是同一份 ESM。
-6. `require.resolve('dsh-boost/package.json')` 与 `require.resolve('dsh-boost/locale/en.json')`
-   都能解析——`exports` 不声明这两个子路径时 Node 抛 `ERR_PACKAGE_PATH_NOT_EXPORTED`，宿主的
-   `readPluginMeta` 会把该错误当成“文件不存在”，插件的名称、描述与 locale 字典就全部回退成空。
+   `npm run build`（生命周期钩子名是 `prepare`；`prepack` 已不存在，本机已复验），所以干净
+   clone 上即使 `dist/` 不存在，打出的包也会包含构建产物。
+2. **exact allowlist**：每一个 tar 条目都必须由三类来源之一解释——固定根文件（`package.json`、
+   `LICENSE`、`NOTICE`、两份 README、`cordis.patch.yml`）、`locale/*.json`、或
+   `src/**/*.ts` 对应的一个 `dist/**.js` + `.js.map` + `.d.ts`。多出 `package/dist/ghost.js`
+   之类的条目立即失败并点名；少一个（例如删掉 `dist/types.d.ts`）也失败并列出缺失项。
+   这是精确集合，不是“必需项齐全 + 禁止前缀不出现”。
+3. **publish guard**：tarball 里没有 `package/dist/index.js` 时，脚本在任何安装之前失败，
+   消息是 `publish blocked: tarball has no package/dist/index.js`。`npm pack --ignore-scripts`
+   在无 `dist/` 的干净 clone 上打出的 8 文件空包，就是被这条挡住的。
+4. 安装树里每一个 `exports` 字符串目标（包括 `./locale/*.json` 按 en/zh 展开）、`main` 与
+   `types` 都必须存在。检查的是“声明了的路径”，不只是 `dist/index.js` 一个文件。
+5. 把 tarball 装进一次性消费项目，带 `--ignore-scripts`（**主安装**；CI 上不执行包内生命周期
+   脚本）。在装好的包上跑 import/require 探针：`name` / `inject` / `apply` 来自 ESM `import`，
+   `require('dsh-boost')` 也拿到同一组；`require.resolve('dsh-boost/package.json')`、
+   `require.resolve('dsh-boost/locale/en.json')` 与 `.../zh.json` 都能解析，两个 locale 都
+   解析出非空 `meta.description`。zh 是主 README 的语言，**两个 locale 都是契约**；把
+   `"./locale/*.json"` 收窄到 en 会在这里得到 `ERR_PACKAGE_PATH_NOT_EXPORTED`。
+6. 在同一个已安装包上编译一个 tiny TypeScript consumer：`import { apply, name } from
+   'dsh-boost'` 加 `import type { inject } from 'dsh-boost'`，用仓库自己的 `tsc --noEmit`
+   （`skipLibCheck: false`）对**装好的**包编译。缺 `dist/types.d.ts` 时这里红（消费项目里直接
+   复现是 `TS7016: Could not find a declaration file for module './types.js'`）；`name` /
+   `inject` 的字面量类型和 `apply` 的参数形状也一起钉住。宿主类型用最小 stub，宿主 API 本身由
+   `npm run typecheck` 对真实 devDependencies 检查。
+7. **再装一次，不带 `--ignore-scripts`**（**次安装**；生命周期脚本启用），并在这次安装上重跑
+   import/require/locale 探针。`postinstall` 非零会让整个 `npm install` 非零，门就红；这是
+   唯一能发现“postinstall 让真实用户装不上”的检查。它会在一次性临时目录里执行包内脚本——
+   **不要在不可信的 commit 上跑 `verify:package`**。
 
-成功只往 stdout 打一行 JSON 回执；失败保留临时目录并打印其路径供检查。
+成功只往 stdout 打 JSON 回执；`checks[].install` 明说每条断言用的是 `ignore-scripts` 还是
+`default` 安装。失败保留临时目录并打印其路径供检查。
 `prepublishOnly` 现在就是 `npm run ci && npm run verify:package`（`ci` = typecheck + test +
-build），所以 `npm publish` 本身会跑完这道门，它不再只是构建防线。
+build），所以**不带 flags 的** `npm publish` 本身会跑完这道门。但 npm 仍有两个旁路，见 §6.3。
 
-### 1.1 手工回退（只保留仍然增值的两件事）
+### 1.1 手工回退与维护
 
 - `npm ci`：按已提交的 `package-lock.json` 复现开发依赖树（TypeScript、`tsx`、`@types/node`
-  都由 lockfile 钉住）。`verify:package` 用的是当前工作树，不替你做这一步。
-- 人工 review 完整清单：`npm pack --dry-run` 的完整输出或 `tar -tzf dsh-boost-0.1.0.tgz`。
-  注意 `verify:package` 的清单断言是“必需项齐全 + 禁止前缀不出现”，**不是**全量清单 diff：
-  tarball 里既非必需、也不落在禁止前缀下的多余文件它同样抓不到（旧版手工 `grep -E` 集合比较
-  对多余文件同样失明——`actual` 由只放行白名单模式的过滤器产生，多余文件根本不进比较）。
-  要这个保证，就对完整清单做 `diff`。
+  都由 lockfile 钉住）。`verify:package` 用的是当前工作树，不替你确认 commit 状态。
+- 完整路径清单已由 exact allowlist 覆盖，不需要再手工 `diff` 集合。要审**内容**（不是路径集合）
+  仍然可以 `tar -tzf dsh-boost-0.1.0.tgz` 或 `npm pack --dry-run` 人工看。
+- 新增 `src/**/*.ts` 或 `locale/*.json` 时 allowlist 自动跟随，不用改脚本；新增**根文件**才需要
+  改 `scripts/verify-package.mjs` 的 `ROOT_ENTRIES`。
+- `node scripts/verify-package.mjs --tarball <tgz>`：对已有 tarball 跑同一套检查（不重新 pack）。
+  没有 `dist/index.js` 会直接拒绝。它不能把 `npm publish <tgz>` 变安全（§6.3）。
 
 验收前的硬约束（设计 §11）：
 
@@ -69,11 +86,11 @@ build），所以 `npm publish` 本身会跑完这道门，它不再只是构建
 ## 2. 装进宿主（一次性 DSH_HOME）
 
 机械的那一半——空项目安装、模块加载、元数据路径解析——已并入 §1 的 `npm run verify:package`
-（一次性消费项目 + `import`/`require` 探针 + 子路径解析断言）。**本包不再声明任何
+（一次性消费项目 + `import`/`require`/locale 探针 + 子路径解析断言 + 类型检查）。**本包不再声明任何
 peerDependencies**（§2.4），所以“peer 在空项目里解析到哪个 rc”这一步已经不存在：裸装 tarball
 只新增 `dsh-boost` 一个包（约 1.4 MB），不会带出任何 `@deepseek-ai/*` 宿主树；旧版用 isolated
-布局把“缺失 peer”真实暴露出来的动机也随之消失。§1 的第 5、6 步就是当年手工
-`import('dsh-boost')` 与两条 `import.meta.resolve` 检查的自动化版本。
+布局把“缺失 peer”真实暴露出来的动机也随之消失。§1 的第 5 步（import/require/locale 探针）
+就是当年手工 `import('dsh-boost')` 与两条 `import.meta.resolve` 检查的自动化版本。
 
 剩下需要活宿主的部分照旧。`--profile` 是 `dsh plugin` 的**必填**
 选项，且要放在 `add` 这个被透传的 pnpm 子命令**之前**；写成 `dsh plugin add <path>` 会在安装前
@@ -356,7 +373,7 @@ node scripts/shadow-report.mjs --dir "$DSH_HOME/boost/receipts"
 快照按**一个会话一行**序列化：数组内的每个 session 对象占一行，diff 里可逐条 review；解析后的数字与
 单行 JSON 完全相同。
 
-复算（手工可重复，不碰会话目录；本仓库没有配置 CI 流水线，不存在“CI 用这个”的自动步骤）。
+复算（手工可重复，不碰会话目录；CI 只做发布门 dry-run，不跑统计复算，见 §6.1）。
 机器可读的管道用下面两种之一：不带 `--silent` 的 `npm run stats` 会把 npm 的
 `> dsh-boost@0.1.0 stats` 横幅打进 **stdout**（stderr 重定向拦不住），直接接 `jq` 之类会破：
 
@@ -391,11 +408,51 @@ tool share 变动约 ±1.3pp。这是选择边界差，不是公式差；设计�
 快照一旦提交就是权威：`--snapshot` 不重新选样，复算只复算已提交的聚合。若复算值与设计稿 §2.1 有出入，
 按快照的实际值报告，**不得**改快照去凑设计稿数字。
 
-## 6. 发布检查清单
+## 6. CI 与发布旁路
+
+### 6.1 workflow 做什么、不做什么
+
+`.github/workflows/ci.yml` 在 `push` 到 `main`、`v*` tag 和 `pull_request` 时跑一个 job：
+
+- 把 runner checkout 里的 `package-lock.json` 从 npmmirror 重写到 npmjs（§6.2），然后 `npm ci`；
+- 跑 `npm publish --dry-run`。这会执行 `prepublishOnly` = `npm run ci`（typecheck + `npm test` +
+  clean build）+ `npm run verify:package`，所以 §1 的整道门在 CI 里跑；
+- 权限只有 `contents: read`，没有 registry token；`npm publish` 永远带 `--dry-run`，**从不发布**；
+- `v*` tag **不会**把任何东西推到 registry；打 tag 只是再跑一遍同一个 dry-run。
+
+它**不**检查：真实发布所需的认证/2FA、registry 的 `latest` dist-tag、provenance/签名、装进真实
+DSH 宿主后的行为、§3 的 20 任务门、§5 的统计复算。workflow 是为公共 GitHub mirror 准备的；
+内部 GitLab remote 不执行它（见 yml 文件头）。
+
+### 6.2 lockfile 的 China mirror
+
+已提交的 `package-lock.json` 把所有 `resolved` URL 钉在 `registry.npmmirror.com`；在没有该镜像的
+runner 上冷跑 `npm ci` 会 `ECONNREFUSED`，而 `--registry=https://registry.npmjs.org/` 不会覆盖
+lockfile 里的 tarball URL。workflow 选的是**先重写、再安装**：一步 `sed` 把 runner 上的
+`package-lock.json` 从 npmmirror 全量替换为 npmjs，并断言无残留，然后
+`npm ci --registry=https://registry.npmjs.org/`。代价一句话：CI 从此依赖公网 npmjs，npmjs 不可达
+时直接红、没有镜像兜底；换来的是 runner 不必能连中国镜像，且 integrity 仍逐 tarball 校验。
+重写只发生在 runner 的 checkout，不提交回仓库；本地开发继续用 `.npmrc` 的镜像。
+
+### 6.3 包内无法修复的旁路
+
+`--ignore-scripts` and `npm publish <tgz>` skip the gate entirely; the only defence is running
+`npm run verify:package` on the commit you tag. 具体地，`npm publish --ignore-scripts` 不跑
+`prepublishOnly`，`npm publish ./dsh-boost-0.1.0.tgz` 对 tarball 发布也不跑包内任何脚本；两者都能
+把没有 `dist/index.js` 的 8 文件空包推到 registry（本机 npm 11.19.1 实测：无 `dist/` 的干净 clone
+上 `npm publish --dry-run --ignore-scripts` exit 0，8 files / 约 27 kB）。`prepublishOnly` 只保护
+“在这个 checkout 里、不带 flags 的 `npm publish`”，而 npm 没有 post-pack 钩子能检查它最终上传的
+那个 tarball。因此发布顺序只有一个：在**要打 tag 的那个 commit** 上运行
+`npm run verify:package`（exit 0），确认 `git status --short` 干净后打 tag，再从同一个 checkout
+执行不带 flags 的 `npm publish`；不要用 `--ignore-scripts`，不要发布手工 tarball。
+
+## 7. 发布检查清单
 
 - [ ] `npm ci` 成功（lockfile 与 `package.json` 一致），开发树可复现
-- [ ] `npm run verify:package` exit 0（§1）：11 个必需条目齐全、无 dev 树/孤儿产物、一次性项目 `--ignore-scripts` 安装、`import` 与 `require` 均拿到 `name/inject/apply`、`package.json` 与 `locale/en.json` 子路径可解析（M3）
-- [ ] `prepublishOnly`（`npm run ci && npm run verify:package`）在发布前整体跑过一遍
+- [ ] 在**要打 tag 的那个 commit** 上 `npm run verify:package` exit 0（§1）：exact allowlist（无多余/缺失条目）、`dist/index.js` guard、所有 `exports`/`main`/`types` 目标存在、主安装 `--ignore-scripts` 与次安装（生命周期脚本启用）都成功、两次安装的 import/require/locale 探针通过（en 与 zh）、tiny TS consumer 的 `tsc --noEmit` 通过（缺/错 `.d.ts` 会红）
+- [ ] 该 commit 的 `git status --short` 为空；`verify:package` 只证明工作树或给定 tarball，不证明 commit 状态
+- [ ] `prepublishOnly`（`npm run ci && npm run verify:package`）在发布前整体跑过一遍；明确知道 `npm publish --ignore-scripts` 和 `npm publish <tgz>` 会绕过它（§6.3）
+- [ ] CI 在同一个 commit 上绿；明确知道它只 dry-run、不发布，`v*` tag 不会上传（§6.1）
 - [ ] `dsh plugin --profile <name> add dsh-boost@^0.1.0`（或本地路径/tarball）成功，`--dump-config` 里有 `id: dsh-boost` 行
 - [ ] 测试工作区已写入 `scope.workspaceIds`，`shadow: true`、`projection: 'on'` 经 `boost status` 确认
 - [ ] no-tokenmeter 门按 §2.1 承担：单元测试注入 `hasTokenMeter: false` 锁定预期（替换拒绝、投影可用、账目 `unknown`、`ERR_HOST_NO_TOKENMETER`）；活宿主复核仅在确要部署缺该服务的宿主时做，先验健康态再验降级
