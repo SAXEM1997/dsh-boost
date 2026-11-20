@@ -1,0 +1,224 @@
+import test from 'node:test'
+import assert from 'node:assert/strict'
+import { remainingSteps, RuntimeStepHorizon, worthSubstituting, StepBudget } from '../src/admission/ledger.ts'
+
+test('不足 5 个 turn 直接用 horizon；满 5 个才取均值（R11）', () => {
+  assert.equal(remainingSteps({ stepsSoFar: [50, 60, 70, 80, 90], horizonSteps: 20, historyTurns: 5 }), 20)
+  assert.equal(remainingSteps({ stepsSoFar: [2, 3], horizonSteps: 20, historyTurns: 5 }), 20)
+  assert.equal(remainingSteps({ stepsSoFar: [], horizonSteps: 20, historyTurns: 5 }), 20)
+  assert.equal(remainingSteps({ stepsSoFar: [10, 10, 10, 10, 10], horizonSteps: 20, historyTurns: 5 }), 10)
+  assert.equal(remainingSteps({ stepsSoFar: [10, 10, 10, 10, 10, 10], horizonSteps: 20, historyTurns: 5 }), 10)
+})
+
+test('确定性单候选豁免阈值', () => {
+  assert.equal(worthSubstituting({ savedTokens: 100, overheadTokens: 0, thresholdTokens: 1024, deterministicSingle: true }), true)
+  assert.equal(worthSubstituting({ savedTokens: 100, overheadTokens: 0, thresholdTokens: 1024, deterministicSingle: false }), false)
+  assert.equal(worthSubstituting({ savedTokens: 2000, overheadTokens: 100, thresholdTokens: 1024, deterministicSingle: false }), true)
+})
+
+test('每 turn 8 步上限（Review Focus #5）', () => {
+  const b = new StepBudget(8)
+  for (let i = 0; i < 8; i++) assert.equal(b.take(), true)
+  assert.equal(b.take(), false)
+  assert.equal(b.exhausted(), true)
+  assert.equal(b.count(), 8)
+})
+
+/* ------------------------------------------------------------------------- *
+ * 规则 1–4 的补充钉死（brief 三条是下限）
+ * ------------------------------------------------------------------------- */
+
+test('确定性单候选即使净节省为负也豁免（没有选择器开销）', () => {
+  assert.equal(worthSubstituting({ savedTokens: 0, overheadTokens: 5000, thresholdTokens: 1024, deterministicSingle: true }), true)
+})
+
+test('恰好 historyTurns 个条目进入均值分支（两个不同的 N）', () => {
+  assert.equal(remainingSteps({ stepsSoFar: [6, 6, 6, 6, 6], horizonSteps: 20, historyTurns: 5 }), 6)
+  assert.equal(remainingSteps({ stepsSoFar: [8, 8, 8, 8], horizonSteps: 20, historyTurns: 4 }), 8)
+})
+
+test('超过 historyTurns 时只看最近 N 个；更早的条目不得改变均值', () => {
+  // 全部 6 个的均值是 25（会被 clamp 到 20）；最近 5 个的均值是 10。
+  assert.equal(remainingSteps({ stepsSoFar: [100, 10, 10, 10, 10, 10], horizonSteps: 20, historyTurns: 5 }), 10)
+  // 最近 5 个是 [10,10,10,10,2]，均值 8.4 → 8。
+  assert.equal(remainingSteps({ stepsSoFar: [10, 10, 10, 10, 10, 2], horizonSteps: 20, historyTurns: 5 }), 8)
+})
+
+test('均值四舍五入：2.5 向上、2.2 向下', () => {
+  assert.equal(remainingSteps({ stepsSoFar: [2, 3], horizonSteps: 20, historyTurns: 2 }), 3) // 2.5 → 3
+  assert.equal(remainingSteps({ stepsSoFar: [2, 2, 2, 2, 3], horizonSteps: 20, historyTurns: 5 }), 2) // 2.2 → 2
+})
+
+test('均值高于 horizon 时被 clamp；低于时保留均值', () => {
+  assert.equal(remainingSteps({ stepsSoFar: [50, 50, 50, 50, 50], horizonSteps: 20, historyTurns: 5 }), 20)
+  assert.equal(remainingSteps({ stepsSoFar: [5, 5, 5, 5, 5], horizonSteps: 20, historyTurns: 5 }), 5)
+})
+
+test('historyTurns <= 0：没有可平均的窗口，回落到 horizon 而不是 NaN', () => {
+  assert.equal(remainingSteps({ stepsSoFar: [99], horizonSteps: 20, historyTurns: 0 }), 20)
+  assert.equal(remainingSteps({ stepsSoFar: [99], horizonSteps: 20, historyTurns: -1 }), 20)
+  assert.equal(remainingSteps({ stepsSoFar: [], horizonSteps: 20, historyTurns: 0 }), 20)
+  assert.equal(Number.isNaN(remainingSteps({ stepsSoFar: [], horizonSteps: 20, historyTurns: 0 })), false)
+})
+
+test('horizonSteps 为 0 时剩余 0 步', () => {
+  assert.equal(remainingSteps({ stepsSoFar: [], horizonSteps: 0, historyTurns: 5 }), 0)
+  assert.equal(remainingSteps({ stepsSoFar: [10, 10, 10, 10, 10], horizonSteps: 0, historyTurns: 5 }), 0)
+})
+
+test('节省必须严格大于阈值；saved === overhead 不值得替换', () => {
+  assert.equal(worthSubstituting({ savedTokens: 500, overheadTokens: 500, thresholdTokens: 0, deterministicSingle: false }), false)
+  assert.equal(worthSubstituting({ savedTokens: 1124, overheadTokens: 100, thresholdTokens: 1024, deterministicSingle: false }), false)
+  assert.equal(worthSubstituting({ savedTokens: 1125, overheadTokens: 100, thresholdTokens: 1024, deterministicSingle: false }), true)
+})
+
+test('StepBudget(0)：从未 take 就已 exhausted，take 永远 false', () => {
+  const b = new StepBudget(0)
+  assert.equal(b.exhausted(), true)
+  assert.equal(b.take(), false)
+  assert.equal(b.count(), 0)
+})
+
+test('StepBudget 负数与 0 同义：take 永远 false', () => {
+  const b = new StepBudget(-3)
+  assert.equal(b.exhausted(), true)
+  assert.equal(b.take(), false)
+  assert.equal(b.count(), 0)
+})
+
+test('reset() 把计数归零并重新放行（生命周期单例的救命阀）', () => {
+  const b = new StepBudget(3)
+  assert.equal(b.take(), true)
+  assert.equal(b.take(), true)
+  assert.equal(b.count(), 2)
+  assert.equal(b.exhausted(), false)
+
+  b.reset()
+  assert.equal(b.count(), 0)
+  assert.equal(b.exhausted(), false)
+
+  assert.equal(b.take(), true)
+  assert.equal(b.count(), 1)
+  assert.equal(b.take(), true)
+  assert.equal(b.take(), true)
+  assert.equal(b.take(), false)
+  assert.equal(b.count(), 3)
+  assert.equal(b.exhausted(), true)
+})
+
+test('take() 在预算用尽后不再增加 count()', () => {
+  const b = new StepBudget(3)
+  for (let i = 0; i < 5; i++) b.take()
+  assert.equal(b.count(), 3)
+  assert.equal(b.exhausted(), true)
+})
+
+test('小数 max 向下取整，count() 永不越界', () => {
+  const b = new StepBudget(2.5)
+  assert.equal(b.take(), true)
+  assert.equal(b.take(), true)
+  assert.equal(b.take(), false)
+  assert.equal(b.count(), 2)
+})
+
+test('小数 historyTurns 只取整一次，同一个 N 同时约束门槛与窗口', () => {
+  // floor(2.5) = 2：恰好两个条目就进入均值分支（用原始 2.5 会回落到 horizon 20）。
+  assert.equal(remainingSteps({ stepsSoFar: [4, 6], horizonSteps: 20, historyTurns: 2.5 }), 5)
+  // 窗口同样只取 2 个：更早的 100 不参与均值。
+  assert.equal(remainingSteps({ stepsSoFar: [100, 4, 6], horizonSteps: 20, historyTurns: 2.5 }), 5)
+})
+
+test('非有限 horizonSteps（NaN / Infinity）回落到 0', () => {
+  assert.equal(remainingSteps({ stepsSoFar: [], horizonSteps: NaN, historyTurns: 5 }), 0)
+  assert.equal(remainingSteps({ stepsSoFar: [], horizonSteps: Infinity, historyTurns: 5 }), 0)
+  assert.equal(remainingSteps({ stepsSoFar: [10, 10, 10, 10, 10], horizonSteps: NaN, historyTurns: 5 }), 0)
+  assert.equal(remainingSteps({ stepsSoFar: [10, 10, 10, 10, 10], horizonSteps: Infinity, historyTurns: 5 }), 0)
+})
+
+test('stepsSoFar 里的 NaN / Infinity 使均值不可用，回落到 horizon', () => {
+  assert.equal(remainingSteps({ stepsSoFar: [NaN, 10, 10, 10, 10], horizonSteps: 20, historyTurns: 5 }), 20)
+  assert.equal(remainingSteps({ stepsSoFar: [Infinity, 10, 10, 10, 10], horizonSteps: 20, historyTurns: 5 }), 20)
+})
+
+test('返回值是原始估计：小数 horizon 原样通过，不取整', () => {
+  assert.equal(remainingSteps({ stepsSoFar: [50, 50, 50, 50, 50], horizonSteps: 20.5, historyTurns: 5 }), 20.5)
+})
+
+test('返回值是原始估计：负 horizon 与负均值原样通过，不 clamp 到 0', () => {
+  assert.equal(remainingSteps({ stepsSoFar: [], horizonSteps: -1, historyTurns: 5 }), -1)
+  assert.equal(remainingSteps({ stepsSoFar: [-5, -5, -5], horizonSteps: 20, historyTurns: 3 }), -5)
+})
+
+test('StepBudget 的非有限 max 是空预算（Infinity 也不是无限）', () => {
+  for (const max of [Infinity, -Infinity, NaN]) {
+    const b = new StepBudget(max)
+    assert.equal(b.exhausted(), true)
+    assert.equal(b.take(), false)
+    assert.equal(b.count(), 0)
+  }
+})
+
+// ---------------------------------------------------------------------------
+// I9: `historyTurns`/`remainingSteps` are wired through a runtime horizon.
+// ---------------------------------------------------------------------------
+
+test('I9: RuntimeStepHorizon uses the mean of the last historyTurns completed turns', () => {
+  const h = new RuntimeStepHorizon(20, 5)
+  for (let turn = 1; turn <= 5; turn += 1) {
+    for (let step = 1; step <= 2; step += 1) h.observe('s1', turn, step)
+  }
+  // Five turns are only complete once the next turn starts.
+  assert.equal(h.remaining(), 20)
+  h.observe('s1', 6, 1)
+  assert.equal(h.remaining(), 2)
+  assert.equal(h.remainingFor('s1'), 2)
+})
+
+test('I9: fewer than historyTurns completed turns falls back to the configured horizon', () => {
+  const h = new RuntimeStepHorizon(20, 5)
+  for (let turn = 1; turn <= 3; turn += 1) {
+    for (let step = 1; step <= 9; step += 1) h.observe('s1', turn, step)
+  }
+  assert.equal(h.remaining(), 20)
+})
+
+test('I9: a retried step does not inflate the turn count, and backwards turns are ignored', () => {
+  const h = new RuntimeStepHorizon(20, 2)
+  h.observe('s1', 1, 1)
+  h.observe('s1', 1, 3)
+  h.observe('s1', 1, 2) // retry of an earlier step: max stays 3
+  h.observe('s1', 2, 1)
+  h.observe('s1', 3, 1) // finalises turn 1 = 3, turn 2 = 1
+  assert.equal(h.remaining(), 2) // mean(3,1) = 2
+  h.observe('s1', 1, 99) // a reused/backwards turn must not rewrite history
+  assert.equal(h.remaining(), 2)
+})
+
+test('I9: the aggregate horizon is the conservative minimum across live sessions', () => {
+  const h = new RuntimeStepHorizon(20, 2)
+  for (let turn = 1; turn <= 2; turn += 1) {
+    for (let step = 1; step <= 5; step += 1) h.observe('s1', turn, step)
+    for (let step = 1; step <= 10; step += 1) h.observe('s2', turn, step)
+  }
+  h.observe('s1', 3, 1)
+  h.observe('s2', 3, 1)
+  assert.equal(h.remaining(), 5)
+  assert.equal(h.remainingFor('s2'), 10)
+  assert.equal(h.size(), 2)
+  h.clear('s1')
+  assert.equal(h.remaining(), 10)
+  assert.equal(h.size(), 1)
+})
+
+test('I9: the class is total on malformed observations', () => {
+  const h = new RuntimeStepHorizon(20, 5)
+  assert.doesNotThrow(() => {
+    h.observe('', 1, 1)
+    h.observe('s1', Number.NaN, 1)
+    h.observe('s1', 1, Number.POSITIVE_INFINITY)
+    h.observe('s1', -1, 2)
+    h.observe('s1', 1, 0)
+  })
+  assert.equal(h.remaining(), 20)
+  assert.equal(h.size(), 0)
+})

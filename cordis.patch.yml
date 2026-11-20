@@ -1,0 +1,35 @@
+# dsh-boost bundle patch — one insert over the profile root.
+#
+# Row ids are stable identity in the config tree; a later layer (the user's
+# profile cordis.patch.yml, $DSH_HOME/cordis.patch.yml, --patch overlays)
+# overrides a row by id.
+#
+# A patch replaces the targeted row's whole `config` rather than merging into
+# it, so the keys below are this profile's complete configuration surface. A
+# missing key falls back to the plugin default. All five tool families are
+# always configured (`resolveConfig` fills them from defaults), so deleting a
+# family here does not disable it: it only restores that family's default
+# window. To disable one, raise its `triggerChars` above every receipt (the
+# projection byte cap is 256 KiB, so 300000 prevents it from triggering).
+#
+# The host appends top-level `insert` rows and treats a row as installed only
+# when `row.id === entry.options.id && row.name === entry.options.name`; a
+# mismatch is skipped silently. The two equalities are independent, so `id`
+# and `name` need not match each other. This package keeps all four identical:
+# package name, exported plugin name, row id, and row name are `dsh-boost`.
+
+- insert:
+    - id: dsh-boost
+      name: 'dsh-boost'
+      config:
+        projection:
+          read:  { triggerChars: 3000, headChars: 2000, tailChars: 500 }
+          grep:  { triggerChars: 700,  headChars: 400,  tailChars: 100 }
+          glob:  { triggerChars: 700,  headChars: 400,  tailChars: 100 }
+          bash:  { triggerChars: 4000, headChars: 2000, tailChars: 500 }
+          ssh:   { triggerChars: 2000, headChars: 1200, tailChars: 300 }
+        admission: { thresholdTokens: 1024 }
+        selector:  { maxTokens: 512 }
+        stepsPerTurn: 8
+        horizonSteps: 20
+        historyTurns: 5

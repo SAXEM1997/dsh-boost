@@ -1,0 +1,47 @@
+{
+  "name": "dsh-boost",
+  "version": "0.1.0",
+  "description": "Cut DSH token usage by projecting tool receipts and skipping deterministic read-only calls",
+  "type": "module",
+  "license": "Apache-2.0",
+  "repository": { "type": "git", "url": "git+https://github.com/SAXEM1997/dsh-boost.git" },
+  "keywords": ["dsh", "dsh-plugin", "token-efficiency", "prompt-cache", "tool-receipt", "delegation"],
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": { "types": "./dist/index.d.ts", "import": "./dist/index.js" },
+    "./package.json": "./package.json",
+    "./locale/*.json": "./locale/*.json"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.test.json",
+    "test": "node --import tsx --test \"test/**/*.test.ts\"",
+    "stats": "node scripts/session-stats.mjs",
+    "prepack": "npm run build",
+    "prepublishOnly": "npm run build && npm pack --dry-run && test -f dist/index.js && test -f dist/index.d.ts"
+  },
+  "devDependencies": {
+    "@deepseek-ai/dsh-llm": "0.2.2-rc.4",
+    "@deepseek-ai/dsh-tools": "0.2.2-rc.4",
+    "@deepseek-ai/dsh-spill-policy": "0.2.2-rc.4",
+    "@deepseek-ai/dsh-token-meter": "0.2.2-rc.4",
+    "@types/node": "^22.10.0",
+    "tsx": "^4.19.0",
+    "typescript": "^5.6.0"
+  },
+  "peerDependencies": {
+    "@deepseek-ai/dsh-llm": ">=0.2.2-rc.1 <0.3.0-0",
+    "@deepseek-ai/dsh-tools": ">=0.2.2-rc.1 <0.3.0-0",
+    "@deepseek-ai/dsh-spill-policy": ">=0.2.2-rc.1 <0.3.0-0",
+    "@deepseek-ai/dsh-token-meter": ">=0.2.2-rc.1 <0.3.0-0"
+  },
+  "peerDependenciesMeta": {
+    "@deepseek-ai/dsh-spill-policy": { "optional": true },
+    "@deepseek-ai/dsh-token-meter": { "optional": true }
+  },
+  "publishConfig": { "access": "public" },
+  "engines": { "node": ">=22.18.0", "dsh": ">=0.2.2-rc.1 <0.3.0-0" },
+  "dsh": { "bundle": { "patch": "./cordis.patch.yml" } },
+  "files": ["dist", "src", "locale", "cordis.patch.yml", "README.md", "README.en.md", "LICENSE", "NOTICE"]
+}

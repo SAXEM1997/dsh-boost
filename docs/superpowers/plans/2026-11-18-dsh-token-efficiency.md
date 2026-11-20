@@ -702,8 +702,8 @@ git commit -m "feat: sharded receipt store with circuit breaker"
 
 **Interfaces:**
 - Consumes: `ProjectionMode`（T5）
-- Produces: `export type ScopeCode = 'ERR_SCOPE_UNKNOWN_VERSION' | 'ERR_SCOPE_PARSE_FAILED' | 'ERR_SCOPE_READ_FAILED' | 'ERR_SCOPE_REVISION_CONFLICT' | 'ERR_SCOPE_LOCKED'`
-- Produces: 五个 `export const ERR_SCOPE_UNKNOWN_VERSION` / `ERR_SCOPE_PARSE_FAILED` / `ERR_SCOPE_READ_FAILED` / `ERR_SCOPE_REVISION_CONFLICT` / `ERR_SCOPE_LOCKED` 常量（值等于上面的字符串，T9 用）
+- Produces: `export type ScopeCode = 'ERR_SCOPE_UNKNOWN_VERSION' | 'ERR_SCOPE_FUTURE_VERSION' | 'ERR_SCOPE_PARSE_FAILED' | 'ERR_SCOPE_READ_FAILED' | 'ERR_SCOPE_REVISION_CONFLICT' | 'ERR_SCOPE_LOCKED'`
+- Produces: 六个 `export const ERR_SCOPE_UNKNOWN_VERSION` / `ERR_SCOPE_FUTURE_VERSION` / `ERR_SCOPE_PARSE_FAILED` / `ERR_SCOPE_READ_FAILED` / `ERR_SCOPE_REVISION_CONFLICT` / `ERR_SCOPE_LOCKED` 常量（值等于上面的字符串，T9 用）
 - Produces: `export interface ScopeDoc { version: 2; revision: number; updatedAt?: string; mode: 'selected' | 'global'; workspaceIds: string[]; shadow: boolean; projection: ProjectionMode }`
 - Produces: `export const DEFAULT_SCOPE: ScopeDoc`（`selected + []`，`shadow: true`，`projection: 'shadow'`）
 - Produces: `export function parseScope(raw: unknown): { doc: ScopeDoc; code?: 'ERR_SCOPE_UNKNOWN_VERSION' | 'ERR_SCOPE_PARSE_FAILED' }`
@@ -732,7 +732,8 @@ test('非对象 / 数组 / null 判 parse-failed；对象但 version≠2 判 unk
   for (const raw of ['not an object', null, [], 42]) {
     assert.equal(parseScope(raw).code, 'ERR_SCOPE_PARSE_FAILED')
   }
-  assert.equal(parseScope({ version: 2.1 }).code, 'ERR_SCOPE_UNKNOWN_VERSION')
+  assert.equal(parseScope({ version: 2.1 }).code, 'ERR_SCOPE_FUTURE_VERSION')
+  assert.equal(parseScope({ version: '3' }).code, 'ERR_SCOPE_UNKNOWN_VERSION')
   assert.equal(parseScope({ mode: 'global' }).code, 'ERR_SCOPE_UNKNOWN_VERSION')
 })
 
@@ -883,6 +884,7 @@ git commit -m "feat: atomic scope writes with lock"
 - Produces: `export interface WorkspaceRegistry { list(): readonly { id: string; path: string }[]; resolveByPath?(path: string): Promise<{ id: string } | undefined> }`——**宿主只有同步 `list()` 与异步 `resolveByPath()`，没有 `byPath`**
 - Produces: `export function workspaceIdOf(agent: { session?: { header?: { cwd?: string } } } | undefined, registry: WorkspaceRegistry | undefined): string | undefined`（`cwd` 经 `registry.list()` 按 `path` 精确匹配换成宿主 UUID；**不是路径本身**，也不 await——`systemPrompt` 装配是同步的。异步 `resolveByPath` 只用于预热缓存）
 - Produces: `export async function resolveVisible(store: ScopeStore, agent: unknown, registry: WorkspaceRegistry | undefined): Promise<boolean>`
+- Produces: `export function supportsStepWhen(tools: { resolve?: unknown }): boolean`——探测宿主 `ctx.tools.resolve` 是否可用（`typeof tools?.resolve === 'function'`）；为假时 T19 整族不注册
 - Produces: `test/fakes/host.ts` 的 `export function fakeHost(overrides?: Record<string, unknown>): any`——**必须暴露**：`register/resolve/definitions`、`llm.stream`、`systemPrompt.section`、`tokenMeter`、`spillStore`、`callHook(name, args, next)`、`receipts: unknown[]`、`hooked(): string[]`、`section(name?): { text: (c: any) => string } | undefined`、`nextCalls: number`、`synthesized: number`、`stream(sessionId: string, options?: Partial<GenerateOptions>): AsyncIterable<StreamChunk>`、`lastStream(): AsyncIterable<StreamChunk> | undefined`、`visible(name: string, agent: AgentLike): Promise<boolean>`
 
 - [ ] **Step 1: 写失败测试**
@@ -1480,8 +1482,9 @@ git commit -m "feat: admission accounting and per-turn step budget"
 ### Task 17: 钩子装配（post-execute / llm-stream / execute / systemPrompt）
 
 **Files:**
-- Create: `src/hooks/post-execute.ts`, `src/hooks/llm-stream.ts`, `test/hooks.test.ts`
+- Create: `src/hooks/post-execute.ts`, `test/hooks.test.ts`
 - Modify: `src/index.ts`, `test/fakes/host.ts`
+- 注意：`src/hooks/llm-stream.ts` 由 **T23c** 创建（本任务只做 `llm/stream` 的第一行 selector 放行占位，直接写在 `post-execute.ts` 的 `registerHooks` 里；T23c 再把钩子体抽到独立文件）
 
 **Interfaces:**
 - Consumes: `canonicalise`（T3）、`projectApply`/`projectShadow`（T5/T6）、`ReceiptStore`（T7）、`ScopeStore`/`resolveVisible`（T9/T10）、`SELECTOR_PURPOSE`（T14）
@@ -1991,9 +1994,9 @@ git push origin main   # remote 由 T1 布置（内网镜像）；GitHub 作为�
 
 **Interfaces:**
 - Consumes: `StreamChunk`/`TokenUsage`/`ToolCallId`（`@deepseek-ai/dsh-llm/types`，T1 已加 peer 依赖）
-- Produces: `export interface PendingEntry { callId: string; candidateId: string; name: string; args: Record<string, unknown>; turn: number | string; createdAt: number }`
+- Produces: `export interface PendingEntry { callId: string; candidateId: string; name: string; args: Record<string, unknown>; turn: number | string; step: number | string; createdAt: number }`——`step` 是**宿主回合内的步号**，不是插件自数的计数：同一候选在同一回合的两个不同步上替换时必须得到不同的 `callId`，否则宿主会落两条 `id` 相同的 assistant `tool_use`，Anthropic 风格的路由会直接拒绝。
 - Produces: `export class PendingQueue { set(sessionId: string, e: PendingEntry): void; take(sessionId: string): PendingEntry | undefined; peek(sessionId: string): PendingEntry | undefined; clear(sessionId: string): void; size(): number }`——键是 **sessionId**
-- Produces: `export function callIdFor(sessionId: string, turn: string | number, candidateId: string): string`——`sha256(sessionId + '/' + turn + '/' + candidateId)` 前 16 位
+- Produces: `export function callIdFor(sessionId: string, turn: number | string, step: number | string, candidateId: string): string`——`sha256(JSON.stringify([sessionId, String(turn), String(step), candidateId]))` 前 16 位。**用 JSON 数组而不是 `/` 拼接**：拼接对分隔符有歧义（`('s','1','2/3','c')` 与 `('s','1/2',3,'c')` 同串）。
 - Produces: `export async function* synthesizeTurn(e: PendingEntry): AsyncIterable<StreamChunk>`
 
 **测试（只列断言，不写实现体）**
@@ -2033,13 +2036,13 @@ git commit -m "feat: pending queue and synthesized tool turn"
 
 **Interfaces:**
 - Consumes: `decide`（T15，含 `shadow` 形参）、`rejectIfTampered`（T18）、`worthSubstituting`（T16）、`canonicalise`（T3）、`projectApply`/`projectShadow`（T5/T6）、`invalidate`+`ReceiptAnchors`（T22）、`PendingQueue`/`callIdFor`（T23a）、`parsePlan`（T11）
-- Produces: `export interface HookDeps { config: BoostConfig; scope: ScopeStore; receipts: ReceiptStore; anchors: AnchorStore; resolveSession: (sessionId: string) => string | undefined; queue?: PendingQueue; budget?: StepBudget; usage?: UsageLedger; clock?: TurnClock; plans?: Map<string, Plan>; spill?: SpillBackend; estimateText?: (t: string) => number }`——**`anchors` 与 `resolveSession` 必填**（缺后者会让替换永远走不到，见第 4 轮 P0-1）
+- Produces: `export interface HookDeps { config: BoostConfig; scope: ScopeStore; receipts: ReceiptStore; anchors: AnchorStore; resolveSession: (sessionId: string) => string | undefined; queue?: PendingQueue; budget?: StepBudget; usage?: UsageLedger; clock?: TurnClock; plans?: Map<string, Plan>; spill?: SpillBackend; estimateText?: (t: string) => number }`——**`step` 的唯一来源是 `clock.step()`**（T20 的 `TurnClock` 由宿主 `{turn, step}` 事件驱动）；`tools/post-execute` 的 `ToolExecution` 没有 turn/step 字段，**不得**用插件自数的计数冒充步号，否则同一回合内两次替换会撞同一个 `callId`。——**`anchors` 与 `resolveSession` 必填**（缺后者会让替换永远走不到，见第 4 轮 P0-1）
 - Consumes: `AnchorStore`（T22）
 - Produces: `export function registerHooks(ctx: PluginContext, deps: HookDeps): void`（本任务接 `tools/post-execute` 与 `tools/execute`）
 
 **测试**
 - `影子期 commit`：写 shadow 收据（含 `decision`/`candidateId`/`admitted`），`queue.peek` 为 `undefined`
-- `非影子 commit`：入队，`callId` 可由 `callIdFor` 复算
+- `非影子 commit`：入队，`callId` 可由 `callIdFor(sessionId, clock.turn(), clock.step(), candidateId)` 复算
 - `无 agent`：`next()` 被调一次 + `skip:no-scope` 收据
 - `投影收据`：`kind:'projection'` 且 `unit:'raw'`、`before`/`after` 为数字
 - `防篡改`：`callId` 不匹配 → 返回 failure（`isError:true`）且队列被清；**走 T18 的 `rejectIfTampered`，不另写比对**
@@ -2049,7 +2052,7 @@ git commit -m "feat: pending queue and synthesized tool turn"
 
 顺序固定：`next() → canonicalise → invalidate → decide → （shadow 写收据 | 非 shadow 准入后入队 | fallback 清队列）→ 投影 → 返回 decision`。
 投影放在 decide 之后，因为守卫与 Jev 读的是**规范化原文**；投影只影响进历史的内容。
-`tools/execute`：`peek(sessionId)` 后交 `rejectIfTampered(exec, entry)`；拒绝写 `dispatch-rejected` 收据、清队列、返回 `ToolExecutionResult` 的 failure 分支（`{isError:true, error:{message, info:{code}}, content}`，见附录 §2.3）。
+`tools/execute`：`peek(sessionId)` 取 entry；先比对 `exec.callId === entry.callId`（`rejectIfTampered` 只比 name/args，callId 由本处负责），再交 `rejectIfTampered(exec, entry)`。**两条路径都必须 `clear(sessionId)`**——拒绝路径写 `dispatch-rejected` 收据并返回 failure 分支（`{isError:true, error:{message, info:{code}}, content}`，见附录 §2.3）；接受路径也必须清，否则残留的 entry 会让该 session 后续每一个不同的调用都被误判为 `dispatch-rejected`。`DispatchExec` 需要 `callId` 与 `agent` 两个字段（T18 只声明了 `name`/`arguments`）。
 
 - [ ] **Step 4: 运行确认通过** — 5 tests PASS
 - [ ] **Step 5: 重构** — 抽 `applyDecision(deps, result, ctx)`
@@ -2088,11 +2091,24 @@ git commit -m "feat: wire post-execute decisions, admission, projection and tamp
 - [ ] **Step 1: 写失败测试** → **Step 2** 失败
 - [ ] **Step 3: 实现**
 
-规则顺序（**检查必须在写收据与 `queue.take` 之前**）：`purpose` → `receipts.stopped()` → 可见性（`resolveSession` **必填**，返回 `undefined` 即放行并清该 session 队列）→ 无 pending → `budget.take()` → 合成。
-合成分支：`markSubstituted(candidateId)` → 写 `{kind:'substitute'}` → `take` → `yield* synthesizeTurn(e)`，**不再调 `next()`**。
+规则顺序（**检查必须在写收据与 `queue.take` 之前**）：`purpose` → `receipts.stopped()` → 可见性（`resolveSession` **必填**，返回 `undefined` 即放行并清该 session 队列）→ 无 pending → 回合有效（`entry.turn === clock.turn()`，否则清队列放行）→ 锚点仍完好 → **不取预算**（T23b 在 `post-execute` 已经 `budget.take()` 过；此处再取会让每次替换扣 2 格）→ 合成。
+
+**T23c 必须满足的十一条**（每条都来自前序任务的复审发现，缺一条产品就是坏的或测不到的）：
+1. **clock 与 budget 必须按 session 分**。`HookDeps` 目前是单实例；已证跨会话污染：s2 的事件会让 s1 的 `callId` 用上 s2 的 turn/step，s2 的换回合会中途清掉 s1 的收据表（丢 `$public` 绑定），共享 `StepBudget(1)` 会让一个会话饿死另一个。
+2. **不要在这里再 `budget.take()`**（见上）。
+3. **`peek` 不 `take`**，entry 必须活到 `tools/execute`。
+4. **回合有效性**：换回合时的清队列发生在"新回合第一次 `post-execute`"，而它晚于新回合第一次 `llm/stream`；不在这里比 `entry.turn` 就会合成一个上一回合的替换，而它的 `callId` 随后还能匹配上、被接受。
+5. **`usage.markSubstituted` 没有 unmark**。reset 或换回合丢掉 entry 却留着标记，下一次透传请求就会为一次从未发生的替换结算"节省"。这里要 settle-and-discard。
+6. **剪枝/压缩检测在这里**：对 `options.messages` 检查承载锚点的消息是否含 `PRUNE_MARKER`、或锚点原文是否已不在；命中即放弃 pending。`ReceiptAnchors` 没有 turn 字段，所以只能用 `entry.turn` 判新旧。
+7. **`purpose === SELECTOR_PURPOSE` 的请求不得进 `usage.request()`**，否则选择器自己那次调用会成为配对样本，`saved_input_tokens` 直接算错。
+8. **`ask-selector` 由本任务兑现**：调 `choose`，commit 必须用 `decision.candidates[].args`（已绑定）。
+9. **`resolveSession` 必须是真实现**（当前 stub 恒 `undefined`，整条路径不工作），且必须在该 session 第一次有意义的 `post-execute` 之前预热可见性判定。`llm/stream` 是**同步** waterfall 返回 `AsyncIterable`，所以预热在那里启动、在生成器第一次 `yield` 之前 await。
+10. **会话结束要清理**：`ReceiptSessionState.clear`（已暴露为 `HookDeps.sessionState`）与 `AnchorStore.clear` 都需要调用者；`sessionState.clear` 目前只清收据与派发表，不清队列和锚点。
+11. **收据**：合成时写 `{kind:'substitute'}`；下一次真实请求结束时若有过 `markSubstituted`，`settle()` 并写 `{kind:'substitute-settled'}`（`saved_input_tokens` / `output_tokens` 原样落盘，`'unknown'` 不计数）。
+合成分支：`markSubstituted(candidateId)` → 写 `{kind:'substitute'}` → **`peek`（不是 `take`）** → `yield* synthesizeTurn(e)`，**不再调 `next()`**。entry 必须存活到 `tools/execute`：合成的回合在流结束后才派发工具调用，若此处 `take` 掉，T23b 的 `peek` 永远为空，防篡改在生产路径上**一次都不会触发**（而 T23b 的单元测试手工塞队列仍然全绿）。消费方是 T23b 的 execute 钩子。
 透传分支：`yield* next()`，遇 `{type:'usage'}` 映射后 `request()`；若上一轮有 `markSubstituted`，此时 `settle()` 并追加 `substitute-settled`。
 `plans`：拼 `text-delta` 成文本，流结束后 `parsePlan` 存进 map。
-`clock`：由 `agent/request` 的 `{turn, step}` 驱动 `onModelRequest()`，turn 变化时 `budget.reset()`。
+`clock`：由 `agent/pre-step`（或 `agent/request`）的 `{turn, step}` 驱动 `onModelRequest(turn, step)`，turn 变化时 `budget.reset()`。**`TurnClock` 因此需要 `step()`**——T20 只做了 `turn()`/`stepsThisTurn()`，`stepsThisTurn()` 是插件自数的替换次数，**不是宿主步号**，不能拿它当 `callIdFor` 的 `step`。
 
 - [ ] **Step 4: 运行确认通过** — 8 tests PASS
 - [ ] **Step 5: 重构** — 抽 `resolveStreamPlan(deps, options)`

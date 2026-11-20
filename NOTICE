@@ -1,0 +1,29 @@
+dsh-boost
+Copyright 2026 dsh-boost contributors
+
+This product includes software developed as HarnessMM
+(https://github.com/YuhuaJiang2002/HarnessMM), Copyright 2026 PhiAgent-0
+contributors, licensed under the Apache License, Version 2.0.
+
+The tool-receipt projection and deterministic read-only substitution mechanisms
+in this project are ported from HarnessMM's DeepSeek Harness plugin. This
+project reimplements those mechanisms against the current DeepSeek Harness
+contracts; it does not redistribute HarnessMM's source tree, benchmarks,
+datasets, or model weights.
+
+HarnessMM's NOTICE follows, as required for derivative works:
+
+    HarnessMM
+    Copyright 2026 PhiAgent-0 contributors
+
+    This repository extracts the HarnessMM implementation from the PhiAgent
+    research workspace maintained by Yuhua Jiang. The Python package is named
+    harnessmm; legacy phiagent imports and original protocol identifiers remain
+    supported. Deployment paths and hostnames were replaced with placeholders
+    for this public release.
+
+    The project source retains its Apache License, Version 2.0 terms. Upstream
+    agent runtimes, benchmarks, datasets, model weights and separately
+    installed dependencies are governed by their respective licenses and access
+    terms. No upstream model weights, benchmark datasets or native runtime
+    checkouts are redistributed in this repository.
