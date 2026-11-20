@@ -207,7 +207,7 @@ grep -c '"code":"ERR_HOST_NO_TOKENMETER"' "$DSH_HOME"/boost/receipts/*.jsonl
 若 `ERR_MODULE_NOT_FOUND` 出现，直接在 isolated 目录里跑 `node -e "import('dsh-boost')"` 复现并记录栈；
 hoisted 布局下的"通过"不算通过。
 
-### 2.4 安装矩阵记录（2026-11-20，HEAD `8765f0f` + 本修复）
+### 2.4 安装矩阵记录（2026-11-20，基线 `8765f0f` + 本修复 `5df8185`）
 
 `dsh-llm` 的 peer 改用与另外三个 peer 相同的范围
 `">=0.2.2-rc.1 <0.3.0-0"`；`devDependencies` 的精确钉法保留（registry 的 `latest` 是
