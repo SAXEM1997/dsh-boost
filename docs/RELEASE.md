@@ -108,7 +108,7 @@ peerDependencies**（§2.4），所以“peer 在空项目里解析到哪个 rc�
 export DSH_HOME=/tmp/dsh-boost-accept/dsh-home
 mkdir -p "$DSH_HOME"
 dsh plugin --profile accept add /path/to/dsh-boost-0.1.0.tgz
-# 或本地 checkout 目录；从 registry 安装时写 dsh-boost@^0.1.0（0.1.0 是首次发布，发布后 latest 即 0.1.0）
+# 或本地 checkout 目录；从 registry 安装时写 dsh-boost@^0.1.0（0.1.0 是首次发布，latest 即 0.1.0）
 # 确认宿主确实把这一行并入了装配计划：
 dsh --profile accept --dump-config | grep -A2 'id: dsh-boost'
 ```
@@ -254,7 +254,7 @@ tarball 会拉进 `dsh-spill-policy@rc.5` 并 `ERESOLVE`（当时实测 exit 1�
   不是这条验证线，插件告警 `ERR_HOST_VERSION_MISMATCH` 但**仍然加载**（advisory：版本不符是风险，
   不是 API 已改的证明；改名仍可能让插件失效）。
 
-安装规格：**`dsh-boost@^0.1.0`**。0.1.0 是首次发布，registry 上没有更早的 `dsh-boost`；发布后
+安装规格：**`dsh-boost@^0.1.0`**。0.1.0 是首次发布，registry 上没有更早的 `dsh-boost`；
 `latest` 即 0.1.0，所以这个范围就是正确的，不存在“latest 还指向旧 API”的问题。发布者执行
 `npm publish` 即可（`prepublishOnly` 会跑 `ci` + `verify:package`；`.npmrc` 钉的是 npmmirror
 安装源，`publishConfig.registry` 已把发布指向 registry.npmjs.org）。
@@ -505,4 +505,4 @@ lockfile 里的 tarball URL。workflow 选的是**先重写、再安装**：一�
 - [ ] 20 任务门按 §3 跑过，pass 谓词逐字对照，结论只有"过门/未过门"
 - [ ] 第一次开启替换的真实回合检查 `content[].thinking` 400（不是影子周）；若有，替换在该路由关闭
 - [ ] `npm run --silent stats` 在干净 clone 上可复算 §5.2 的聚合（口径对应设计稿 §2.1）
-- [ ] 发布侧：`npm publish` 走 `publishConfig.registry`（registry.npmjs.org、public）；0.1.0 是首次发布，发布后用 `npm view dsh-boost dist-tags` 确认 `latest` 是 0.1.0；`dsh-boost@^0.1.0` 就是正确的安装规格
+- [ ] 发布侧：`npm publish` 走 `publishConfig.registry`（registry.npmjs.org、public）；0.1.0 是首次发布，用 `npm view dsh-boost dist-tags` 确认 `latest` 是 0.1.0；`dsh-boost@^0.1.0` 就是正确的安装规格

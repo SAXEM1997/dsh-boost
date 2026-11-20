@@ -45,7 +45,7 @@ v1 的预期收益区间是 **3.5%（保底）– 10.0%（上界）**，按 raw 
 `dsh plugin` 要求指定 profile，剩下的参数原样转发给该 profile 目录里的 pnpm：
 
 ```bash
-# 从 registry 安装（0.1.0 是首次发布；发布后 latest 就是它）
+# 从 registry 安装（0.1.0 是首次发布，latest 就是它）
 dsh plugin --profile <name> add dsh-boost@^0.1.0
 
 # 或从本地 checkout 安装（先构建；dist/ 不入库）

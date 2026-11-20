@@ -82,13 +82,13 @@ of 399 tokens per request.
 - **零 peerDependencies 的安装面**：包不声明任何 peerDependencies——安装只新增 `dsh-boost`
   本体，不再拉出重复的 `@deepseek-ai/*` 宿主树；运行时能力由宿主提供，缺了走降级。
   `exports` 同时带 `require`/`default`（Node ≥ 24.9 的 require(esm) 可用）；`src/` 不进包，
-  `dist` 的 sourcemap 内联源码。0.1.0 是首次发布：发布后 registry 的 `latest` 即 0.1.0，
+  `dist` 的 sourcemap 内联源码。0.1.0 是首次发布：registry 的 `latest` 即 0.1.0，
   所以 `dsh-boost@^0.1.0` 就是正确的安装规格。
   Zero-peerDependencies install surface: the package declares no peerDependencies — installing
   it adds only `dsh-boost` itself and no longer pulls a duplicate `@deepseek-ai/*` host tree;
   the host provides the runtime capabilities and gaps degrade. `exports` also maps
   `require`/`default` (Node >= 24.9 require(esm) works); `src/` is no longer shipped and the
-  `dist` source maps inline the sources. 0.1.0 is the first release: once published, the
+  `dist` source maps inline the sources. 0.1.0 is the first release: the
   registry `latest` tag is 0.1.0, so `dsh-boost@^0.1.0` is simply correct.
 
 ### 已知限制 Known limitations
