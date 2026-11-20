@@ -288,19 +288,27 @@ discards the only copy; if the spill write fails, nothing is replaced (the recei
 Rollback and disablement:
 
 - **Turn both behaviours off** (no projection, no substitution; the protocol section is still
-  injected for the selected workspaces, substitution decisions are still recorded in shadow, and
-  the fixed overhead remains):
+  injected for every still-visible workspace — the selected ones under `selected`, every defined
+  one under `global` — substitution decisions are still recorded in shadow, and the fixed
+  overhead remains):
 
   ```json
   { "cmd": "scope-set", "body": { "projection": "off", "shadow": true }, "baseRevision": 1 }
   ```
 
-- **Remove one workspace (fully inert)**: drop it from `workspaceIds`; with an empty list the
-  protocol section, projection, and substitution all stop.
+- **Go back to fully inert**: set `mode` back to `selected` and empty the list. **Note that
+  `workspaceIds` matters only in `selected` mode**: `isVisible` is unconditionally true under
+  `mode:"global"` (`src/scope/doc.ts` — the `global` branch never reads the list), so **while in
+  `global`, writing only `workspaceIds: []` stops nothing** — projection and substitution keep
+  running while you believe you have rolled back. Under `selected`, removing one workspace is
+  enough; under `global` you must switch the mode at the same time:
 
   ```json
-  { "cmd": "scope-set", "body": { "workspaceIds": [] }, "baseRevision": 2 }
+  { "cmd": "scope-set", "body": { "mode": "selected", "workspaceIds": [] }, "baseRevision": 2 }
   ```
+
+  With `selected` and an empty list the protocol section, projection, and substitution all stop
+  (only the `boost` tool schema's standing cost remains).
 
 - **Uninstall the plugin**: `dsh plugin --profile <name> remove dsh-boost`, then restart DSH.
 - Deleting `$DSH_HOME/boost` clears the scope and receipts (back to defaults), but does not delete

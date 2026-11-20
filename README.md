@@ -256,19 +256,24 @@ patch 行的 `id` 与 `name`）。任一等式不成立，宿主会**静默跳�
 
 回滚与停用：
 
-- **关掉两个行为**（不再投影、不再替换，但已选工作区仍会注入协议段，替换决策仍写影子收据，
-  固定开销照旧）：
+- **关掉两个行为**（不再投影、不再替换，但仍然可见的工作区——`selected` 下已选的、`global`
+  下全部已定义的——会继续注入协议段，替换决策仍写影子收据，固定开销照旧）：
 
   ```json
   { "cmd": "scope-set", "body": { "projection": "off", "shadow": true }, "baseRevision": 1 }
   ```
 
-- **只关掉某个工作区（真正惰性）**：把它从 `workspaceIds` 移除；列表为空时协议段、投影、
-  替换全部停止。
+- **回到真正惰性**：把 `mode` 设回 `selected` 并清空列表。**注意 `workspaceIds` 只在
+  `selected` 模式下起作用**：`isVisible` 对 `mode:"global"` 恒为真（`src/scope/doc.ts`，
+  `global` 分支根本不读列表），所以**先处于 `global` 时只写 `workspaceIds: []` 什么都停不
+  下来**——投影与替换会照常进行，而你以为已经回滚了。在 `selected` 下移除单个工作区即可；
+  在 `global` 下必须同时改 `mode`：
 
   ```json
-  { "cmd": "scope-set", "body": { "workspaceIds": [] }, "baseRevision": 2 }
+  { "cmd": "scope-set", "body": { "mode": "selected", "workspaceIds": [] }, "baseRevision": 2 }
   ```
+
+  `selected` + 空列表时协议段、投影、替换全部停止（只剩下 `boost` 工具 schema 的常驻开销）。
 
 - **卸载插件**：`dsh plugin --profile <name> remove dsh-boost`，然后重启 DSH。
 - 删除 `$DSH_HOME/boost` 会清掉 scope 与收据（回到默认），但不会删除宿主 spill 后端里已经
