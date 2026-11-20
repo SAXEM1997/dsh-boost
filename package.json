@@ -4,7 +4,14 @@
   "description": "Cut DSH token usage by projecting tool receipts and skipping deterministic read-only calls. Install as dsh-boost@^0.1.0: the registry latest tag still points at the incompatible 0.0.1-rc.1.",
   "type": "module",
   "license": "Apache-2.0",
-  "keywords": ["dsh", "dsh-plugin", "token-efficiency", "prompt-cache", "tool-receipt", "delegation"],
+  "keywords": [
+    "dsh",
+    "dsh-plugin",
+    "token-efficiency",
+    "prompt-cache",
+    "tool-receipt",
+    "delegation"
+  ],
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
   "exports": {
@@ -37,8 +44,26 @@
     "tsx": "^4.19.0",
     "typescript": "^5.6.0"
   },
-  "publishConfig": { "access": "public" },
-  "engines": { "node": ">=24.9.0", "dsh": ">=0.2.2-rc.1 <0.3.0-0" },
-  "dsh": { "bundle": { "patch": "./cordis.patch.yml" } },
-  "files": ["dist", "locale", "cordis.patch.yml", "README.md", "README.en.md", "LICENSE", "NOTICE"]
+  "publishConfig": {
+    "registry": "https://registry.npmjs.org/",
+    "access": "public"
+  },
+  "engines": {
+    "node": ">=24.9.0",
+    "dsh": ">=0.2.2-rc.1 <0.3.0-0"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  },
+  "files": [
+    "dist",
+    "locale",
+    "cordis.patch.yml",
+    "README.md",
+    "README.en.md",
+    "LICENSE",
+    "NOTICE"
+  ]
 }
