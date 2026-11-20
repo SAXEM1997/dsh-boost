@@ -430,7 +430,7 @@ workspace 归属由 agent 的 cwd 映射到 workspace id。每个挂载点各有
 
 1. **影子（1 周）**：门做决定但照常问主模型，只写收据；`projection: 'shadow'`（只记投影前后 token，不落盘、不改 content）。产出以 `scripts/shadow-report.mjs` 的四个键为准：`saveableRatio`（白名单可实现的替换决定占比）、`byFamily`（按族的 commits / decisions）、`candidateRecall`（候选集召回）、`retrievalUpperBound`（on-mode 的取回调用 / 已应用投影回执）。**它不产出影子周净节省率，也没有总 token 分母**；A4 裁决因此未交付（见 §6.1）。
 2. **只读放行**：只对白名单工具真正跳过调用；`projection: 'on'` **按工具族分批开**——先 `read`，再 `grep`/`glob`，最后 `bash`/`ssh`，每族过一个观察窗再开下一族，不一次性全工具翻 `'on'`。
-3. **回归门**：20 个固定任务双跑，只当"没有灾难性回退"的门。固定任务集不构成可复现回放基准，不允许为其加断言式成功率指标。**裁决边界**：2026-11-18 的"不搭回放集"只免除**语料**，不免除冒烟 runner 与取回完整性检查——两者都不需要语料。**当前两者都未交付**：`test/regression/` 只有 `.gitkeep`（无 `tasks.jsonl`、无双跑脚本）；也没有任何测试/脚本验证"每条被投影回执可按页脚 locator 取回且字节数 = count + 保留窗口字节数"（`test/projection-apply.test.ts` 只断言页脚含 locator，不读回核对）。
+3. **回归门**：20 个固定任务双跑，只当"没有灾难性回退"的门。固定任务集不构成可复现回放基准，不允许为其加断言式成功率指标。**裁决边界**：2026-11-18 的"不搭回放集"只免除**语料**，不免除冒烟 runner 与取回完整性检查——两者都不需要语料。**当前两者都未交付**：`test/regression/` 只有 `.gitkeep`（无 `tasks.jsonl`、无双跑脚本）；也没有任何测试/脚本验证"每条被投影回执可按页脚 locator 取回且字节数 = count + 保留窗口字节数"（`test/projection-apply.test.ts` 断言页脚含 locator、`saveText` 收到原文，但不读回核对字节数）。
 
 **两本账的放行依据不同，不能混**：
 
@@ -627,4 +627,4 @@ dsh-boost/
 - **实现是事实、设计是错**：A4 净节省率不可计算；`retrievalUpperBound` 是 on-mode 取回率下界，不是损害上界；D4 的 0.29% 改为 778 / 195,531 = 0.40%；半行读取不截断；selector 计费是 `maxTokens + input`；`projection-skipped:no-owner` 不可达；子命令是 `scope-get` / `scope-set` / `shadow`；locale 只有 `meta.*`；3.5% floor 拆成 0.8% − 0.4%；§5.5 的 `tools.resolve` / `ERR_HOST_NO_STEP_WHEN` 已删除；§11 的 `peerDependencies` 矛盾已删除，`llm` 改软。
 - **实现是有意收窄、设计记录之**：`receipt-write-failed` → `status.receipts_stopped`；费用护栏与 per-route 费率不做；首 token 延迟不做；A4 分桶不做；去重触发条件不做；"不搭回放集"只免除语料，冒烟 runner 与取回完整性检查仍欠；启用路径摩擦保留。
 - **发布状态更新**：公开 GitHub 仓 `https://github.com/SAXEM1997/dsh-boost` 已建；`0.1.0` 是首个发布版本。
-- 对应提交：本文件所在提交（`git log -1 -- docs/superpowers/specs/2026-11-18-dsh-token-efficiency-design.md`）；报告见 `.superpowers/sdd/2026-11-18-dsh-token-efficiency/fix-r2-design.md`。
+- 对应提交：主回写 `0286371`；取回完整性措辞的后续修正见 `git log -1 -- docs/superpowers/specs/2026-11-18-dsh-token-efficiency-design.md`。报告见 `.superpowers/sdd/2026-11-18-dsh-token-efficiency/fix-r2-design.md`。
