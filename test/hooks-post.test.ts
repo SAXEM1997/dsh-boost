@@ -12,7 +12,9 @@ import { fakeHost } from './fakes/host.ts'
 import { AnchorStore, PRUNE_MARKER } from '../src/gate/invalidate.ts'
 import { PendingQueue, callIdFor } from '../src/hooks/pending.ts'
 import { registerHooks, SUBSTITUTION_WHITELIST } from '../src/hooks/post-execute.ts'
+import type { HookDeps } from '../src/hooks/post-execute.ts'
 import { StepBudget } from '../src/admission/ledger.ts'
+import { RetrievalLedger } from '../src/admission/retrieval.ts'
 import { UsageLedger } from '../src/admission/usage.ts'
 import { TurnClock } from '../src/hooks/clock.ts'
 import { DEFAULT_CONFIG } from '../src/config.ts'
@@ -1125,4 +1127,143 @@ test('I10 selector 调用抛错记 selector-error，而不是 selector-abstain(e
   assert.ok(error, 'a throwing selector call is a selector-error, not an abstention')
   assert.equal(error.kind, 'skip')
   assert.equal(env.receipts.some((r) => r.code === 'selector-abstain'), false)
+})
+
+// ---------------------------------------------------------------------------
+// Mutation re-review: each test below must redden when its fix is removed
+// ---------------------------------------------------------------------------
+
+test('M1 stopped 早退也清计划：库恢复后旧计划不得驱动后续回执', async () => {
+  const env = setup()
+  let stopped = true
+  // The store keeps recording, it only reports that it is not writing.
+  env.deps.receipts.stopped = () => stopped
+  env.plans.set(SESSION, { goal: 'g', steps: [candidate('A', 'TRIGGER')] })
+
+  await runPost(env.host, 'TRIGGER')
+  assert.equal(
+    env.plans.has(SESSION),
+    false,
+    'the plan belongs to this receipt alone; a stopped store cannot use it, so it must be consumed',
+  )
+
+  stopped = false
+  await runPost(env.host, 'TRIGGER')
+  assert.equal(env.queue.peek(SESSION), undefined, 'the recovered store must not consume the earlier plan')
+  assert.equal(env.receipts.some((r) => r.kind === 'shadow'), false)
+  assert.equal(env.receipts.some((r) => r.code === 'no-candidate'), false)
+})
+
+test('M3 stopped 检查先于准入：停止的库上不读准入计量', async () => {
+  let lastCalls = 0
+  const env = setup({
+    deps: {
+      receipts: {
+        append: async () => {},
+        stopped: () => true,
+      },
+      selectorRoute: () => ({ provider: 'p', model: 'm' }),
+      llm: {
+        stream: async function* () {
+          yield { type: 'finish', reason: { kind: 'stop' } }
+        },
+      },
+    },
+  })
+  // `admittedFor` has exactly one measurement: `savedTokensOf` -> `usage.last`.
+  // A deps-level spy there observes admission having been entered, which the
+  // queue/budget/selector assertions cannot while the store is stopped.
+  const usage = env.deps.usage
+  const realLast = usage.last.bind(usage)
+  usage.last = () => {
+    lastCalls += 1
+    return realLast()
+  }
+  env.plans.set(SESSION, {
+    goal: 'g',
+    steps: [candidate('A', 'TRIGGER'), candidate('B', 'TRIGGER')],
+  })
+
+  await runPost(env.host, 'TRIGGER')
+
+  assert.equal(lastCalls, 0, 'admission must not run on a stopped store')
+  assert.equal(env.deps.budget.count(), 0)
+  assert.equal(env.queue.peek(SESSION), undefined)
+})
+
+test('M4 两次 read 的 projection-retrieval 收据 preview/args 必须可区分', async () => {
+  const retrievals = new RetrievalLedger()
+  retrievals.record(SESSION, '/spill/a')
+  retrievals.record(SESSION, '/spill/b')
+  const env = setup({ deps: { retrievals } })
+
+  await runPost(
+    env.host,
+    'alpha retrieval body',
+    { kind: 'accept' },
+    { callId: 'read-a', arguments: { file_path: '/spill/a' } },
+  )
+  await runPost(
+    env.host,
+    'beta retrieval body',
+    { kind: 'accept' },
+    { callId: 'read-b', arguments: { file_path: '/spill/b' } },
+  )
+
+  const receipts = env.receipts.filter((r) => r.code === 'projection-retrieval')
+  assert.equal(receipts.length, 2, 'both reads retrieve a projected artifact')
+  assert.equal(receipts[0].locator, '/spill/a')
+  assert.equal(receipts[1].locator, '/spill/b')
+  assert.equal(receipts[0].preview, 'alpha retrieval body')
+  assert.equal(receipts[1].preview, 'beta retrieval body')
+  assert.deepEqual(receipts[0].args, { file_path: '/spill/a' })
+  assert.deepEqual(receipts[1].args, { file_path: '/spill/b' })
+  assert.notEqual(
+    receiptHash(receipts[0]),
+    receiptHash(receipts[1]),
+    'two same-tool same-turn retrievals must not hash identically',
+  )
+})
+
+test('M6 投影前重读 live scope：装配后禁用的 workspace 不得投影', async () => {
+  let saves = 0
+  const env = setup({
+    // The judgement cache says visible (assembly happened before the disable);
+    // the live document no longer lists the workspace.
+    doc: doc({ mode: 'selected', workspaceIds: [], projection: 'on' }),
+    deps: {
+      spill: {
+        saveText: async () => {
+          saves += 1
+          return { locator: '/spill/read.txt', retrievalHint: 'read it' }
+        },
+      },
+      hasSpillNotice: () => false,
+    },
+  })
+  env.plans.set(SESSION, { goal: 'g', steps: [candidate('A', 'IMPOSSIBLE')] })
+
+  const res = await runPost(
+    env.host,
+    'x'.repeat(4000),
+    { kind: 'accept' },
+    { arguments: { file_path: '/big' } },
+  )
+
+  assert.equal(saves, 0, 'a disabled workspace must not spill the receipt')
+  assert.equal(Object.hasOwn(res, 'content'), false, 'the decision must stay untouched')
+  assert.equal(
+    env.receipts.some((r) => r.kind === 'projection' || r.kind === 'shadow'),
+    false,
+    'no projection accounting for a workspace the live document excludes',
+  )
+})
+
+test('M5 estimateKind 只有 host/unknown：chars/4 的类型关已封死', () => {
+  // A type-level pin. `chars/4` was removed from `HookDeps.estimateKind` so no
+  // future producer can present a fixed-density guess as a meter reading.
+  // @ts-expect-error -- if the arm is re-added this directive becomes unused
+  // and `npm run typecheck` fails, which is the red state for this item.
+  const removed: NonNullable<HookDeps['estimateKind']> = 'chars/4'
+  assert.equal(removed, 'chars/4')
 })

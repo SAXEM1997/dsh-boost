@@ -49,16 +49,14 @@ const UNSERIALISABLE_ARGS_CODE = 'BOOST_ARGS_UNSERIALISABLE'
 /**
  * The reasoning sibling's text.
  *
- * A short deterministic sentence is enough: the block's existence and position
- * are what the sibling rule needs, not its content. It names the tool and the
- * candidate so a session log shows why the turn appeared, and it never reads
- * `createdAt` or any other clock value.
+ * A fixed sentence, not a per-candidate one: the block's existence and
+ * position are what the sibling rule needs, not its content. It is deliberately
+ * constant because the block is replayed on every later request and rendered in
+ * the transcript, so naming the tool and candidate here would cost tokens on
+ * every turn to repeat what the adjacent `tool-call` block already says. It
+ * never reads `createdAt` or any other clock value.
  */
 function reasoningText(): string {
-  // Deliberately constant: this block is replayed on every later request and
-  // rendered in the transcript, so naming the tool and candidate here would
-  // cost tokens on every turn to say something the tool-call block beside it
-  // already says.
   return 'Deterministic substitution.'
 }
 

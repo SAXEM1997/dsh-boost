@@ -816,3 +816,30 @@ test('I3 reset 清空计划：pruned 与 compaction 两个分支都不得留下�
     assert.equal(env.plans.has(SESSION), false, `${code} must clear the plan too`)
   }
 })
+
+// ---------------------------------------------------------------------------
+// Mutation re-review: the no-chunk path must clear the old plan too
+// ---------------------------------------------------------------------------
+
+test('M2 无 text-delta 的响应清空旧计划（no-chunk 路径）', async () => {
+  const env = setup({ chunks: [{ type: 'finish', reason: { kind: 'stop' } }] })
+  env.runtime.onModelRequest(SESSION, 1, 0)
+  // First request of the turn establishes the plan-turn note, so the second is
+  // the same turn and only `rememberPlan` can drop the seeded plan.
+  await streamOnce(env)
+  env.plans.set(SESSION, { goal: 'old', steps: [candidate()] })
+  assert.ok(env.plans.has(SESSION), 'the stale plan is present before the response')
+
+  const chunks = await streamOnce(env)
+
+  assert.equal(
+    chunks.some((chunk) => chunk.type === 'text-delta'),
+    false,
+    'this response carries no text-delta at all: it must take the no-chunk path',
+  )
+  assert.equal(
+    env.plans.has(SESSION),
+    false,
+    'a response without a plan block withdraws the previous plan even when it had no text',
+  )
+})

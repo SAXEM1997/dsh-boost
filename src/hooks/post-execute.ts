@@ -262,11 +262,14 @@ export interface HookDeps {
   /**
    * Which estimator produced a projection receipt's numbers.
    *
-   * `host` means the synchronous host token meter priced it; `chars/4` means
-   * the fixed-density fallback did. The field exists so an audit reader never
-   * mistakes the fallback for a provider measurement.
+   * `host` means the synchronous host token meter priced it. `unknown` is the
+   * only meterless value: a projection without a meter still clips, but its
+   * receipt carries `estimate:'unknown'` and no numbers at all. There is
+   * deliberately no characters-over-four arm — a fixed-density guess is not a
+   * measurement, and admitting the type would let a future producer stamp a
+   * fabricated figure as if the host had measured it.
    */
-  estimateKind?: 'host' | 'chars/4' | 'unknown'
+  estimateKind?: 'host' | 'unknown'
   /**
    * The host spill-notice predicate, injected instead of imported.
    *
@@ -1129,7 +1132,16 @@ async function decideSubstitution(
   // cannot justify spending a selector call or a budget step. No receipt is
   // attempted here either; the store is already failing, and status exposes
   // `receipts.stopped()` to the operator.
-  if (receiptsStopped(deps)) return
+  //
+  // The plan is still consumed here. This receipt cannot use it, and a plan is
+  // one-shot per receipt: keeping it for a later receipt is exactly the stale
+  // plan the one-shot rule exists to prevent. A store that recovers mid-turn
+  // would otherwise let the next receipt fire a decision the model wrote for
+  // this one.
+  if (receiptsStopped(deps)) {
+    clearPlan(deps, ctx.sessionId)
+    return
+  }
 
   const plan = safePlan(deps, ctx.sessionId)
   if (plan === undefined) return
@@ -1420,6 +1432,10 @@ function projectionSkipCode(reason: string): string {
  * the content only after `projectApply`'s own guards pass; a skip leaves the
  * decision intact. The regression guard (`assembled.length < original.length`)
  * lives inside `projectApply`; here only pricing and evidence are added.
+ *
+ * The live visibility recheck runs before either mode. The listener gate reads
+ * the cached judgement from prompt assembly time; a workspace disabled since
+ * then must not have its receipt clipped or accounted, in shadow or apply mode.
  */
 async function projectDecision(
   deps: HookDeps,
@@ -1429,6 +1445,13 @@ async function projectDecision(
 ): Promise<PostExecuteDecision> {
   const mode: ProjectionMode = ctx.doc.projection
   if (mode === 'off') return decision
+
+  // Projection gets the same live recheck substitution performs. The cached
+  // judgement passed the listener gate, but the prompt was assembled before
+  // the tool ran: `boost` may have disabled the workspace in between, and a
+  // projection changes what the model sees. The cache alone must not authorize
+  // that (design §5.5).
+  if (!substitutableSession(deps, ctx.sessionId, ctx.doc)) return decision
 
   const toolName = ctx.exec.name
   const family = toolName === undefined ? undefined : familyOf(toolName)
@@ -1510,7 +1533,9 @@ async function projectDecision(
       if (outcome.locator !== undefined) deps.retrievals?.record(ctx.sessionId, outcome.locator)
 
       // The applied event is always recorded; only the token figures depend on
-      // the meter. One-time `before`/`after`/`saved_projection_tokens` are the
+      // the meter. `estimate` is always present and names the producer
+      // (`deps.estimateKind`, defaulting to `'unknown'`), never a guess.
+      // One-time `before`/`after`/`saved_projection_tokens` are the
       // authoritative names (§5.3); `status` applies the replay factor once to
       // the aggregate, never per receipt.
       const before = estimate === undefined ? undefined : safeEstimate(estimate, target)
@@ -1552,8 +1577,9 @@ async function projectDecision(
       // write nothing.
       // A skip projected nothing, so it is a `skip` receipt, not a
       // `projection` one. `kind:'projection'` is not a promise of numeric
-      // fields: the meterless branch above writes `estimate:'unknown'` without
-      // before/after/saved_projection_tokens (design §9), and consumers must
+      // fields: the meterless apply branch above always writes
+      // `estimate:'unknown'` but omits `before`/`after`/
+      // `saved_projection_tokens` entirely (design §9), and consumers must
       // treat those as unpriced rather than assume the numbers exist.
       await appendReceipt(
         deps,
