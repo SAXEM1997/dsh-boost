@@ -2299,7 +2299,8 @@ git commit -m "feat: host capability probes, family mapping, fixed-cost measurem
 ### Task 26: 分析脚本与发布验收
 
 **Files:**
-- Create: `scripts/shadow-report.mjs`, `scripts/session-stats.mjs`, `scripts/session-snapshot.json`, `test/regression/tasks.jsonl`, `test/regression/run.mjs`, `test/scripts.test.ts`, `docs/RELEASE.md`
+- Create: `scripts/shadow-report.mjs`, `scripts/session-stats.mjs`, `scripts/session-snapshot.json`, `test/scripts.test.ts`, `docs/RELEASE.md`
+- **未交付**：`test/regression/tasks.jsonl` 与 `test/regression/run.mjs`——2026-11-18 裁决（m00234）不搭回放集，20 任务门只作冒烟，清单与双跑脚本由操作方在发布前自备（见设计稿 §6.1）。T26 实际只交付了 `scripts/` 下的三个文件、`test/scripts.test.ts` 与 `docs/RELEASE.md`；`test/regression/` 仅有 `.gitkeep`。
 
 **Interfaces:**
 - Consumes: 收据格式（T7）、`boost status`（T19/T25）
@@ -2328,7 +2329,7 @@ Expected: FAIL，脚本不存在
 
 `shadow-report.mjs` 扫 `receipts/*.jsonl`，输出四类标签：真实可省比例、按族命中率、候选集召回、取回率上界（`取回调用数 / 投影回执数`）。
 `session-stats.mjs` 按 `session-snapshot.json` 复算 §2.1 全部统计。
-`test/regression/run.mjs` 读 `tasks.jsonl`（20 条，每条 `{ id, prompt, expect }`），pass 谓词按设计稿 §6.1：`两轮都完成且 isError=false 的任务数 ≥ 19 ∧ 每条被投影回执可取回且字节数 = count + 保留窗口字节数`。
+`test/regression/run.mjs`（**未交付**）原计划读 `tasks.jsonl`（20 条，每条 `{ id, prompt, expect }`），pass 谓词按设计稿 §6.1：`两轮都完成且 isError=false 的任务数 ≥ 19 ∧ 每条被投影回执可取回且字节数 = count + 保留窗口字节数`。2026-11-18 裁决不搭回放集，此脚本与清单不在交付物内。
 `docs/RELEASE.md` 写清 `npm pack` → 空项目安装 → 分别卸掉 `dsh-spill-policy` / `dsh-token-meter` 验证两条降级路径（isolated 布局；hoisted 布局测不出 `ERR_MODULE_NOT_FOUND`）。
 
 - [ ] **Step 4: 运行确认通过**
@@ -2343,7 +2344,7 @@ Expected: 全部 PASS
 - [ ] **Step 6: 提交并推送**
 
 ```bash
-git add scripts/ test/regression/ test/scripts.test.ts docs/RELEASE.md
+git add scripts/ test/scripts.test.ts docs/RELEASE.md
 git commit -m "feat: shadow report, stats replay and release acceptance"
 git push origin main
 ```
