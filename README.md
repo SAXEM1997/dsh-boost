@@ -131,7 +131,7 @@ bundle，patch 的 `insert` 行落在 profile root 上。**装完必须重启 DS
     "shadow": true,
     "projection": "shadow",
     "degraded": [],
-    "fixedOverheadTokens": 772,
+    "fixedOverheadTokens": 778,
     "estimate_kind": "host",
     "counts": { "skip:no-scope": 2 }
   }
@@ -141,11 +141,11 @@ bundle，patch 的 `insert` 行落在 profile root 上。**装完必须重启 DS
 示例里的 `counts` 不是空对象：启用流程中前两次控制调用（`status`、`scope-set`）发起时还没有
 可见工作区，每次各记了一条 `skip:no-scope`（post-execute 的 scope 门不豁免 `boost` 自身）。
 
-`fixedOverheadTokens` 是启动时实测的固定开销**合计**：协议段 379 + `boost` 工具 schema 393 =
-772（本 checkout）。它不是从使用量里推断的。**哪个数字适用于当前请求取决于 scope**：`boost`
-工具 schema（393）只要插件装配就常驻——`boost` 是唯一的 scope 豁免，始终留在工具声明里；
+`fixedOverheadTokens` 是启动时实测的固定开销**合计**：协议段 379 + `boost` 工具 schema 399 =
+778（本 checkout）。它不是从使用量里推断的。**哪个数字适用于当前请求取决于 scope**：`boost`
+工具 schema（399）只要插件装配就常驻——`boost` 是唯一的 scope 豁免，始终留在工具声明里；
 协议段（379）只在有可见工作区时注入，`selected + []` 下该段文本为空，**每请求固定开销实际是
-393**。`status` 汇报的始终是合计 772，不随 scope 翻转；上面示例里工作区已选中，772 就是当时的
+399**。`status` 汇报的始终是合计 778，不随 scope 翻转；上面示例里工作区已选中，778 就是当时的
 真实每请求开销。
 
 ## 影子周
@@ -347,7 +347,7 @@ plugin manager 才能把运行中的 entry 认成本包的行、通过 profile p
   不是省下的 token。
 - **v1 不评判「结果更好」**：只有 token 账目与 20 任务回退门，没有任何质量指标；「替换后
   结果质量」在 v1 是不可判的。
-- **装上但未启用是小的净亏**：`boost` 工具只要插件装配就注册，schema 实测 393 token/请求
+- **装上但未启用是小的净亏**：`boost` 工具只要插件装配就注册，schema 实测 399 token/请求
   常驻（见「启用」一节的分解），收益为零。
 - **不支持 desktop profile**（设计 D6）。
 - 不替换、也不接管 DSH 的压缩、剪枝与 spill 决策（设计 N3）；投影只改模型可见 content，

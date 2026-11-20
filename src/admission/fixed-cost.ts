@@ -12,7 +12,7 @@
  * (design §9: do not fabricate).
  *
  * Both components stay visible. The protocol section alone is not the number
- * the design names: the `boost` tool schema is another ~393 tokens, and a
+ * the design names: the `boost` tool schema is another ~399 tokens, and a
  * status figure that silently omits it understates the cost it is named after.
  * `fixedOverheadTokens` is therefore the total, with
  * `fixedOverhead.protocolTokens` / `fixedOverhead.toolSchemaTokens` alongside.

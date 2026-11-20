@@ -887,7 +887,7 @@ test('status splits a missing meter service from an unreachable estimator packag
   const { runBoost } = await import('../src/tools/boost.ts')
   const { ScopeStore } = await import('../src/scope/store.ts')
   const base = { scope: new ScopeStore(dir), receipts: new ReceiptStore(dir) }
-  const measured = { protocolTokens: 379, toolSchemaTokens: 393, totalTokens: 772 }
+  const measured = { protocolTokens: 379, toolSchemaTokens: 399, totalTokens: 778 }
 
   const noService = await runBoost({
     args: { cmd: 'status' },

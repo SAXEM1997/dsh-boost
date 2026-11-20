@@ -152,7 +152,7 @@ Excerpt (illustrative values; ledger fields omitted):
     "shadow": true,
     "projection": "shadow",
     "degraded": [],
-    "fixedOverheadTokens": 772,
+    "fixedOverheadTokens": 778,
     "estimate_kind": "host",
     "counts": { "skip:no-scope": 2 }
   }
@@ -164,13 +164,13 @@ ran while no workspace was visible yet, and each recorded one `skip:no-scope` (t
 scope gate does not exempt `boost` itself).
 
 `fixedOverheadTokens` is measured once at startup and is the **sum** of both components: protocol
-section 379 + `boost` tool schema 393 = 772 (in this checkout). It is never inferred from usage.
-**Which number applies to a request depends on scope**: the `boost` tool schema (393) is present
+section 379 + `boost` tool schema 399 = 778 (in this checkout). It is never inferred from usage.
+**Which number applies to a request depends on scope**: the `boost` tool schema (399) is present
 whenever the plugin is assembled — `boost` is the one scope exemption and always stays in the tool
 declaration — while the protocol section (379) is injected only when a workspace is visible. Under
-`selected + []` the section's text is empty, so the real per-request fixed cost is **393**. `status`
-always reports the combined 772 regardless of scope; in the excerpt above a workspace is selected,
-so 772 is the true per-request cost there.
+`selected + []` the section's text is empty, so the real per-request fixed cost is **399**. `status`
+always reports the combined 778 regardless of scope; in the excerpt above a workspace is selected,
+so 778 is the true per-request cost there.
 
 ## Shadow week
 
@@ -402,7 +402,7 @@ evidence" degraded path would be unreachable.
 - **v1 does not judge "better results"**: there is a token ledger and a 20-task regression gate,
   no quality metric; whether substituted outcomes are better is unjudgeable in v1.
 - **Installed but not enabled is a small net loss**: the `boost` tool registers as soon as the
-  plugin is assembled, and its schema costs a measured 393 tokens on every request (see the
+  plugin is assembled, and its schema costs a measured 399 tokens on every request (see the
   breakdown in "Enable it") while yielding nothing.
 - **No desktop profile** (design D6).
 - Does not replace or take over DSH's compaction, pruning, or spill decisions (design N3);

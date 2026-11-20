@@ -25,14 +25,14 @@ Design rationale lives in `docs/superpowers/specs/`; the release-acceptance proc
      so any releases/tag or compare URL would 404 today. Restore the [Unreleased]/[0.1.0]
      link definitions once a tag is published. -->
 首个可用版本。默认作用域是 `selected` + 空工作区列表：不投影、不替换、不注入协议段——但
-**不是零成本**：`boost` 工具只要插件装配就注册，其 schema（本 checkout 实测 393 token）
-随**每个**模型请求常驻。装上但未启用是一个每请求 393 token 的小额净支出。
+**不是零成本**：`boost` 工具只要插件装配就注册，其 schema（本 checkout 实测 399 token）
+随**每个**模型请求常驻。装上但未启用是一个每请求 399 token 的小额净支出。
 
 First usable release. The default scope is `selected` with an empty workspace list: no
 projection, no substitution, no protocol section — but **not zero-cost**: the `boost` tool
-registers as soon as the plugin is assembled, and its schema (393 tokens measured in this
+registers as soon as the plugin is assembled, and its schema (399 tokens measured in this
 checkout) rides along on **every** model request. Installed-but-not-enabled is a small net cost
-of 393 tokens per request.
+of 399 tokens per request.
 
 ### 新增 Added
 
