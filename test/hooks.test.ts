@@ -119,7 +119,7 @@ test('llm/stream 对非 selector 请求也透传给 next()（R5）', async () =>
   assert.equal(host.nextCalls, 1)
 })
 
-test('有 agent 时不写 skip 收据，下游 decision 原样返回', async () => {
+test('有 agent 但 judgement 冷时记 skip:no-scope，下游 decision 原样返回', async () => {
   const { host } = setup()
   const decision = { kind: 'accept', content: [{ type: 'text', text: 'downstream' }] }
   const exec = { name: 'read', agent: { session: { header: { id: 's1', cwd: '/w' } } } }
@@ -130,7 +130,8 @@ test('有 agent 时不写 skip 收据，下游 decision 原样返回', async () 
   )
   assert.equal(res, decision)
   assert.equal(host.nextCalls, 1)
-  assert.equal(host.receipts.length, 0)
+  assert.equal(host.receipts.length, 1)
+  assert.equal(host.receipts[0].code, 'skip:no-scope')
 })
 
 test('scope/receipts 缺失时 registerHooks 不抛错，四个挂载点仍在（R5）', async () => {

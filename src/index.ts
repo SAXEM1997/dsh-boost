@@ -109,17 +109,35 @@ function sessionIdOf(value: unknown): string | undefined {
 /** The fixed density `@deepseek-ai/dsh-token-meter/estimate` prices text under. */
 const CHARS_PER_TOKEN = 4
 
-/**
- * The projection estimator.
- *
- * The host exposes no synchronous text estimator: `estimateContent` is a
- * module export of the optional `dsh-token-meter` peer and would have to be
- * imported dynamically, while this seam is synchronous. The fixed heuristic is
- * the same one the meter uses (`ceil(codePoints / 4)`); the meter's per-block
- * overhead is constant and cancels in every before/after projection receipt.
- */
-function estimateText(text: string): number {
+/** The projection estimator's fallback when the host meter is absent. */
+function estimateTextFallback(text: string): number {
   return Math.ceil(Array.from(text).length / CHARS_PER_TOKEN)
+}
+
+/**
+ * The host token meter's synchronous message estimator, when the service is
+ * reachable.
+ *
+ * `ctx.tokenMeter` is a cordis service with a synchronous `estimateMessage`
+ * method, so `ctx.get('tokenMeter')` is a real synchronous seam; the pure
+ * `estimateContent` export remains a dynamic-import-only peer. Pricing the
+ * text as one user message adds the meter's constant block/role overhead
+ * (+8), which cancels in every before/after projection receipt. The caller
+ * labels receipts `host` so the number is not mistaken for a provider
+ * measurement.
+ */
+function hostEstimatorOf(ctx: PluginContext): ((text: string) => number) | undefined {
+  const meter = serviceOf<{ estimateMessage?: (message: unknown) => number }>(ctx, 'tokenMeter')
+  if (meter === undefined || typeof meter.estimateMessage !== 'function') return undefined
+  const estimate = meter.estimateMessage.bind(meter)
+  return (text: string): number => {
+    try {
+      const value = estimate({ role: 'user', content: [{ type: 'text', text }] })
+      return typeof value === 'number' && Number.isFinite(value) ? value : Number.NaN
+    } catch {
+      return Number.NaN
+    }
+  }
 }
 
 /** The `agent/request` payload fields this assembly reads. */
@@ -290,6 +308,9 @@ export function apply(ctx: PluginContext, config: unknown): void {
     // seam `workspaceIdOf` reads; the spill store is the projection backend.
     const registry = serviceOf<WorkspaceRegistry>(ctx, 'workspaceRegistry')
     const spill = serviceOf<SpillBackend>(ctx, 'spillStore')
+    const hostEstimate = hostEstimatorOf(ctx)
+    const estimateText = hostEstimate ?? estimateTextFallback
+    const estimateKind = hostEstimate !== undefined ? 'host' : 'chars/4'
 
     // The hook reads this synchronously, so it only ever returns the warmed
     // answer. The map alone is not the answer: a workspace disabled between
@@ -317,6 +338,7 @@ export function apply(ctx: PluginContext, config: unknown): void {
       sessions,
       spill,
       estimateText,
+      estimateKind,
       llm: ctx.llm,
       selectorRoute: (sessionId) => routes.get(sessionId),
     }

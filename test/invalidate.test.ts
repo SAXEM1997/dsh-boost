@@ -363,7 +363,9 @@ test('超出 scope 的会话：两个守卫都不运行，pending 不动、notic
 
   assert.equal(res.kind, 'accept')
   assert.notEqual(anchors.get(SESSION), undefined)
-  assert.equal(receipts.length, 0)
+  assert.equal(receipts.length, 1)
+  assert.equal(receipts[0]?.kind, 'skip')
+  assert.equal(receipts[0]?.code, 'skip:no-scope')
   assert.deepEqual(seen, [])
 })
 
@@ -381,7 +383,9 @@ test('judgement 缓存未命中（无 judgement 方法）同样 fail-closed：�
 
   assert.equal(res.kind, 'accept')
   assert.notEqual(anchors.get(SESSION), undefined)
-  assert.equal(receipts.length, 0)
+  assert.equal(receipts.length, 1)
+  assert.equal(receipts[0]?.kind, 'skip')
+  assert.equal(receipts[0]?.code, 'skip:no-scope')
   assert.deepEqual(seen, [])
 })
 

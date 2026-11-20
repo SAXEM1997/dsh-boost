@@ -116,6 +116,23 @@ type ReceiptInput = Parameters<ReceiptStore['append']>[0]
  */
 export const SUBSTITUTION_WHITELIST: ReadonlySet<string> = new Set(['read', 'grep', 'glob'])
 
+/**
+ * The Jev input+output upper bound (design §5.3), paid only by a plan that
+ * actually reaches the selector. A single surviving candidate has no selector
+ * call and pays nothing.
+ */
+const SELECTOR_OVERHEAD_TOKENS = 512
+
+/**
+ * Hard cap on the receipt text shown to the selector.
+ *
+ * The selector prompt carries a 512-token input+output bound; a full 40 KB
+ * receipt would blow through it before the candidate summaries are added. This
+ * cap keeps the receipt near 300 tokens even when the tool family's projection
+ * window is larger, while still showing the projection's head/tail shape.
+ */
+const SELECTOR_RECEIPT_MAX_CHARS = 1_200
+
 /** The route an `ask-selector` request inherits from the boundary request. */
 export interface SelectorRoute {
   provider: string
@@ -206,6 +223,14 @@ export interface HookDeps {
   spill?: SpillBackend
   /** Token estimator; absent skips projection accounting entirely. */
   estimateText?: (t: string) => number
+  /**
+   * Which estimator produced a projection receipt's numbers.
+   *
+   * `host` means the synchronous host token meter priced it; `chars/4` means
+   * the fixed-density fallback did. The field exists so an audit reader never
+   * mistakes the fallback for a provider measurement.
+   */
+  estimateKind?: 'host' | 'chars/4'
   /**
    * The host spill-notice predicate, injected instead of imported.
    *
@@ -427,14 +452,16 @@ async function appendReceipt(deps: HookDeps, receipt: ReceiptInput): Promise<voi
 async function appendSkipNoScope(
   receipts: ReceiptStore | undefined,
   exec: PostExecuteExec | undefined,
+  sessionId = '',
+  turn = 0,
 ): Promise<void> {
   if (receipts == null || typeof receipts.append !== 'function') return
   try {
     await receipts.append({
       version: 1,
       ts: new Date().toISOString(),
-      sessionId: '',
-      turn: 0,
+      sessionId,
+      turn,
       kind: 'skip',
       code: 'skip:no-scope',
       tool: exec?.name,
@@ -649,7 +676,12 @@ function savedTokensOf(deps: HookDeps, sessionId: string): number {
  * survives, but it still has to show a net win over the threshold; the
  * conservative direction here is to keep the gate on.
  */
-function admittedFor(deps: HookDeps, sessionId: string, plan: Plan): boolean {
+function admittedFor(
+  deps: HookDeps,
+  sessionId: string,
+  plan: Plan,
+  overheadTokens: number,
+): boolean {
   try {
     const threshold = deps.config?.admission?.thresholdTokens
     const thresholdTokens =
@@ -658,7 +690,7 @@ function admittedFor(deps: HookDeps, sessionId: string, plan: Plan): boolean {
         : DEFAULT_CONFIG.admission.thresholdTokens
     return worthSubstituting({
       savedTokens: savedTokensOf(deps, sessionId),
-      overheadTokens: 0,
+      overheadTokens,
       thresholdTokens,
       deterministicSingle: plan.steps.length === 1,
     })
@@ -809,6 +841,28 @@ function selectorSummary(candidate: Candidate): string {
   return points.length > 200 ? `${points.slice(0, 200).join('')}…` : text
 }
 
+/** Bound the receipt the selector pays for, using the projection's head/tail shape. */
+function selectorReceiptOf(deps: HookDeps, ctx: DecisionContext): string {
+  const text = ctx.receipt.text
+  const points = Array.from(text)
+  if (points.length <= SELECTOR_RECEIPT_MAX_CHARS) return text
+
+  const family = familyOf(ctx.exec.name)
+  const params = family !== undefined ? deps.config.projection[family] : undefined
+  const configured = params !== undefined ? params.headChars + params.tailChars : 0
+  const total = Math.min(
+    SELECTOR_RECEIPT_MAX_CHARS,
+    configured > 0 ? configured : SELECTOR_RECEIPT_MAX_CHARS,
+  )
+  const ratio = configured > 0 && params !== undefined ? params.headChars / configured : 0.8
+  const headChars = Math.min(total, Math.max(0, Math.round(total * ratio)))
+  const tailChars = total - headChars
+  const head = points.slice(0, headChars).join('')
+  const tail = tailChars > 0 ? points.slice(-tailChars).join('') : ''
+  const omitted = points.length - headChars - tailChars
+  return `${head}\n…[selector window: omitted ${omitted} chars]…\n${tail}`
+}
+
 /**
  * Ask the selector to pick one of `decision.candidates` and return that same
  * decision candidate, whose `args` are already bound.
@@ -857,7 +911,7 @@ async function chooseCandidate(
         id: candidate.id,
         summary: selectorSummary(candidate),
       })),
-      receiptText: ctx.receipt.text,
+      receiptText: selectorReceiptOf(deps, ctx),
       maxTokens: deps.config.selector.maxTokens,
     })
     if ('choice' in result) {
@@ -922,7 +976,16 @@ async function decideSubstitution(
   let boundArgs: Record<string, unknown> | undefined
   let candidateId: string | undefined
 
+  // A plan that needs the selector pays its 512-token bound before the call is
+  // made. A single surviving candidate pays nothing. This must run before
+  // `choose`: a selector call that cannot be paid for is never sent.
+  const selectorOverhead = decision.kind === 'ask-selector' ? SELECTOR_OVERHEAD_TOKENS : 0
+
   if (decision.kind === 'ask-selector') {
+    if (!admittedFor(deps, ctx.sessionId, plan, selectorOverhead)) {
+      await appendReceipt(deps, ledgerEntry(ctx, 'skip', 'not-admitted', { stepId: 'root' }))
+      return { shadowCommitted: false }
+    }
     // The decision's candidates already carry the bound trees; committing from
     // the plan here would dispatch a `$public` template.
     const chosen = await chooseCandidate(deps, ctx, decision.candidates)
@@ -966,7 +1029,7 @@ async function decideSubstitution(
       ledgerEntry(ctx, 'shadow', 'ok', {
         decision: 'commit',
         candidateId,
-        admitted: admittedFor(deps, ctx.sessionId, plan),
+        admitted: admittedFor(deps, ctx.sessionId, plan, selectorOverhead),
         whitelisted: SUBSTITUTION_WHITELIST.has(candidate.tool),
         stepId: 'root',
         args: boundArgs,
@@ -992,7 +1055,7 @@ async function decideSubstitution(
     return { shadowCommitted: false }
   }
 
-  if (!admittedFor(deps, ctx.sessionId, plan)) {
+  if (!admittedFor(deps, ctx.sessionId, plan, selectorOverhead)) {
     await appendReceipt(deps, ledgerEntry(ctx, 'skip', 'not-admitted', { stepId: 'root' }))
     return { shadowCommitted: false }
   }
@@ -1159,6 +1222,7 @@ async function projectDecision(
             before: outcome.before,
             after: outcome.after,
             saved_projection_tokens: outcome.saved,
+            estimate: deps.estimateKind ?? 'chars/4',
           }),
         )
       }
@@ -1191,6 +1255,7 @@ async function projectDecision(
             before,
             after,
             saved_projection_tokens: before - after,
+            estimate: deps.estimateKind ?? 'chars/4',
           }),
         )
       }
@@ -1288,7 +1353,18 @@ async function postExecute(
   // cached judgement the protocol section reads; a miss is false (fail-closed,
   // design §5.5).
   const sessionId = sessionIdOf(exec)
-  if (sessionId === undefined || !isActiveSession(deps, sessionId)) return decision
+  if (sessionId === undefined || !isActiveSession(deps, sessionId)) {
+    // A cold judgement is fail-closed, but it must not be silent: the shadow
+    // week needs to distinguish "the plugin chose not to act" from "the plugin
+    // was never asked". The no-agent branch above writes the same code.
+    await appendSkipNoScope(
+      deps.receipts,
+      exec,
+      sessionId ?? '',
+      sessionId === undefined ? 0 : clockTurnOf(deps, sessionId),
+    )
+    return decision
+  }
 
   try {
     // Canonicalise the original receiver, not a downstream replacement: guards

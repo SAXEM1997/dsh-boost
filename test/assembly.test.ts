@@ -29,6 +29,7 @@ import { join } from 'node:path'
 import type { GenerateOptions, StreamChunk } from '@deepseek-ai/dsh-llm'
 import * as plugin from '../src/index.ts'
 import { callIdFor } from '../src/hooks/pending.ts'
+import { ReceiptStore } from '../src/receipts/store.ts'
 import { SELECTOR_PURPOSE } from '../src/selector/jev.ts'
 import { fakeHost } from './fakes/host.ts'
 
@@ -106,6 +107,7 @@ type Assembly = {
     main: StreamChunk[]
     selector: StreamChunk[]
     selectorRequests: Any[]
+    tokenMeterCalls: number
   }
   setScope: (doc: Any) => Promise<void>
   dispose: () => Promise<void>
@@ -121,7 +123,7 @@ type Assembly = {
  * records the selector's `GenerateOptions` so the test can assert the route and
  * the purpose marker the host will actually see.
  */
-async function createAssembly(options: { spill?: Any } = {}): Promise<Assembly> {
+async function createAssembly(options: { spill?: Any; tokenMeter?: Any } = {}): Promise<Assembly> {
   const dir = await mkdtemp(join(tmpdir(), 'dsh-boost-assembly-'))
   const root = join(dir, 'boost')
   await mkdir(root, { recursive: true })
@@ -130,12 +132,27 @@ async function createAssembly(options: { spill?: Any } = {}): Promise<Assembly> 
   const savedHome = process.env.DSH_HOME
   process.env.DSH_HOME = dir
 
-  const state: Assembly['state'] = { main: [], selector: [], selectorRequests: [] }
+  const state: Assembly['state'] = {
+    main: [],
+    selector: [],
+    selectorRequests: [],
+    tokenMeterCalls: 0,
+  }
   const registry = { list: () => [{ id: WORKSPACE, path: CWD }] }
+  const tokenMeter =
+    options.tokenMeter === undefined
+      ? undefined
+      : {
+          estimateMessage(message: Any): number {
+            state.tokenMeterCalls += 1
+            return options.tokenMeter.estimateMessage(message)
+          },
+        }
   const host = fakeHost({
     get(name: string) {
       if (name === 'workspaceRegistry') return registry
       if (name === 'spillStore') return options.spill
+      if (name === 'tokenMeter') return tokenMeter
       return undefined
     },
     llm: {
@@ -180,6 +197,14 @@ async function agentRequest(host: Any, turn: number, step: number): Promise<Any>
   )
 }
 
+/** Read the receipts the real assembly appended under its temporary data root. */
+async function receiptsOf(a: Assembly): Promise<Any[]> {
+  const store = new ReceiptStore(join(a.dir, 'boost'))
+  const out: Any[] = []
+  for await (const receipt of store.scan(SESSION)) out.push(receipt)
+  return out
+}
+
 /**
  * Seed a visible plan, run the post-execute decision and have the selector
  * choose B. Returns the deterministic call id of the queued decision.
@@ -187,11 +212,28 @@ async function agentRequest(host: Any, turn: number, step: number): Promise<Any>
  * The request stream carries a large `usage` chunk: a two-candidate plan pays
  * the selector, so admission must see a real measured saving before it commits.
  */
-async function commitB(a: Assembly): Promise<{ callId: string }> {
-  await agentRequest(a.host, 1, 0)
+async function commitB(
+  a: Assembly,
+  options: {
+    turn?: number
+    step?: number
+    inputTokens?: number
+    cacheReadTokens?: number
+  } = {},
+): Promise<{ callId: string }> {
+  const turn = options.turn ?? 1
+  const step = options.step ?? 0
+  await agentRequest(a.host, turn, step)
   a.state.main = [
     { type: 'text-delta', index: 0, text: planText([CANDIDATE_A, CANDIDATE_B]) },
-    { type: 'usage', usage: { inputTokens: 100_000, cacheReadTokens: 100_000, outputTokens: 1 } },
+    {
+      type: 'usage',
+      usage: {
+        inputTokens: options.inputTokens ?? 100_000,
+        cacheReadTokens: options.cacheReadTokens ?? 100_000,
+        outputTokens: 1,
+      },
+    },
     { type: 'finish', reason: { kind: 'stop' } },
   ]
   a.host.nextCalls = 0
@@ -210,7 +252,19 @@ async function commitB(a: Assembly): Promise<{ callId: string }> {
     async () => ({ kind: 'accept' }),
   )
 
-  return { callId: callIdFor(SESSION, 1, 0, 'B') }
+  return { callId: callIdFor(SESSION, turn, step, 'B') }
+}
+
+/** A host spill double that records the canonical original it is given. */
+function recordingSpill(): Any {
+  const spill = {
+    saved: [] as Any[],
+    async saveText(input: Any) {
+      spill.saved.push(input)
+      return { locator: '/spill/read-1.txt', retrievalHint: 'read it with offset/limit' }
+    },
+  }
+  return spill
 }
 
 // ---------------------------------------------------------------------------
@@ -221,7 +275,10 @@ test('real apply: a visible session warms, selects B and synthesizes the bound c
   const a = await createAssembly()
   t.after(() => a.dispose())
 
-  await commitB(a)
+  // Non-default host numbers: the first real host step is 1, not 0, and a turn
+  // can be anything. The call id must carry the host's turn/step exactly.
+  const { callId } = await commitB(a, { turn: 2, step: 3 })
+  assert.equal(callId, callIdFor(SESSION, 2, 3, 'B'), 'the call id must use the host turn/step')
 
   // The selector is the plugin's own aux request: purpose-tagged and carrying
   // the boundary request's route (captured from the agent/request waterfall).
@@ -232,7 +289,7 @@ test('real apply: a visible session warms, selects B and synthesizes the bound c
   assert.equal(selectorRequest.model, ROUTE.model)
 
   // The next model request of the same turn must answer with B's bound args.
-  await agentRequest(a.host, 1, 1)
+  await agentRequest(a.host, 2, 4)
   a.state.main = []
   a.host.nextCalls = 0
   const chunks = await collect(a.host.stream(SESSION, { messages: anchorMessages('BOUND-VALUE') }))
@@ -251,6 +308,155 @@ test('real apply: a visible session warms, selects B and synthesizes the bound c
     !delta.argumentsDelta.includes('$public'),
     'the plan template must never reach a tool call',
   )
+
+  // The queue's call id is the host turn/step, not a default: a tampered call
+  // carrying this id must be rejected. Dropping the `step` argument from
+  // `onModelRequest` (or ignoring the turn change) leaves no entry under this
+  // id, so the tampered call would pass through instead.
+  const tampered = await a.host.callHook(
+    'tools/execute',
+    [{ name: 'bash', arguments: { command: 'nope' }, callId, agent }],
+    async () => ({ ok: true }),
+  )
+  assert.equal(
+    (tampered as Any).error?.info?.code,
+    'dispatch-rejected',
+    'the call id must carry the non-default host turn/step',
+  )
+})
+
+test('turn change drops a parked decision: a constant clock cannot ship', async (t) => {
+  const a = await createAssembly()
+  t.after(() => a.dispose())
+
+  const { callId } = await commitB(a, { turn: 2, step: 3 })
+  assert.equal(callId, callIdFor(SESSION, 2, 3, 'B'))
+
+  // The host starts a new turn. The parked entry belongs to turn 2; if the
+  // clock ignored the turn change (or were constant), it would still match and
+  // synthesize here.
+  await agentRequest(a.host, 3, 1)
+  a.state.main = []
+  a.host.nextCalls = 0
+  const chunks = await collect(a.host.stream(SESSION, { messages: anchorMessages('BOUND-VALUE') }))
+
+  assert.equal(a.host.nextCalls, 1, 'a previous turn must not synthesize')
+  assert.equal(a.host.synthesized, 0)
+  assert.equal(chunks.some((chunk) => chunk.type === 'tool-call-delta'), false)
+})
+
+// ---------------------------------------------------------------------------
+// Selector economics: the 512-token bound is paid before choose(), and the
+// receipt handed to the selector is bounded.
+// ---------------------------------------------------------------------------
+
+test('selector admission: a saving below 512 + threshold makes zero selector calls', async (t) => {
+  const a = await createAssembly()
+  t.after(() => a.dispose())
+
+  // 1,500 saved - 512 selector bound = 988, below the 1,024 threshold.
+  await commitB(a, { inputTokens: 1_500, cacheReadTokens: 0 })
+  assert.equal(a.state.selectorRequests.length, 0, 'the selector must not be paid for')
+  assert.equal(a.host.synthesized, 0)
+
+  await agentRequest(a.host, 1, 1)
+  a.state.main = []
+  a.host.nextCalls = 0
+  const chunks = await collect(a.host.stream(SESSION, { messages: anchorMessages('BOUND-VALUE') }))
+
+  assert.equal(a.host.nextCalls, 1, 'the model must fall back')
+  assert.equal(a.host.synthesized, 0)
+  assert.equal(chunks.some((chunk) => chunk.type === 'tool-call-delta'), false)
+  const receipts = await receiptsOf(a)
+  assert.ok(
+    receipts.some((receipt) => receipt.kind === 'skip' && receipt.code === 'not-admitted'),
+    'the refusal must be auditable',
+  )
+})
+
+test('selector admission: a saving above 512 + threshold pays exactly one selector call', async (t) => {
+  const a = await createAssembly()
+  t.after(() => a.dispose())
+
+  // 2,000 saved - 512 selector bound = 1,488, above the 1,024 threshold.
+  const { callId } = await commitB(a, { inputTokens: 2_000, cacheReadTokens: 0 })
+  assert.equal(a.state.selectorRequests.length, 1, 'exactly one selector call')
+  assert.equal(callId, callIdFor(SESSION, 1, 0, 'B'))
+
+  await agentRequest(a.host, 1, 1)
+  a.state.main = []
+  a.host.nextCalls = 0
+  const chunks = await collect(a.host.stream(SESSION, { messages: anchorMessages('BOUND-VALUE') }))
+
+  assert.equal(a.host.nextCalls, 0, 'the admitted commit must synthesize')
+  assert.equal(a.host.synthesized, 1)
+  const delta = chunks.find((chunk) => chunk.type === 'tool-call-delta') as Any
+  assert.ok(delta)
+  assert.deepEqual(JSON.parse(delta.argumentsDelta), { file_path: 'BOUND-VALUE' })
+})
+
+test('the selector gets the head/tail window, not the full canonical receipt', async (t) => {
+  const a = await createAssembly()
+  t.after(() => a.dispose())
+
+  await agentRequest(a.host, 1, 0)
+  a.state.main = [
+    {
+      type: 'text-delta',
+      index: 0,
+      text: planText([
+        CANDIDATE_A,
+        {
+          id: 'B',
+          tool: 'read',
+          args: { file_path: { $public: { after: 'root', field: 'name' } } },
+          guards: [{ text_contains: 'BOUND' }],
+        },
+      ]),
+    },
+    { type: 'usage', usage: { inputTokens: 100_000, cacheReadTokens: 100_000, outputTokens: 1 } },
+    { type: 'finish', reason: { kind: 'stop' } },
+  ]
+  await collect(a.host.stream(SESSION, {}))
+
+  a.state.selector = [
+    { type: 'text-delta', index: 0, text: 'B' },
+    { type: 'finish', reason: { kind: 'stop' } },
+  ]
+  const full = `name: "BOUND-VALUE"\n${'x'.repeat(10_000)}`
+  await a.host.callHook(
+    'tools/post-execute',
+    [{ name: 'read', callId: 'root', agent }, { content: [{ type: 'text', text: full }] }],
+    async () => ({ kind: 'accept' }),
+  )
+
+  assert.equal(a.state.selectorRequests.length, 1)
+  const prompt = a.state.selectorRequests[0].messages[0].content[0].text as string
+  assert.ok(prompt.length < 2_000, `selector prompt must be bounded, got ${prompt.length}`)
+  assert.ok(prompt.includes('[selector window:'), 'the window marker must be visible')
+  assert.equal(prompt.includes('x'.repeat(10_000)), false, 'the full receipt must not be sent')
+})
+
+// ---------------------------------------------------------------------------
+// The cold-cache exposure gate is fail-closed, but not silent.
+// ---------------------------------------------------------------------------
+
+test('cold-cache post-execute records skip:no-scope', async (t) => {
+  const a = await createAssembly()
+  t.after(() => a.dispose())
+
+  // No agentRequest: the judgement cache is cold, so the hook returns before
+  // the decision chain. It still has to leave evidence for the shadow week.
+  await a.host.callHook(
+    'tools/post-execute',
+    [{ name: 'read', callId: 'cold', agent }, { content: [{ type: 'text', text: 'COLD' }] }],
+    async () => ({ kind: 'accept' }),
+  )
+
+  const receipts = await receiptsOf(a)
+  const skip = receipts.find((receipt) => receipt.kind === 'skip' && receipt.code === 'skip:no-scope')
+  assert.ok(skip, 'the cold path must be auditable')
+  assert.equal(skip.sessionId, SESSION)
 })
 
 test('resolveSession answers live visibility: a disabled workspace passes the request through', async (t) => {
@@ -380,13 +586,7 @@ test('hoisted deps: session end drops the receipt state registerHooks published'
 // ---------------------------------------------------------------------------
 
 test('real apply projects an apply-mode receipt through the host spill backend', async (t) => {
-  const spill = {
-    saved: [] as Any[],
-    async saveText(input: Any) {
-      spill.saved.push(input)
-      return { locator: '/spill/read-1.txt', retrievalHint: 'read it with offset/limit' }
-    },
-  }
+  const spill = recordingSpill()
   const a = await createAssembly({ spill })
   t.after(() => a.dispose())
 
@@ -410,4 +610,37 @@ test('real apply projects an apply-mode receipt through the host spill backend',
   assert.ok(Array.isArray(decision.content), 'the projected decision must replace content')
   const projected = decision.content[0].text as string
   assert.ok(projected.length < text.length, 'the projection must be shorter than the receipt')
+
+  const receipts = await receiptsOf(a)
+  const projection = receipts.find((receipt) => receipt.kind === 'projection')
+  assert.ok(projection, 'apply mode must write a projection receipt')
+  assert.equal(projection.estimate, 'chars/4', 'the fallback estimator must be labelled')
+})
+
+test('real apply prefers the host token meter and labels its receipt host', async (t) => {
+  const spill = recordingSpill()
+  const a = await createAssembly({
+    spill,
+    tokenMeter: {
+      estimateMessage(message: Any): number {
+        return Math.ceil(String(message.content[0].text).length / 4) + 8
+      },
+    },
+  })
+  t.after(() => a.dispose())
+
+  await a.setScope({ ...scopeDoc(1), projection: 'on' })
+  await agentRequest(a.host, 1, 0)
+  const text = `${'line of text\n'.repeat(2000)}END`
+  await a.host.callHook(
+    'tools/post-execute',
+    [{ name: 'read', callId: 'read-1', agent }, { content: [{ type: 'text', text }] }],
+    async () => ({ kind: 'accept' }),
+  )
+
+  assert.ok(a.state.tokenMeterCalls > 0, 'the host estimator must be preferred')
+  const receipts = await receiptsOf(a)
+  const projection = receipts.find((receipt) => receipt.kind === 'projection')
+  assert.ok(projection, 'apply mode must write a projection receipt')
+  assert.equal(projection.estimate, 'host', 'the host estimator must be labelled as such')
 })

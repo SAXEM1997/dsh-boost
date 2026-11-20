@@ -851,6 +851,7 @@ test('O12 越权会话（judgement 假）整条决策链都不跑', async () => 
   env.plans.set(SESSION, { goal: 'g', steps: [candidate('A', 'TRIGGER')] })
   await runPost(env.host, 'TRIGGER')
   assert.equal(env.queue.peek(SESSION), undefined)
-  assert.equal(env.receipts.length, 0)
+  assert.equal(env.receipts.length, 1)
+  assert.equal(env.receipts[0]?.code, 'skip:no-scope')
   assert.equal(estimated, 0)
 })
