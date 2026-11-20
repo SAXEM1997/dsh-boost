@@ -82,7 +82,7 @@ import { DEFAULT_CONFIG } from '../config.js'
 import { decide } from '../gate/decide.js'
 import { alreadySpilled, looksPruned } from '../gate/invalidate.js'
 import type { AnchorStore, ReceiptAnchors } from '../gate/invalidate.js'
-import type { Candidate, Plan } from '../gate/plan.js'
+import type { Candidate, Guard, Plan } from '../gate/plan.js'
 import { isPosixOnly } from '../host/platform.js'
 import type { ProjectionCounters } from '../projection/counters.js'
 import { PROTOCOL_NAME, PROTOCOL_ORDER, PROTOCOL_TEXT } from '../prompt/protocol.js'
@@ -442,6 +442,75 @@ function ledgerEntry(
     preview: previewOf(ctx.receipt.text),
     ...(ctx.exec.arguments !== undefined ? { args: ctx.exec.arguments } : {}),
     ...extra,
+  }
+}
+
+/**
+ * Caps on the plan evidence a substitution receipt carries.
+ *
+ * G2 (design line 71) requires the receipt to answer "why was the model not
+ * asked" with 计划、守卫、绑定、回执、节省量; without the plan and the guards an
+ * auditor sees what ran but not why it was legitimate. The plan is
+ * model-written text though, and a receipt is one line: 256 code points of
+ * goal (the same order as `preview`), at most 8 guards, and at most 300 code
+ * points per guard. A pathological plan therefore contributes ~2.7 KB at
+ * worst and never inflates the ledger. Truncation is always visible: the goal
+ * ends in `…`, an oversized guard becomes `{truncated_json: "…"}`, and
+ * `guards_total` is present whenever guards were left out.
+ */
+const MAX_RECEIPT_PLAN_CODE_POINTS = 256
+const MAX_RECEIPT_GUARDS = 8
+const MAX_RECEIPT_GUARD_CODE_POINTS = 300
+
+/** What a substitute, substitute-settled or shadow receipt adds about its plan. */
+export interface SubstitutionEvidence {
+  /** The plan's goal, capped to {@link MAX_RECEIPT_PLAN_CODE_POINTS}. */
+  plan: string
+  /** The committed candidate's guards, up to {@link MAX_RECEIPT_GUARDS}. */
+  guards: unknown[]
+  /** The plan's guard count, present only when `guards` was capped. */
+  guards_total?: number
+}
+
+/**
+ * A queued entry carrying the evidence the synth-time receipt needs.
+ *
+ * `PendingEntry` is the one object that travels from the commit (post-execute)
+ * to synthesis (llm-stream), so the evidence rides on it; the settle afterwards
+ * reads it back from the ledger pairing. The extra field is additive and never
+ * dispatched: `synthesizeTurn` reads `name`/`args` only.
+ */
+export type AuditedPendingEntry = PendingEntry & { evidence?: SubstitutionEvidence }
+
+/** Cap a string by code point so a surrogate pair is never split. */
+function capText(value: string, cap: number): string {
+  const points = Array.from(value)
+  if (points.length <= cap) return value
+  return `${points.slice(0, Math.max(0, cap - 1)).join('')}…`
+}
+
+/**
+ * The plan/goal and guard evidence for one committed candidate.
+ *
+ * Guards are carried as written while they fit. Only a guard whose own JSON
+ * exceeds {@link MAX_RECEIPT_GUARD_CODE_POINTS} (a multi-KB `text_contains`,
+ * say) is replaced by a `truncated_json` marker, so the array stays bounded
+ * without silently dropping the guard's form.
+ */
+export function substitutionEvidence(
+  goal: unknown,
+  guards: readonly Guard[],
+): SubstitutionEvidence {
+  const carried = guards.slice(0, MAX_RECEIPT_GUARDS).map((guard) => {
+    const json = JSON.stringify(guard) ?? ''
+    return Array.from(json).length <= MAX_RECEIPT_GUARD_CODE_POINTS
+      ? guard
+      : { truncated_json: capText(json, MAX_RECEIPT_GUARD_CODE_POINTS) }
+  })
+  return {
+    plan: capText(typeof goal === 'string' ? goal : '', MAX_RECEIPT_PLAN_CODE_POINTS),
+    guards: carried,
+    ...(guards.length > MAX_RECEIPT_GUARDS ? { guards_total: guards.length } : {}),
   }
 }
 
@@ -1281,6 +1350,8 @@ async function decideSubstitution(
         whitelisted: SUBSTITUTION_WHITELIST.has(candidate.tool),
         stepId: 'root',
         args: boundArgs,
+        // G2: the plan and the guards are why this candidate was legitimate.
+        ...substitutionEvidence(plan.goal, candidate.guards),
       }),
     )
     return
@@ -1315,7 +1386,7 @@ async function decideSubstitution(
   }
 
   const callId = callIdFor(ctx.sessionId, ctx.turn, step, candidateId)
-  const entry: PendingEntry = {
+  const entry: AuditedPendingEntry = {
     callId,
     candidateId,
     // The candidate's tool name identifies the call; the executable args are
@@ -1325,6 +1396,10 @@ async function decideSubstitution(
     turn: ctx.turn,
     step,
     createdAt: Date.now(),
+    // The plan is one-shot (cleared above), so the evidence must travel with
+    // the entry: the synth-time receipt is written after this turn's plan is
+    // gone, and the settled receipt only knows the candidate id.
+    evidence: substitutionEvidence(plan.goal, candidate.guards),
   }
   try {
     deps.queue.set(ctx.sessionId, entry)

@@ -7,9 +7,11 @@
  * `boost status` ("nothing projected"), so the operator could not tell "not
  * worth it" from "your tool is invisible to the mapper".
  *
- * The counter is deliberately cheap and bounded: one integer plus at most
+ * The counter is deliberately cheap and bounded: two integers plus at most
  * {@link MAX_TRACKED_TOOLS} names. It counts calls that reached the projection
- * stage with a text receipt and no family; it is not a per-tool ledger.
+ * stage with a text receipt and no family; it is not a per-tool ledger. The
+ * prompt-suppression count is the same shape, for the same reason: assembly
+ * runs on every request, so only a number may be kept.
  *
  * @module dsh-boost/projection/counters
  */
@@ -21,6 +23,7 @@ const MAX_TRACKED_TOOLS = 32
 export class ProjectionCounters {
   private unknownFamilyCount = 0
   private readonly unknownTools = new Map<string, number>()
+  private suppressedAssemblies = 0
 
   /**
    * Count one **decorated** call (`mcp__*`) whose family is not configured.
@@ -49,5 +52,23 @@ export class ProjectionCounters {
   /** The retained unmapped tool names and their call counts (a copy). */
   unknownToolCounts(): Record<string, number> {
     return Object.fromEntries(this.unknownTools)
+  }
+
+  /**
+   * Count one prompt assembly whose protocol section was suppressed.
+   *
+   * `systemPrompt` assembly runs on every request, so design §5.5:378 requires
+   * a count and forbids a per-assembly receipt. Without the count, `status`
+   * cannot distinguish the shipped `selected + []` (correctly inert) from an
+   * assembly whose section failed to inject — the exact "inert looks identical
+   * to broken" failure the operator has no other signal for.
+   */
+  protocolSuppressed(): void {
+    this.suppressedAssemblies += 1
+  }
+
+  /** Prompt assemblies suppressed since load; read live by `boost status`. */
+  protocolSuppressions(): number {
+    return this.suppressedAssemblies
   }
 }

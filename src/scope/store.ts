@@ -364,6 +364,13 @@ export class ScopeStore {
    * writers can still judge the same lock stale; `releaseLock` only removes a
    * lock whose content it wrote, and the CAS revision check still refuses to
    * merge divergent writes, so the residual race cannot corrupt the document.
+   *
+   * When that first read finds **no** lock there is nothing to compare against,
+   * so the reclaim is refused with `ERR_SCOPE_LOCKED`. `createLock` already saw
+   * the file exist; a lock created between that failure and the read is
+   * indistinguishable from one a live writer still owns, and unlinking it
+   * would lose that writer's update. Refusing is safe (the caller retries) and
+   * the alternative is the one case the changed-lock guard cannot cover.
    */
   private async acquireLock(): Promise<void> {
     if (await this.createLock()) return
@@ -371,6 +378,12 @@ export class ScopeStore {
     const decision = this.classifyLock(first)
     if (decision === 'held') {
       throw scopeError(ERR_SCOPE_LOCKED, `${this.lockFile} is held by another writer`)
+    }
+    if (decision === 'missing') {
+      throw scopeError(
+        ERR_SCOPE_LOCKED,
+        `${this.lockFile} existed for createLock but vanished before it could be inspected; another writer may hold it now`,
+      )
     }
     if (decision === 'takeover') {
       this.warn(

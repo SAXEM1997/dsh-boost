@@ -130,7 +130,7 @@ import { parsePlan } from '../gate/plan.js'
 import { TurnClock } from './clock.js'
 import { synthesizeTurn } from './synthesize.js'
 import type { PendingEntry } from './pending.js'
-import type { HookDeps } from './post-execute.js'
+import type { AuditedPendingEntry, HookDeps, SubstitutionEvidence } from './post-execute.js'
 import {
   appendReceipt,
   callPreview,
@@ -140,7 +140,6 @@ import {
   clockTurnOf,
   peekPending,
 } from './session-state.js'
-import type { ReceiptInput } from './session-state.js'
 
 /** Which external rewrite invalidated a decision. */
 type ResetCode = 'pruned-reset' | 'compaction-reset'
@@ -612,7 +611,8 @@ function passPlan(
  *
  * `markSubstituted` has no unmark: a mark left behind by an abandoned entry
  * would make the next real request settle a substitution that never ran
- * (obligation 5). `settle()` here is the discard, not a measurement.
+ * (obligation 5). `settle()` here is the discard, not a measurement. The parked
+ * plan evidence goes with the mark: nothing will ever write its receipt.
  */
 function settleDiscarded(deps: HookDeps, sessionId: string): void {
   try {
@@ -620,6 +620,41 @@ function settleDiscarded(deps: HookDeps, sessionId: string): void {
   } catch {
     // A foreign ledger can only cost a measurement.
   }
+  forgetEvidence(deps, sessionId)
+}
+
+/**
+ * Plan/guards evidence parked between synthesis and settlement.
+ *
+ * The settled receipt is written at the first real request after the
+ * synthesized turn, when the queue entry is already gone; the synth-time
+ * receipt has it from the entry, this park hands it to the settle. Keyed by
+ * `HookDeps` first so two plugin instances in one process cannot read each
+ * other's session, and a `WeakMap` lets the whole map die with the assembly.
+ */
+const PENDING_EVIDENCE = new WeakMap<HookDeps, Map<string, SubstitutionEvidence>>()
+
+/** Park the evidence for the session's next settlement, replacing any earlier. */
+function rememberEvidence(deps: HookDeps, sessionId: string, evidence: SubstitutionEvidence): void {
+  let bySession = PENDING_EVIDENCE.get(deps)
+  if (bySession === undefined) {
+    bySession = new Map()
+    PENDING_EVIDENCE.set(deps, bySession)
+  }
+  bySession.set(sessionId, evidence)
+}
+
+/** Take (and forget) the evidence one settlement consumes. */
+function takeEvidence(deps: HookDeps, sessionId: string): SubstitutionEvidence | undefined {
+  const bySession = PENDING_EVIDENCE.get(deps)
+  const evidence = bySession?.get(sessionId)
+  bySession?.delete(sessionId)
+  return evidence
+}
+
+/** Drop evidence that no settlement will ever consume. */
+function forgetEvidence(deps: HookDeps, sessionId: string): void {
+  PENDING_EVIDENCE.get(deps)?.delete(sessionId)
 }
 
 /** Record the synthesis mark for the session's pairing. */
@@ -637,6 +672,7 @@ async function appendSubstituteReceipt(
   sessionId: string,
   entry: PendingEntry,
 ): Promise<void> {
+  const evidence = (entry as AuditedPendingEntry).evidence
   await appendReceipt(deps, {
     version: 1,
     ts: new Date().toISOString(),
@@ -648,6 +684,9 @@ async function appendSubstituteReceipt(
     tool: entry.name,
     callId: entry.callId,
     candidateId: entry.candidateId,
+    // G2: the plan the decision came from and the guards that qualified the
+    // candidate, capped by `substitutionEvidence` before they reach the line.
+    ...(evidence === undefined ? {} : evidence),
     // The synthesized call has no tool result yet; its name and bound args are
     // the evidence for why this turn asked for it.
     args: entry.args,
@@ -684,6 +723,9 @@ async function settlePendingMark(deps: HookDeps, sessionId: string): Promise<voi
     kind: 'substitute-settled',
     code: 'substitute-settled',
     candidateId,
+    // G2 applies to the settled line too: the goal and guards are the same
+    // evidence the synth-time line carried, parked when that line was written.
+    ...(takeEvidence(deps, sessionId) ?? {}),
     saved_input_tokens: settled.saved_input_tokens,
     cache_hit_delta: settled.cache_hit_delta,
     output_tokens: settled.output_tokens,
@@ -813,6 +855,10 @@ async function* synthesizeBranch(
   }
 
   markSubstitutedFor(deps, sessionId, current.candidateId)
+  // Park the plan evidence for the settled line, which runs at the next real
+  // request after this entry has left the queue.
+  const evidence = (current as AuditedPendingEntry).evidence
+  if (evidence !== undefined) rememberEvidence(deps, sessionId, evidence)
   await appendSubstituteReceipt(deps, sessionId, current)
   yield* synthesizeTurn(current)
 }

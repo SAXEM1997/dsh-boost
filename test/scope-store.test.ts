@@ -498,3 +498,33 @@ test('I8: an old lock with a dead pid is still reclaimed before the takeover win
   const s = new ScopeStore(dir, { lockTakeoverMs: 120_000 })
   assert.equal((await s.write(d => d, 0)).revision, 1)
 })
+
+test('I8: a lock the first read found absent is reported LOCKED, not unlinked', async () => {
+  const dir = await tempDir()
+  const lock = join(dir, 'scope.lock')
+  // `createLock` below must fail with EEXIST, so a writer's lock is present.
+  await writeFile(lock, JSON.stringify({ pid: 999999, startedAt: Date.now() - 61_000 }))
+  await utimes(lock, STALE_LOCK_AT, STALE_LOCK_AT)
+
+  const s = new ScopeStore(dir, { warn: () => {} })
+  // Reproduce the interleaving deterministically: the stale lock is released
+  // after `createLock` saw EEXIST, and another writer installs its own lock
+  // before the re-read. The first observation is therefore missing.
+  const internals = s as unknown as {
+    readLock: () => { text: string; mtimeMs: number } | undefined
+  }
+  const realReadLock = internals.readLock.bind(s)
+  const concurrent = JSON.stringify({ pid: process.pid, startedAt: Date.now() })
+  let reads = 0
+  internals.readLock = () => {
+    reads += 1
+    if (reads !== 1) return realReadLock()
+    writeFileSync(lock, concurrent)
+    return undefined
+  }
+
+  await assert.rejects(() => s.write(d => d, 0), /ERR_SCOPE_LOCKED/)
+  assert.equal(reads, 1, 'with no first observation there is nothing safe to compare')
+  assert.equal(existsSync(lock), true, 'the concurrent writer’s lock must survive')
+  assert.equal(await readFile(lock, 'utf8'), concurrent)
+})

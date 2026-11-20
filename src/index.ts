@@ -139,26 +139,38 @@ function sessionIdOf(value: unknown): string | undefined {
  * The receipt label is `host` so the number is never mistaken for a provider
  * measurement; the only other label would be a fabricated `chars/4` fallback,
  * which this assembly deliberately does not implement.
+ *
+ * Memoisation covers the *binding*, not the answer. `kind()` probes the
+ * memoised estimator on every call, because a meter that answered once is not
+ * a meter forever: after it starts returning `NaN`, projection receipts already
+ * record `estimate:'unknown'` for that assembly, and a cached `host` label
+ * would contradict them in the same `boost status` output.
  */
+const METER_PROBE = 'dsh-boost meter probe'
+
 function meterSeamOf(ctx: PluginContext): {
   estimate(): ((text: string) => number) | undefined
   kind(): 'host' | 'unknown'
 } {
   let estimator: ((text: string) => number) | undefined
+  /** One probe through a raw host estimator; a throw or non-number is failure. */
+  const probe = (estimate: (message: unknown) => number): boolean => {
+    try {
+      const value = estimate({
+        role: 'user',
+        content: [{ type: 'text', text: METER_PROBE }],
+      })
+      return typeof value === 'number' && Number.isFinite(value)
+    } catch {
+      return false
+    }
+  }
   const resolve = (): ((text: string) => number) | undefined => {
     if (estimator !== undefined) return estimator
     const meter = serviceOf<{ estimateMessage?: (message: unknown) => number }>(ctx, 'tokenMeter')
     if (meter === undefined || typeof meter.estimateMessage !== 'function') return undefined
     const estimate = meter.estimateMessage.bind(meter)
-    try {
-      const probe = estimate({
-        role: 'user',
-        content: [{ type: 'text', text: 'dsh-boost meter probe' }],
-      })
-      if (typeof probe !== 'number' || !Number.isFinite(probe)) return undefined
-    } catch {
-      return undefined
-    }
+    if (!probe(estimate)) return undefined
     estimator = (text: string): number => {
       try {
         const value = estimate({ role: 'user', content: [{ type: 'text', text }] })
@@ -171,7 +183,14 @@ function meterSeamOf(ctx: PluginContext): {
   }
   return {
     estimate: resolve,
-    kind: () => (resolve() === undefined ? 'unknown' : 'host'),
+    kind: () => {
+      const estimate = resolve()
+      if (estimate === undefined) return 'unknown'
+      // Probe through the memoised wrapper, so the label prices the same
+      // pipeline every receipt uses. `resolve()` alone cannot answer: it
+      // returns a cached binding even after the meter stopped answering.
+      return Number.isFinite(estimate(METER_PROBE)) ? 'host' : 'unknown'
+    },
   }
 }
 
@@ -332,6 +351,7 @@ function wireSessionEvents(
   horizon: RuntimeStepHorizon,
   workspaces: Map<string, string>,
   routes: Map<string, SelectorRoute>,
+  counters: ProjectionCounters,
 ): void {
   /** Session ids seen at `agent/pre-step`; a `llm/stream` without a request is drift. */
   const preStepSeen = new Set<string>()
@@ -345,8 +365,19 @@ function wireSessionEvents(
       const carrier = (context ?? {}) as { agent?: unknown; scope?: unknown }
       const agent = carrier.agent ?? carrier.scope
       const sessionId = sessionIdOf(agent)
-      if (sessionId === undefined) return resolved
+      if (sessionId === undefined) {
+        // No agent/scope is the documented no-scope view: the provider has
+        // nothing to key the judgement on and returns '', so this assembly
+        // suppresses the section. Count the decision, not the section's
+        // presence — design §5.5:378 asks for every assembly to be judged.
+        counters.protocolSuppressed()
+        return resolved
+      }
       const visible = await warmVisibility(scope, registry, agent, sessionId, workspaces)
+      // Same rule for an invisible workspace: the section is suppressed for
+      // this assembly, so the operator gets a live signal in `boost status`.
+      // A visible one never increments, so the count stays a failure count.
+      if (!visible) counters.protocolSuppressed()
       return patchProtocolSection(resolved, visible)
     } catch {
       return resolved
@@ -484,19 +515,16 @@ function wireSessionEvents(
  * Without step-level `when` a conditional registration would silently become
  * unconditional, so the whole family is skipped and the stable code is logged.
  */
-function registerBoostTool(
-  ctx: PluginContext,
-  deps: BoostDeps,
-  registry: () => WorkspaceRegistry | undefined,
-): void {
+function registerBoostTool(ctx: PluginContext, deps: BoostDeps): void {
   if (!supportsStepWhen(ctx.tools)) {
     ctx.logger?.warn?.('ERR_HOST_NO_STEP_WHEN')
     return
   }
   // Annotating with the host's ToolDefinition makes a host-side tightening a
-  // build error instead of a runtime registration failure.
+  // build error instead of a runtime registration failure. The tool is
+  // scope-exempt by design (`when: () => true`), so it needs no registry: the
+  // registry is only the visibility warm's input, wired above.
   const definition: ToolDefinition = boostTool(deps)
-  const execute = definition.execute as (args: unknown, exec: unknown) => Promise<unknown>
 
   ctx.tools.register(definition, { when: () => true })
 }
@@ -614,7 +642,7 @@ export function apply(ctx: PluginContext, config: unknown): void {
     // The clock/visibility warm and the session-end cleanup. Wired separately
     // so a host that cannot accept these events still gets the tool below.
     try {
-      wireSessionEvents(ctx, deps, scope, registry, sessions, horizon, workspaces, routes)
+      wireSessionEvents(ctx, deps, scope, registry, sessions, horizon, workspaces, routes, projectionCounters)
     } catch (error) {
       ctx.logger?.warn?.(`dsh-boost: session wiring failed: ${messageOf(error)}`)
     }
@@ -641,8 +669,8 @@ export function apply(ctx: PluginContext, config: unknown): void {
         locatorEvictions: () => retrievals.evictions(),
         unknownFamilies: () => projectionCounters.unknownFamilies(),
         unknownTools: () => projectionCounters.unknownToolCounts(),
+        protocolSuppressed: () => projectionCounters.protocolSuppressions(),
       },
-      registry,
     )
   } catch (error) {
     // A second apply fails on the duplicate prompt section first (registerHooks

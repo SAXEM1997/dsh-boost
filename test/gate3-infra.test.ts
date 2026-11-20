@@ -403,3 +403,44 @@ test('minor: apply logs the resolved configuration once', async () => {
   assert.equal(lines.length, 1, JSON.stringify(app.infos))
   assert.match(lines[0], /"stepsPerTurn":4/)
 })
+
+// ---------------------------------------------------------------------------
+// Review: one definition of the workspace-registry code, where status reads it.
+// ---------------------------------------------------------------------------
+
+test('ERR_HOST_NO_WORKSPACE_REGISTRY is not also exported from the resolver', async () => {
+  const resolve = await import('../src/scope/resolve.ts')
+  assert.equal(
+    'ERR_HOST_NO_WORKSPACE_REGISTRY' in resolve,
+    false,
+    'resolve.ts exported a copy nothing imported; the control tool owns the definition',
+  )
+})
+
+// ---------------------------------------------------------------------------
+// Design §5.5:378 / §11: the prompt path's suppression is countable, not silent.
+// ---------------------------------------------------------------------------
+
+test('status counts suppressed prompt assemblies, live, without per-assembly receipts', async () => {
+  const app = await applyHost() // no registry, default scope: correctly inert
+  const agent = makeAgent()
+  const before = await status(app.host)
+  assert.equal(before.protocol_suppressed, 0)
+
+  const first = await assemblePrompt(app.host, agent)
+  assert.equal(sectionText(first), '', 'the shipped default scope injects nothing')
+  assert.equal((await status(app.host)).protocol_suppressed, 1)
+
+  await assemblePrompt(app.host, agent)
+  assert.equal((await status(app.host)).protocol_suppressed, 2, 'the counter is live')
+
+  // Assembly runs on every request: counting must not write a receipt per turn.
+  assert.deepEqual(await receiptCodes(app.root, 's1'), [])
+
+  // A visible workspace injects the section and must not increment the count.
+  await new ScopeStore(app.root).write(doc => ({ ...doc, mode: 'global' }), 0)
+  app.services.set('workspaceRegistry', GLOBAL_REGISTRY)
+  const visible = await assemblePrompt(app.host, makeAgent('s1', '/real/w/a'))
+  assert.match(sectionText(visible), /<CHISEL_PLAN>/)
+  assert.equal((await status(app.host)).protocol_suppressed, 2)
+})

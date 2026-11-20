@@ -186,13 +186,3 @@ export async function resolveVisible(
 export function supportsStepWhen(tools: { resolve?: unknown } | undefined | null): boolean {
   return typeof tools?.resolve === 'function'
 }
-
-/**
- * Stable code `boost status` reports when no workspace registry is reachable.
- *
- * Without the registry no cwd can map to a workspace id, so every session is
- * invisible and the plugin is silently inert. The assembly decorates `status`
- * with this code because the status formatter lives in the control tool, not in
- * the host-fact probe.
- */
-export const ERR_HOST_NO_WORKSPACE_REGISTRY = 'ERR_HOST_NO_WORKSPACE_REGISTRY'

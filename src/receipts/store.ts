@@ -424,15 +424,25 @@ export class ReceiptStore {
    * Forget one session's shard state and silence later receipts for it.
    *
    * Called from the plugin's `session/disposed` handler after `flush()`. It
-   * evicts the cached counters, drops any buffered lines for that session and
-   * remembers the id (bounded FIFO) so a hook that lands after disposal records
-   * nothing instead of recreating state nothing will ever clear.
+   * evicts the cached counters, forgets any buffered lines for that session
+   * **only when no write failure is outstanding**, and remembers the id
+   * (bounded FIFO) so a hook that lands after disposal records nothing instead
+   * of recreating state nothing will ever clear.
+   *
+   * The conditional drop is the "flush before eviction" promise: a successful
+   * flush has already drained `pending`, so the loop is a no-op; a failed one
+   * leaves the session's lines there, and they are the only copy of that
+   * evidence. They stay queued for the next flush — the buffer is bounded by
+   * {@link MAX_PENDING_LINES} and is emptied once {@link stopped} is reached,
+   * so retaining them cannot grow without limit.
    */
   disposeSession(sessionId: string): void {
     this.states.delete(sessionId)
     this.dirty.delete(sessionId)
-    for (let i = this.pending.length - 1; i >= 0; i -= 1) {
-      if (this.pending[i]?.sessionId === sessionId) this.pending.splice(i, 1)
+    if (this.failureCount === 0) {
+      for (let i = this.pending.length - 1; i >= 0; i -= 1) {
+        if (this.pending[i]?.sessionId === sessionId) this.pending.splice(i, 1)
+      }
     }
     if (this.disposed.has(sessionId)) return
     this.disposed.add(sessionId)

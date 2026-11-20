@@ -335,3 +335,32 @@ test('I7: once stopped() the pending buffer is dropped instead of growing unboun
   assert.deepEqual(pending, [])
   assert.equal(s.failures(), 25)
 })
+
+test('I7: a failed flush keeps the session’s buffered lines for a later flush', async () => {
+  const root = await freshRoot()
+  const blocker = join(root, 'receipts')
+  await writeFile(blocker, 'not a directory')
+  const s = new ReceiptStore(root)
+
+  await s.append(rec('a', { turn: 0 }))
+  await s.flush()
+  assert.equal(s.failures() > 0, true, 'the flush must fail on this root')
+  assert.equal(
+    (s as unknown as { pending: unknown[] }).pending.length,
+    1,
+    'the failed flush leaves the line buffered',
+  )
+
+  // Disposal after the failed flush must not destroy the evidence the flush
+  // promised to keep: the buffer is bounded and is dropped once stopped().
+  s.disposeSession('a')
+  assert.equal(
+    (s as unknown as { pending: unknown[] }).pending.length,
+    1,
+    'a failed flush must not be finished by eviction',
+  )
+
+  await unlink(blocker)
+  await s.flush()
+  assert.equal(await s.count('a'), 1, 'the retained line is written once the disk recovers')
+})

@@ -174,6 +174,15 @@ export interface BoostDeps {
   unknownFamilies?: () => number
   /** Retained unmapped tool names; status-time read. */
   unknownTools?: () => Record<string, number>
+  /**
+   * Prompt assemblies whose protocol section was suppressed; status-time read.
+   *
+   * The prompt path is the one mount that acts on every request, so design
+   * §5.5:378 makes it a count rather than a receipt. It is exposed because the
+   * shipped default scope is *correctly* inert: with no counter, "nothing
+   * configured" and "assembly failed" look identical from `status`.
+   */
+  protocolSuppressed?: () => number
 }
 
 /** The scope document's caller-writable fields. Everything else is store-owned. */
@@ -303,6 +312,15 @@ export interface BoostStatus {
   projection_unknown_families: number
   /** Retained unmapped tool names (at most 32), for mapper-gap diagnosis. */
   projection_unknown_tools: Record<string, number>
+  /**
+   * Prompt assemblies whose protocol section was suppressed.
+   *
+   * Counted, never receipted, because assembly runs on every request (design
+   * §5.5:378). A live, monotonically increasing number is the only evidence
+   * that the inert-looking default is "no workspace configured" rather than a
+   * section that failed to inject.
+   */
+  protocol_suppressed: number
   /**
    * Whether the receipt store stopped accepting writes (fail-closed).
    *
@@ -643,6 +661,7 @@ async function statusCommand(deps: BoostDeps): Promise<BoostResult> {
     projection_locator_evictions: counterOf(deps.locatorEvictions),
     projection_unknown_families: counterOf(deps.unknownFamilies),
     projection_unknown_tools: toolCountsOf(deps.unknownTools),
+    protocol_suppressed: counterOf(deps.protocolSuppressed),
     receipts_stopped: receiptsStopped(deps.receipts),
     hasWorkspaceRegistry: deps.host?.hasWorkspaceRegistry,
   }

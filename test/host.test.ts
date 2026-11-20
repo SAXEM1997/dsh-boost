@@ -673,7 +673,11 @@ test('a meter that breaks after the startup probe is refused at the decision', a
   await agentRequest(a.host)
 
   const before = await a.status()
-  assert.equal(before.data.estimate_kind, 'host', 'the startup probe saw a working meter')
+  assert.equal(
+    before.data.estimate_kind,
+    'unknown',
+    'status must re-probe: the meter is broken now, not when it was first resolved',
+  )
 
   const plan = {
     goal: 'g',
@@ -691,6 +695,139 @@ test('a meter that breaks after the startup probe is refused at the decision', a
     receipts.some((receipt) => receipt.kind === 'substitute' || receipt.kind === 'substitute-settled'),
     false,
   )
+})
+
+test('estimate_kind re-probes the memoised estimator instead of keeping its first answer', async (t) => {
+  const meter = {
+    healthy: true,
+    estimateMessage(): number {
+      return meter.healthy ? 10 : Number.NaN
+    },
+  }
+  const a = await createAssembly({ spill: recordingSpill(), tokenMeter: meter })
+  t.after(() => a.dispose())
+
+  const healthy = await a.status()
+  assert.equal(healthy.data.estimate_kind, 'host')
+
+  // The same service now answers NaN. Projection receipts describe that
+  // assembly as `estimate:'unknown'`; the status label must not disagree.
+  meter.healthy = false
+  const broken = await a.status()
+  assert.equal(broken.data.estimate_kind, 'unknown')
+  assert.ok(
+    broken.data.degraded.includes('ERR_HOST_NO_TOKENMETER'),
+    `a meter that stopped answering must be visible: ${JSON.stringify(broken.data.degraded)}`,
+  )
+
+  // A live probe also recovers: the label is not sticky in either direction.
+  meter.healthy = true
+  const recovered = await a.status()
+  assert.equal(recovered.data.estimate_kind, 'host')
+})
+
+// ---------------------------------------------------------------------------
+// G2 (design line 71): a receipt must answer "why was the model not asked".
+// ---------------------------------------------------------------------------
+
+test('G2: the shadow receipt carries the plan goal and guards, bounded', async (t) => {
+  const a = await createAssembly({
+    spill: recordingSpill(),
+    tokenMeter,
+    scope: scopeDoc({ shadow: true }),
+  })
+  t.after(() => a.dispose())
+  await agentRequest(a.host)
+
+  const goal = `plan-goal:${'g'.repeat(4_000)}`
+  const guards = [
+    { text_not_contains: 'z'.repeat(4_000) },
+    ...Array.from({ length: 29 }, () => ({ text_contains: 'ROOT' })),
+  ]
+  const plan = { goal, steps: [{ id: 'A', tool: 'read', args: { file_path: '/a' }, guards }] }
+  a.setChunks([{ type: 'text-delta', index: 0, text: `<CHISEL_PLAN>${JSON.stringify(plan)}</CHISEL_PLAN>` }])
+  await collect(a.host.stream(SESSION, {}))
+
+  await postExecute(a.host, { text: 'ROOT-RECEIPT', arguments: { path: '/a' } })
+
+  const receipts = await a.receipts()
+  const shadow = receipts.find((receipt) => receipt.kind === 'shadow' && receipt.code === 'ok')
+  assert.ok(shadow, `the shadow commit must be recorded: ${JSON.stringify(receipts)}`)
+
+  // Goal: 256 code points including the truncation marker, and a prefix of the
+  // real goal so an auditor can still recognise the plan.
+  assert.equal(Array.from(shadow.plan).length, 256)
+  assert.equal(shadow.plan.endsWith('…'), true)
+  assert.equal(goal.startsWith(shadow.plan.slice(0, -1)), true)
+
+  // Guards: the array is capped at 8 and says how many the plan had; the
+  // multi-KB guard is carried as a marker, the ordinary ones verbatim.
+  assert.equal(shadow.guards.length, 8)
+  assert.equal(shadow.guards_total, 30)
+  assert.deepEqual(shadow.guards[1], { text_contains: 'ROOT' })
+  assert.deepEqual(Object.keys(shadow.guards[0]), ['truncated_json'])
+
+  const line = JSON.stringify(shadow)
+  assert.ok(line.length < 4_096, `a pathological plan inflated the receipt line to ${line.length}`)
+})
+
+test('G2: substitute and substitute-settled carry the same plan and guards', async (t) => {
+  const a = await createAssembly({ spill: recordingSpill(), tokenMeter })
+  t.after(() => a.dispose())
+  await agentRequest(a.host)
+
+  const plan = {
+    goal: 'why this next call',
+    steps: [
+      {
+        id: 'A',
+        tool: 'read',
+        args: { file_path: { $public: { after: 'root', field: '$scalar' } } },
+        guards: [{ text_contains: 'ROOT' }],
+      },
+    ],
+  }
+  a.setChunks([{ type: 'text-delta', index: 0, text: `<CHISEL_PLAN>${JSON.stringify(plan)}</CHISEL_PLAN>` }])
+  await collect(a.host.stream(SESSION, {}))
+
+  await postExecute(a.host, { text: 'ROOT-RECEIPT', arguments: { path: '/a' } })
+
+  a.setChunks([])
+  a.host.nextCalls = 0
+  const synthesized = await collect(
+    a.host.stream(SESSION, {
+      messages: [{ role: 'tool', content: [{ type: 'text', text: 'ROOT-RECEIPT' }] }],
+    }),
+  )
+  const delta = synthesized.find((chunk) => chunk.type === 'tool-call-delta')
+  assert.ok(delta, 'the committed substitution must synthesize a call')
+  assert.equal(a.host.nextCalls, 0)
+
+  // The host dispatches what it saw; the execute hook clears the pending entry
+  // so the following real request can settle instead of abandoning at rollover.
+  await a.host.callHook(
+    'tools/execute',
+    [{ name: 'read', arguments: { file_path: 'ROOT-RECEIPT' }, callId: delta.id, agent }],
+    async () => ({ ok: true }),
+  )
+
+  let receipts = await a.receipts()
+  const substitute = receipts.find((receipt) => receipt.kind === 'substitute')
+  assert.ok(substitute, JSON.stringify(receipts))
+  assert.equal(substitute.plan, 'why this next call')
+  assert.deepEqual(substitute.guards, [{ text_contains: 'ROOT' }])
+
+  a.setChunks([
+    { type: 'usage', usage: { inputTokens: 10, cacheReadTokens: 2, outputTokens: 1 } },
+    { type: 'finish', reason: { kind: 'stop' } },
+  ])
+  await collect(a.host.stream(SESSION, { messages: [{ role: 'tool', content: [{ type: 'text', text: 'ROOT-RECEIPT' }] }] }))
+
+  receipts = await a.receipts()
+  const settled = receipts.find((receipt) => receipt.kind === 'substitute-settled')
+  assert.ok(settled, 'the next real request settles the substitution')
+  assert.equal(settled.plan, 'why this next call')
+  assert.deepEqual(settled.guards, [{ text_contains: 'ROOT' }])
 })
 
 // ---------------------------------------------------------------------------
