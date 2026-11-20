@@ -450,7 +450,7 @@ v1 的裁决组合：
 | 抽样复核 | 每天抽 10 条放行记录人工看 | 语义上对不对 |
 | 20 任务回归门（**未交付，由操作方提供**） | 清单 `test/regression/tasks.jsonl` 双跑；**pass ⇔（两轮都完成且 `isError=false` 的任务数 ≥ 19）∧（每条被投影的回执都能用页脚 locator 取回，且取回字节数 = 页脚 `count` + 保留窗口字节数）** | 有没有灾难性回退；后半句即"无数据丢失"的可执行定义。**当前状态：`test/regression/` 只有 `.gitkeep`，清单与双跑脚本均未交付；后半句（取回完整性不变量）在全套测试中无任何覆盖，目前未验证。** 裁决（2026-11-18，m00234）：不搭回放集，20 任务门只作冒烟——清单与脚本由操作方在发布前自备 |
 | 会话统计 | 相对 300 会话基线的 token 分布（按会话长度分层） | 省了多少 |
-| 固定开销预算 | 计划段 + `boost` 工具 schema 的每请求开销 ≤ 800 token；插件加载时用 `estimateSystemMessage` / `estimateToolsTokens`（`@deepseek-ai/dsh-token-meter/estimate`，**`await import(...)` 包 try/catch**）测一次，`boost status` 惰性 await 同一次测量——测量从不在请求路径上；没有 `chars/4` 回退（`estimate: 'unknown'` 比错数字有用）。实测 **772 / 800**（计划段 379 + schema 393），写进 `boost status` | A4 的固定成本是否失控 |
+| 固定开销预算 | 计划段 + `boost` 工具 schema 的每请求开销 ≤ 800 token；插件加载时用 `estimateSystemMessage` / `estimateToolsTokens`（`@deepseek-ai/dsh-token-meter/estimate`，**`await import(...)` 包 try/catch**）测一次，`boost status` 惰性 await 同一次测量——测量从不在请求路径上；没有 `chars/4` 回退（`estimate: 'unknown'` 比错数字有用）。实测 **778 / 800**（计划段 379 + schema 399；2026-11-20 复测，余量 22 token），写进 `boost status` | A4 的固定成本是否失控 |
 | 分桶净节省 | 按会话步数分桶：**≤5 / 6–50 / ≥51** 步，分别报净节省率；**短会话桶另用随机抽 300 个会话**（基线 top-300 里 ≤5 步会话为 0 个）；**样本 < 20 个会话的桶不出数** | 裁决 A4：短会话是否被长会话摊薄。**v1 未实现**：仓库内没有任何脚本产出分桶净节省。影子周结束后由 `scripts/shadow-report.mjs` 的聚合输出取代这一行——它给出影子周的总体净节省率，若需要分桶，再扩展该脚本按会话步数拆分 |
 
 **A4 是聚合口径**，不是单会话口径：长会话摊薄固定开销，短会话可能倒亏。v1 的分桶行未实现（见上表标注）；影子周的总体净节省率由 `scripts/shadow-report.mjs` 产出，作为 v1 对 A4 的实际裁决依据。若影子周数据显示短会话与长会话的净节省率差异显著，再实现分桶拆分。top-300 基线里没有 ≤5 步会话，必须换随机样本才能填满短会话桶；随机样本只用于 A4，不替换 G1 的 top-300 基线。
@@ -548,52 +548,18 @@ dsh-boost/
 └── docs/                # 设计稿、研究
 ```
 
-`package.json` 要点：
+`package.json` 的权威版本是仓库里那个文件，本节不再复制一份——复制品每次修复后都会过期，而维护者会照抄设计稿（2026-11-20 的复审查出 §11 当时正是这样过期的）。以下只记**读代码读不出来的决定**：
 
-```json
-{
-  "name": "dsh-boost",
-  "version": "0.1.0",
-  "description": "Cut DSH token usage by projecting tool receipts and skipping deterministic read-only calls",
-  "type": "module",
-  "license": "Apache-2.0",
-  "repository": { "type": "git", "url": "git+https://github.com/SAXEM1997/dsh-boost.git" },
-  "keywords": ["dsh", "dsh-plugin", "token-efficiency", "prompt-cache", "tool-receipt", "delegation"],
-  "main": "./dist/index.js",
-  "types": "./dist/index.d.ts",
-  "exports": { ".": { "types": "./dist/index.d.ts", "import": "./dist/index.js" } },
-  "scripts": {
-    "build": "tsc -p tsconfig.json",
-    "stats": "node scripts/session-stats.mjs",
-    "prepublishOnly": "npm run build && npm pack --dry-run && test -f dist/index.js && test -f dist/index.d.ts"
-  },
-  "devDependencies": {
-    "typescript": "^5.6.0",
-    "@deepseek-ai/dsh-llm": "0.2.2-rc.4",
-    "@deepseek-ai/dsh-tools": "0.2.2-rc.4",
-    "@deepseek-ai/dsh-spill-policy": "0.2.2-rc.4",
-    "@deepseek-ai/dsh-token-meter": "0.2.2-rc.4"
-  },
-  "peerDependencies": {
-    "@deepseek-ai/dsh-llm": ">=0.2.2-rc.1 <0.3.0-0",
-    "@deepseek-ai/dsh-tools": ">=0.2.2-rc.1 <0.3.0-0",
-    "@deepseek-ai/dsh-spill-policy": ">=0.2.2-rc.1 <0.3.0-0",
-    "@deepseek-ai/dsh-token-meter": ">=0.2.2-rc.1 <0.3.0-0"
-  },
-  "peerDependenciesMeta": {
-    "@deepseek-ai/dsh-spill-policy": { "optional": true },
-    "@deepseek-ai/dsh-token-meter": { "optional": true }
-  },
-  "publishConfig": { "access": "public" },
-  "engines": { "node": ">=22.18.0", "dsh": ">=0.2.2-rc.1 <0.3.0-0" },
-  "dsh": { "bundle": { "patch": "./cordis.patch.yml" } },
-  "files": ["dist", "src", "locale", "cordis.patch.yml", "README.md", "README.en.md", "LICENSE", "NOTICE"]
-}
-```
+- **不声明任何 `peerDependencies`**（2026-11-20 起，提交 `0567347`）。四个 `@deepseek-ai/*` 包只出现在精确钉版本的 `devDependencies` 里；`dsh-llm` / `dsh-tools` 是 type-only import，`estimate` 与 spill 通知是运行期从宿主树解析的动态 import。声明 peer 会让 npm 11 即使标 `optional` 也装一份副本，凭空造出双宿主树（验收：空项目裸装只增 1 个包 / 约 1.4 MB，此前是 20 个 / 约 15 MB）。代价是**版本兼容性只剩散文**，所以 `RELEASE.md` §2.1 的矩阵必须跟着 `engines.dsh` 一起改。
+- `files` **不含 `src/`**：装出来的包只有 `dist`，源码只在 checkout 里，构建与统计都是 checkout-only。
+- `exports` 同时给 `import` 与 `require`（缺 `require` 时 `require('dsh-boost')` 报 `ERR_PACKAGE_PATH_NOT_EXPORTED`）。
+- 发布门是 `prepublishOnly = npm run ci && npm run verify:package`，不是 `npm pack --dry-run && test -f …`（后者无法失败，见 2026-11-20 复审行 4/5）。`prepare` 负责构建，`prepack` 已废除。
+- `publishConfig.registry` 指向 npmjs，而 `.npmrc` 声明内网镜像——安装来源与发布目标是两件事。
+- `engines.node` 为 `>=24.9.0`（不是 22.18）：测试与脚本用了 24 的内建能力。
 
 - **`version` 不能省**：缺 `version` 时 `npm pack` 直接报 `Invalid package, must have name and version`，发布链在第一步就断。`description` / `repository` / `keywords` 同理是 npm 页面与检索的最低要求；owner 沿用同作者的 `dsh-cherry-bridge` 命名空间。
-- **仓库双址**：公开主仓是 `github.com/SAXEM1997/dsh-boost`，`repository` 字段指向它；**开发期先推内网镜像** `https://gitlab.ai.isv.iridesc.cn:23000/zyx/dsh-boost`（私有），代码稳定后再同步公开。因此 `origin` 指内网镜像，GitHub 作为第二个 remote 后加——不要反过来先把 GitHub 设成 `origin`。
-- `prepublishOnly` 里先 build，再 `npm pack --dry-run`，最后 `test -f dist/index.js && test -f dist/index.d.ts`。**`npm pack` 只校验 name/version，不校验 files**（实测删掉 `dist/` 仍 exit 0），所以产物完整性必须靠显式 `test -f`，不能指望 pack。
+- **仓库现状（2026-11-20）**：只有一个 remote——内网 GitLab `https://gitlab.ai.isv.iridesc.cn:23000/zyx/dsh-boost`（私有）。公开的 GitHub 仓**尚不存在**，所以 `package.json` 故意不写 `repository`（指向 404 比不写更糟），`CHANGELOG` 的 compare 链接也已删除；等公开镜像建好再补回这两处。
+- **`npm pack` 不校验 `files`**（实测删掉 `dist/` 仍 exit 0），所以产物完整性必须由 `scripts/verify-package.mjs` 显式检查 tar 清单，不能指望 pack。这条不变量现在由 `npm run verify:package` 承担，并被两个故意破坏的用例钉住（缺 `dist`、缺 locale 文件都必须让它红）。
 - **`dist/` 不入库**（`.gitignore` 忽略），干净 clone 上必须能 `npm run build`——布局里因此要有 `tsconfig.json`，缺它 `tsc -p` 直接 `TS5058`；`prepublishOnly` 已含 build，发布包不会缺 dist。
 - `engines.dsh` 由 dsh 插件加载器读取，npm 忽略此字段。
 - `files` 与实际布局一致：没有 `lib`，所以不列 `lib`；`scripts/` 与 `test/` 是 dev-only，不进包。
@@ -615,7 +581,7 @@ dsh-boost/
 
 **两个可选 peer 包**：`@deepseek-ai/dsh-spill-policy` 与 `@deepseek-ai/dsh-token-meter` 写进 `peerDependencies`，并在 `peerDependenciesMeta` 标 `optional: true`；代码一律 `await import(...)` 包 try/catch。**只写静态 import 而不声明 peer 依赖**时，宿主没装该包会抛 `ERR_MODULE_NOT_FOUND`，降级路径不可达（本机 hoisted 布局把包提升到可解析位置，**测不出这个问题**）。验收必须在 isolated 布局（`npm pack` 后装进空项目）下做，见 §6.2。
 
-**发布验收顺序**：先 `npm pack --dry-run`（只校验 name/version）→ 再 `npm pack` 并让 `dsh plugin add` 解析安装。反过来做，缺字段时看到的是一句解析错误，不是包本身的问题。
+**发布验收顺序**：先 `npm run verify:package`（打包、装进临时目录、`import()` 与 `require()` 各解析一次、核对 tar 清单）→ 再 `npm publish --dry-run` → 最后才真发。反过来做，缺字段时看到的是一句解析错误，不是包本身的问题。
 
 两条来自参照仓库 patch 注释、会静默失败的硬约束：
 
