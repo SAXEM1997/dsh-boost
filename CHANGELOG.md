@@ -10,6 +10,44 @@ Design rationale lives in `docs/superpowers/specs/`; the release-acceptance proc
 
 ## [Unreleased]
 
+## [0.1.1] - 2026-11-21
+
+第二轮与第三轮审查（各六个独立维度）的修复。**没有行为退化，但有三处会让功能静默失效的缺陷被修掉。**
+
+### 修复 Fixed
+
+- **辅助模型请求不再被误判为「协议段被吞掉」。** 宿主对**每一条** `llm/stream` 都派发，包括
+  `purpose: 'compaction'` 与 `purpose: 'session-title'`。旧检测器把它们的系统提示读成「完整
+  section 覆盖了协议段」，于是累计 `ERR_HOST_COMPLETE_SECTION` 永久留在 `status.degraded`、
+  并把该会话判为不可见——**投影恰好在压缩前后、回执最大时被关掉**。现在任何带 `purpose` 的
+  请求都不参与该探测。
+- **装配不全不再看起来健康。** 协议段注册失败后，三个事件钩子改为逐个独立挂载，失败者记名并
+  通过新的 `ERR_BOOST_PARTIAL_MOUNT` 进 `status.degraded`。
+- **坏掉的 spill 后端有了自己的码。** `projection-skipped:spill-failed` 现在映射到新的
+  `ERR_HOST_SPILL_FAILING`，不再复用 `ERR_HOST_NO_SPILL`——「后端存在但每次写都失败」与
+  「后端缺失」的修法不同，前者去重装 spill 包是错的。
+- **`$DSH_HOME` 里的 `~` 会被展开**，与宿主 `expandHomePath` 一致；此前 `DSH_HOME='~/x'`
+  会在 cwd 下建一个字面 `~` 目录，把收据写到宿主 home 之外。
+- **出错的流不再把替换的用量标记留给下一次请求**（`try/finally` 结算为 `'unknown'`，不再
+  高报 `saved_input_tokens`）。
+- **共享运行时的借用按实例记属主**，会话销毁时释放；此前第二个会话可能读到第一个会话的请求。
+- **pruner 标记不再是身份证据**：内嵌了被锚定回执裁剪文本的另一条回执（例如 `read` 会话日志）
+  不再被判为「仍被携带」。
+- **回合翻转会结算已派发的替换**，不再把一次真实的跳过模型往返丢成 `'unknown'`。
+- **版本守卫忽略 build 元数据**；`ERR_SCOPE_LOCKED` 的说明改为「未陈旧的持锁」而不是「超过超时」。
+- **CI 不再必然失败。** 工作流原本跑 `npm publish --dry-run`，在 0.1.0 已发布之后每次 push 都会
+  以 `You cannot publish over the previously published versions` 结束。现在跑
+  `npm run ci && npm run verify:package`。
+- **`verify:package` 的 dist 断言不再被 `prepare` 重建掩盖**：默认路径显式 `npm run build` 后
+  `npm pack --ignore-scripts`。
+- 文档：3.5% 不再被称为「保底」（净保底约 0.4%）；首次 `status` 的 `degraded` 是空；状态目录
+  以 `config.dshHome` 优先；澄清表删掉「计划时冻结」这个不存在的机制，并写明 EDG 的图与链
+  没有移植；`package.json` 的 description 改为 substituting。
+
+### 变更 Changed
+
+- `@types/node` 升到 `^24`，与 `engines.node >= 24.9.0` 一致。
+
 ## [0.1.0] - 2026-11-20
 
 <!-- 版本链接暂缺：还没有 v0.1.0 标签，任何 releases/tag 或 compare 链接今天都会 404。
