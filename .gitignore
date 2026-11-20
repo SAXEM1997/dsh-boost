@@ -15,3 +15,7 @@ scripts/.cache/
 
 # SDD 工作区（ledger/briefs/review 包，不入库）
 .superpowers/sdd/
+
+# Review round artifacts (each round dirties the tree; the release checklist
+# starts from a clean tree)
+.superpowers/review/

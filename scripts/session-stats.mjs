@@ -519,6 +519,17 @@ const valueOf = (flag) => {
   return index >= 0 ? args[index + 1] : undefined
 }
 
+if (has('--help') || has('-h')) {
+  process.stdout.write(`usage: node scripts/session-stats.mjs [--snapshot <path>]
+       node scripts/session-stats.mjs --sessions <dir> [--as-of <ISO-8601>] [--out <path>] [--allow-empty]
+
+Prints session statistics as one JSON document on stdout; diagnostics go to
+stderr. This direct invocation is the quiet machine-readable form. \`npm run
+stats\` prints npm's own banner on stdout first, so either use this command or
+\`npm run --silent stats\` when piping into jq or another parser.\n`)
+  process.exit(0)
+}
+
 const scriptDir = dirname(fileURLToPath(import.meta.url))
 const snapshotPath = valueOf('--snapshot') ?? join(scriptDir, 'session-snapshot.json')
 
