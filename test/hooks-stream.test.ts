@@ -413,6 +413,27 @@ test('P2 头尾相同、中段不同的完整回执不是锚点：探针碰撞�
   assert.equal(env.queue.peek(SESSION), undefined)
 })
 
+test('P2 另一条回执内嵌了锚点的裁剪后文本：pruner 标记不是身份（行 29）', async () => {
+  const env = setup({ chunks: [{ type: 'finish', reason: { kind: 'stop' } }] })
+  const anchor = `${'H'.repeat(120)}${'M'.repeat(60)}${'T'.repeat(120)}`
+  seedAnchored(env, anchor)
+  const pruned = `${'H'.repeat(120)}${PRUNE_MARKER}${'T'.repeat(120)}`
+  // A `read` of a session log: the wrapper carries the anchored receipt's
+  // pruned text verbatim, so it has both probes *and* the marker. Treating the
+  // marker alone as identity would declare a receipt that was compacted away
+  // "still carried" and let the decision survive on evidence the model no
+  // longer holds as its own message.
+  const wrapper = `line 1: ${pruned} line 1: end`
+
+  const chunks = await streamOnce(env, { messages: messagesWith(wrapper) })
+
+  assert.equal(env.host.nextCalls, 1, 'an embedded copy must not be synthesized over')
+  assert.equal(chunks.some((c) => c.type === 'tool-call-delta'), false)
+  const reset = env.receipts.find((r) => r.kind === 'reset')
+  assert.equal(reset?.code, 'compaction-reset', 'an embedded pruned copy is a lost anchor')
+  assert.equal(env.queue.peek(SESSION), undefined)
+})
+
 test('P2 锚点形状无法校验（旧/外来值）：不崩溃且 fail closed', async () => {
   const env = setup({ chunks: [{ type: 'finish', reason: { kind: 'stop' } }] })
   env.runtime.onModelRequest(SESSION, 1, 0)

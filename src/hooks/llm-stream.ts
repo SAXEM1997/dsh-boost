@@ -168,7 +168,7 @@ import type { GenerateOptions, StreamChunk, TokenUsage } from '@deepseek-ai/dsh-
 import { StepBudget } from '../admission/ledger.js'
 import { UsageLedger } from '../admission/usage.js'
 import { DEFAULT_CONFIG } from '../config.js'
-import { looksPruned } from '../gate/invalidate.js'
+import { looksPruned, PRUNE_MARKER } from '../gate/invalidate.js'
 import type { ReceiptAnchors } from '../gate/invalidate.js'
 import { parsePlan } from '../gate/plan.js'
 import { TurnClock } from './clock.js'
@@ -570,6 +570,41 @@ function ownProjectionCarries(body: string, anchor: string): boolean {
 }
 
 /**
+ * Whether `body` is the anchor rewritten **by the host pruner**, and nothing
+ * else.
+ *
+ * `looksPruned` alone is not identity: any body that embeds the anchor's pruned
+ * text — a `read` of a session log, the case `invalidate` documents as
+ * occurring — carries the marker too, so a receipt that was compacted away
+ * could be declared "still carried" and a decision would survive on evidence
+ * the model no longer holds.
+ *
+ * The pruner replaces the middle with a single marker and keeps a head and a
+ * tail, so a genuine carrier is `head + marker + tail` with nothing before the
+ * head and nothing after the tail. Requiring the carrier to *start* with the
+ * anchor's first `head` code points and *end* with its last `tail` ones — the
+ * same windows `ownProjectionCarries` derives for our own rewrite — rejects the
+ * wrapper: its head is the wrapper's opening line, not the anchor's.
+ */
+function prunedCarries(body: string, anchor: string): boolean {
+  const marker = body.indexOf(PRUNE_MARKER)
+  if (marker === -1) return false
+  // Exactly one marker: two would mean this is not one pruned receipt.
+  if (body.indexOf(PRUNE_MARKER, marker + PRUNE_MARKER.length) !== -1) return false
+  const head = body.slice(0, marker)
+  const tail = body.slice(marker + PRUNE_MARKER.length)
+  if (head.length === 0 || tail.length === 0) return false
+  const points = Array.from(anchor)
+  const headPoints = Array.from(head)
+  const tailPoints = Array.from(tail)
+  if (headPoints.length + tailPoints.length >= points.length) return false
+  return (
+    points.slice(0, headPoints.length).join('') === head &&
+    points.slice(-tailPoints.length).join('') === tail
+  )
+}
+
+/**
  * Whether `body` still carries `anchor`, verbatim or as a verified in-place
  * rewrite.
  *
@@ -607,7 +642,7 @@ function carriesAnchor(
   const start = headLen > 0 ? body.indexOf(head) : 0
   if (headLen > 0 && start === -1) return false
   if (tailLen > 0 && body.indexOf(tail, start + headLen) === -1) return false
-  return looksPruned(body) || ownProjectionCarries(body, anchor)
+  return prunedCarries(body, anchor) || ownProjectionCarries(body, anchor)
 }
 
 /**
