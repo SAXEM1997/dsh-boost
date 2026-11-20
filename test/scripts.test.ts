@@ -50,8 +50,10 @@ test('shadow-report 从真实 ReceiptStore 写出的收据复算四项标签', a
   await store.append({ ...base, kind: 'skip', code: 'guard-trivial', tool: 'bash' })
 
   // Two read decisions, one committed and whitelisted, one offered candidate
-  // that failed binding/guarding (`no-candidate`).
-  await store.append({ ...base, kind: 'shadow', code: 'ok', tool: 'read', decision: 'commit', candidateId: 'C', whitelisted: true, args: {} })
+  // that failed binding/guarding (`no-candidate`). The commit's *executed*
+  // tool is bash; `candidateTool` names the family the gate decided in, which
+  // is what `byFamily` must key on.
+  await store.append({ ...base, kind: 'shadow', code: 'ok', tool: 'bash', candidateTool: 'read', decision: 'commit', candidateId: 'C', whitelisted: true, args: {} })
   await store.append({ ...base, kind: 'skip', code: 'no-candidate', tool: 'read' })
 
   // A retrieval against two applied projections.
@@ -108,7 +110,10 @@ test('session-stats 对固定 snapshot 复算出 §2.1 的 headline 计数', asy
   assert.equal(out.whitelist.calls, 3562)
   assert.equal(out.whitelist.fullSteps, 2165)
   assert.equal(out.whitelist.singleCallSteps, 1702)
-  assert.equal(out.valueTransfer.positions > 0, true)
+  assert.equal(out.valueTransfer.positions, 45082)
+  assert.equal(out.valueTransfer.full, 842)
+  assert.equal(out.valueTransfer.partial, 2407)
+  assert.equal(out.valueTransfer.rate, 0.0721)
 })
 
 test('session-stats --sessions 从真实 session 文件重生 snapshot，--snapshot 可复算同一批计数', async () => {
@@ -192,8 +197,27 @@ test('session-stats --sessions 从真实 session 文件重生 snapshot，--snaps
   // previous step to compare against and is not a position.
   assert.equal(recomputed.valueTransfer.positions, 2)
   assert.equal(recomputed.valueTransfer.full, 1)
-  assert.equal(recomputed.valueTransfer.partial, 1)
+  assert.equal(recomputed.valueTransfer.partial, 0)
   // Receipt sizes are 11, 4, 1, 13, 0.
   assert.equal(recomputed.receiptChars.p50, 4)
   assert.equal(recomputed.receiptChars.over2000Share, 0)
+})
+
+test('session-stats --sessions 对空语料拒绝写快照，--allow-empty 才放行', async () => {
+  const dir = await fresh()
+  const sessions = join(dir, 'sessions')
+  await (await import('node:fs/promises')).mkdir(sessions, { recursive: true })
+
+  await assert.rejects(
+    () => runScript('session-stats.mjs', ['--sessions', sessions, '--out', join(dir, 'snapshot.json')]),
+    (error: any) => {
+      assert.equal(error.code, 1)
+      assert.match(String(error.stderr), /refusing to write an empty snapshot/)
+      return true
+    },
+  )
+
+  const allowed = await runScript('session-stats.mjs', ['--sessions', sessions, '--allow-empty'])
+  assert.equal(allowed.sessions.length, 0)
+  assert.equal(allowed.selection.skipped, 0)
 })

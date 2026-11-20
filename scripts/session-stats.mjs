@@ -15,7 +15,9 @@
  *   <ISO-8601>` freezes the event view: only lines at or before that instant
  *   are counted, and sessions are ranked by their raw prefix bytes. That option
  *   exists because the design's snapshot is historical — the live tree keeps
- *   growing — and a frozen cut is the only honest way to replay it.
+ *   growing — and a frozen cut is the only honest way to replay it. An empty
+ *   or wholly unreadable corpus is refused (non-zero, nothing written) unless
+ *   `--allow-empty` is passed.
  *
  * The script is delivered to operators (design §11) and therefore imports only
  * `node:` builtins; it must not import `src/` or require the package's build.
@@ -42,14 +44,16 @@
  *   whitelisted; a **single-call step** has exactly one call and it is
  *   whitelisted. The token share is the full-coverage steps' token sum over all
  *   steps' tokens.
- * - **Value transfer**: a position is a non-empty string leaf (length >= 4) in
- *   a next step's call arguments, where the next step follows another step of
- *   the same turn and that previous step produced text. *Full* means the whole
- *   value occurs verbatim in the previous step's receipt text. *Partial* means
- *   it does not, but whitespace-delimited segments of at least 8 characters
- *   cover at least half of the value and occur verbatim. The design's 7.14%
- *   is a lower bound of extraction/transformation transfers; this implements
- *   the verbatim half only.
+ * - **Value transfer** is call-level, not leaf-level: one position is one
+ *   next-step call whose previous step (same turn) has exactly one tool call,
+ *   so the receipt source is unambiguous. For that call, every string argument
+ *   leaf of length >= 4 is tested. *Full* means there is at least one such
+ *   leaf and every one occurs verbatim in the previous step's receipt text.
+ *   *Partial* means not full, but at least one leaf of length >= 8 occurs
+ *   verbatim. A call with no qualifying leaf is still a position (it is a
+ *   decidable next call) but contributes to neither bound count. The design's
+ *   7.14% is a lower bound of extraction/transformation transfers; this
+ *   implements the verbatim half only.
  */
 
 import { mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from 'node:fs'
@@ -62,12 +66,10 @@ const TOP_SESSIONS = 300
 const WHITELIST = new Set(['read', 'grep', 'glob'])
 const FAMILIES = new Set(['read', 'grep', 'glob', 'bash', 'ssh'])
 const MCP_PREFIX = 'mcp__'
-/** A shorter argument is not a meaningful verbatim transfer position. */
+/** A shorter argument is not a meaningful verbatim-transfer test. */
 const MIN_POSITION_CHARS = 4
-/** A copied segment must be long enough to be evidence, not a common word. */
-const MIN_SEGMENT_CHARS = 8
-/** Partial binding requires the copied segments to cover half the value. */
-const PARTIAL_COVERAGE = 0.5
+/** A partial binding needs a whole argument of at least this length. */
+const MIN_PARTIAL_CHARS = 8
 
 const round = (value, digits) => {
   const factor = 10 ** digits
@@ -184,15 +186,6 @@ function eventTime(record) {
   if (typeof record.time === 'number') return record.time
   if (typeof record.data?.time === 'number') return record.data.time
   return undefined
-}
-
-/** Is `value` copied from `haystack` enough to count as a partial binding? */
-function isPartial(value, haystack) {
-  let covered = 0
-  for (const segment of value.split(/[\s"'`;|&()<>,[\]{}]+/)) {
-    if (segment.length >= MIN_SEGMENT_CHARS && haystack.includes(segment)) covered += segment.length
-  }
-  return covered >= Math.max(MIN_SEGMENT_CHARS, value.length * PARTIAL_COVERAGE)
 }
 
 /**
@@ -328,15 +321,22 @@ function analyseSession(path, asOf) {
 
     const previous = steps[index - 1]
     if (previous === undefined || previous.turn !== row.turn) continue
+    // The design's unit is the call, not the leaf: an unambiguous receipt
+    // source is a previous step with exactly one tool call. Every next call
+    // in that step is one position, even when it carries no string argument.
+    if (previous.names.length !== 1) continue
     const haystack = previous.resultTexts.join('\n')
-    if (haystack.length === 0) continue
     for (const args of row.argsList) {
-      for (const raw of stringLeaves(args)) {
-        const value = raw.trim()
-        if (value.length < MIN_POSITION_CHARS) continue
-        positions += 1
-        if (haystack.includes(value)) full += 1
-        else if (isPartial(value, haystack)) partial += 1
+      positions += 1
+      const values = stringLeaves(args)
+        .map((value) => value.trim())
+        .filter((value) => value.length >= MIN_POSITION_CHARS)
+      if (values.length === 0) continue
+      const matched = values.filter((value) => haystack.includes(value))
+      if (matched.length === values.length) {
+        full += 1
+      } else if (values.some((value) => value.length >= MIN_PARTIAL_CHARS && haystack.includes(value))) {
+        partial += 1
       }
     }
   }
@@ -486,6 +486,28 @@ function toolCharsTotal(toolChars) {
   return total
 }
 
+/**
+ * Snapshot JSON with one session per line.
+ *
+ * The array form keeps a 300-session aggregate reviewable in a diff; the
+ * numbers are byte-identical to `JSON.stringify(snapshot)` once parsed.
+ */
+function serialiseSnapshot(snapshot) {
+  const head = JSON.stringify(
+    {
+      version: snapshot.version,
+      asOf: snapshot.asOf,
+      generatedBy: snapshot.generatedBy,
+      selection: snapshot.selection,
+    },
+    null,
+    2,
+  )
+  const open = head.slice(0, head.lastIndexOf('}')).replace(/\s+$/, '')
+  const rows = snapshot.sessions.map((session) => `    ${JSON.stringify(session)}`).join(',\n')
+  return `${open},\n  "sessions": [\n${rows}${rows === '' ? '' : '\n'}  ]\n}\n`
+}
+
 // ---------------------------------------------------------------------------
 // CLI
 // ---------------------------------------------------------------------------
@@ -503,7 +525,7 @@ const snapshotPath = valueOf('--snapshot') ?? join(scriptDir, 'session-snapshot.
 if (has('--sessions')) {
   const sessionsDir = valueOf('--sessions')
   if (sessionsDir === undefined) {
-    console.error('usage: node scripts/session-stats.mjs --sessions <dir> [--as-of <ISO>] [--out <path>]')
+    console.error('usage: node scripts/session-stats.mjs --sessions <dir> [--as-of <ISO>] [--out <path>] [--allow-empty]')
     process.exit(2)
   }
   let asOf
@@ -517,6 +539,10 @@ if (has('--sessions')) {
   }
 
   const paths = listSessionFiles(sessionsDir)
+  if (paths.length === 0 && !has('--allow-empty')) {
+    console.error(`refusing to write an empty snapshot: no ${SESSION_FILE} under ${sessionsDir} (pass --allow-empty to override)`)
+    process.exit(1)
+  }
   let prefixed =
     asOf === undefined
       ? paths.map((path) => ({ path, size: statSize(path) }))
@@ -529,9 +555,16 @@ if (has('--sessions')) {
   prefixed = prefixed.slice(0, TOP_SESSIONS)
 
   const sessions = []
+  let skipped = 0
   for (const entry of prefixed) {
     const analysed = analyseSession(entry.path, asOf)
-    if (analysed !== undefined) sessions.push(analysed)
+    if (analysed === undefined) skipped += 1
+    else sessions.push(analysed)
+  }
+  if (skipped > 0) console.error(`warning: skipped ${skipped} unreadable session file(s)`)
+  if (sessions.length === 0 && prefixed.length > 0 && !has('--allow-empty')) {
+    console.error('refusing to write an empty snapshot: every selected session file failed to decompress (pass --allow-empty to override)')
+    process.exit(1)
   }
 
   const snapshot = {
@@ -540,6 +573,7 @@ if (has('--sessions')) {
     generatedBy: 'scripts/session-stats.mjs',
     selection: {
       count: sessions.length,
+      skipped,
       top: TOP_SESSIONS,
       rule:
         asOf === undefined
@@ -550,16 +584,18 @@ if (has('--sessions')) {
   }
 
   const out = valueOf('--out')
+  const serialised = serialiseSnapshot(snapshot)
   if (out === undefined) {
-    process.stdout.write(`${JSON.stringify(snapshot)}\n`)
+    process.stdout.write(serialised)
   } else {
     mkdirSync(dirname(out), { recursive: true })
-    writeFileSync(out, `${JSON.stringify(snapshot)}\n`)
+    writeFileSync(out, serialised)
     const totals = statsFromSnapshot(snapshot)
     process.stdout.write(
       `${JSON.stringify({
         written: out,
         sessions: totals.sessionCount,
+        skipped,
         steps: totals.steps,
         toolCalls: totals.toolCalls,
         asOf: snapshot.asOf,

@@ -12,8 +12,10 @@
  *   whose `whitelisted` flag is true; the denominator is every substitution
  *   decision. Every-family potential lives in `byFamily`.
  * - `byFamily` — commits / decisions per projection family (`bash`, `read`,
- *   `ssh`, `grep`, `glob`; every other tool is `other`). This is the shadow
- *   record of which families the gate can decide deterministically.
+ *   `ssh`, `grep`, `glob`; every other tool is `other`). The key is the
+ *   **candidate's** family (`candidateTool`, written by the shadow receipt),
+ *   not the tool the model happened to execute; pre-schema receipts without
+ *   the field fall back to `tool`.
  * - `candidateRecall` — the candidate set's recall. The design's §6.1 label is
  *   "候选集召回率": it asks how often the candidate set the plan **offered**
  *   contained a viable next call. The denominator is therefore the offered
@@ -25,6 +27,11 @@
  *   (design §6.1's damage proxy, and the plan's "取回调用数 / 投影回执数").
  *   A retrieval receipt is itself a cost line, so it is not part of the
  *   projection denominator; otherwise one retrieval would read as 1/2.
+ *   **This figure is on-mode-only.** Only `projection:'on'` writes
+ *   `kind:'projection'` receipts; a shadow ledger carries `kind:'shadow'` /
+ *   `code:'projection-shadow'`, so the ratio is structurally 0 during the
+ *   shadow week and cannot bound retrieval damage from that ledger. The
+ *   header says so instead of presenting the zero as a measurement.
  *
  * The script is standalone on purpose: it ships to operators, must run under
  * plain `node`, and cannot import the built package (design §11). It only
@@ -113,11 +120,19 @@ let commits = 0
 let noCandidate = 0
 let appliedProjections = 0
 let retrievals = 0
+let skippedProjectionShape = 0
 const byFamily = new Map()
 
 for (const shard of shards(dir)) {
   for (const receipt of readShard(shard)) {
-    if (receipt.kind === 'projection' && receipt.unit === 'raw') {
+    if (receipt.kind === 'projection') {
+      if (receipt.unit !== 'raw') {
+        // Pre-schema/hand-written projection receipts lack the literal the
+        // store forces; count them instead of silently folding them into a
+        // denominator they do not belong to.
+        skippedProjectionShape += 1
+        continue
+      }
       if (receipt.retrieved === true) retrievals += 1
       else appliedProjections += 1
       continue
@@ -125,7 +140,7 @@ for (const shard of shards(dir)) {
     if (!isDecision(receipt)) continue
 
     decisions += 1
-    const family = familyOf(receipt.tool)
+    const family = familyOf(receipt.candidateTool ?? receipt.tool)
     const row = byFamily.get(family) ?? { decisions: 0, commits: 0 }
     row.decisions += 1
 
@@ -152,5 +167,10 @@ const report = {
   ),
   candidateRecall: ratio(commits, commits + noCandidate),
   retrievalUpperBound: ratio(retrievals, appliedProjections),
+}
+if (skippedProjectionShape > 0) {
+  console.error(
+    `shadow-report: skipped ${skippedProjectionShape} projection receipt(s) without unit:'raw'`,
+  )
 }
 process.stdout.write(`${JSON.stringify(report, null, 2)}\n`)

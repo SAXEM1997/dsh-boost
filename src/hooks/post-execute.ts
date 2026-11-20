@@ -1279,6 +1279,10 @@ async function decideSubstitution(
       ledgerEntry(ctx, 'shadow', 'ok', {
         decision: 'commit',
         candidateId,
+        // The executed tool is the model's call; the candidate's tool is what
+        // the gate decided. The shadow report's per-family hit rate must use
+        // the latter (the shadow receipt's `tool` is the former).
+        candidateTool: candidate.tool,
         admitted: admittedFor(deps, ctx.sessionId, plan, selectorOverhead),
         whitelisted: SUBSTITUTION_WHITELIST.has(candidate.tool),
         stepId: 'root',

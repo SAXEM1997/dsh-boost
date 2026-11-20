@@ -40,9 +40,9 @@ tar -tzf dsh-boost-0.1.0.tgz | grep -E 'package/(dist/index\.js|dist/index\.d\.t
 
 ## 2. 空项目安装（isolated 布局）
 
-**这一步必须在一个没有任何 `node_modules` 祖先目录的空项目里做。** hoisted（提升）布局会把
-`@deepseek-ai/dsh-spill-policy` / `@deepseek-ai/dsh-token-meter` 提升到上层可解析的位置，于是"宿主没装这个
-包"根本复现不出来；`ERR_MODULE_NOT_FOUND` 也就测不到。isolated 布局才让缺失真实可见。
+**这一步必须在一个没有任何 `node_modules` 祖先目录的空项目里做。** 一个真正不存在的包在任何布局下都会
+`ERR_MODULE_NOT_FOUND`；hoisted（提升）布局掩盖的是**缺失**本身——它可能从上层祖先的 `node_modules`
+解析到同一份副本，于是"宿主没装这个包"根本复现不出来。isolated 布局才让缺失真实可见。
 
 ```bash
 rm -rf /tmp/dsh-boost-accept && mkdir -p /tmp/dsh-boost-accept
@@ -133,7 +133,8 @@ hoisted 布局下的"通过"不算通过。
 
 执行步骤：
 
-1. 准备 ≥20 条任务；两轮使用同一宿主版本、同一模型路由、同一工作区快照。
+1. 准备**恰好 20 条**任务；两轮使用同一宿主版本、同一模型路由、同一工作区快照。多一条会让 19/21
+   通过也过门，门就比设计弱；判定按 20 条做。
 2. 基线轮：`shadow: true`、`projection: 'off'`（或默认 `selected+[]`）。
 3. 开启轮：按 §6 的分批顺序打开替换族（先 `read`，再 `grep`/`glob`，最后 `bash`/`ssh`），
    `projection: 'on'`；每族一个观察窗。
@@ -177,21 +178,30 @@ node scripts/shadow-report.mjs --dir "$DSH_HOME/boost/receipts"
 | 字段 | 含义 |
 |---|---|
 | `saveableRatio` | 只读白名单真正能兑现的替换比例：`whitelisted` 影子提交 / 全部替换决策 |
-| `byFamily` | 按工具族的命中率：`commits / decisions`（影子期绕过白名单，所以 bash/ssh 的潜力也计入） |
+| `byFamily` | 按**候选工具族**的命中率：`commits / decisions`。键是收据里的 `candidateTool`（门决定的族），不是刚执行的 `tool`；老收据没有该字段时回退到 `tool`。影子期绕过白名单，所以 bash/ssh 的潜力也计入 |
 | `candidateRecall` | 候选集召回：`commits / (commits + no-candidate)`，分母是**计划提出的候选集**；`guard-trivial` 不提出候选，不进分母 |
-| `retrievalUpperBound` | 取回率上界：取回调用数 / 已应用投影回执数（取回回执本身不计入分母） |
+| `retrievalUpperBound` | 取回率上界：取回调用数 / 已应用投影回执数（取回回执本身不计入分母）。**只在 `projection: 'on'` 成立**：影子期只写 `kind:'shadow'` / `code:'projection-shadow'`，没有 `kind:'projection'` 回执，所以影子账上它按结构恒为 `0`，不能用它约束影子期取回损害 |
 
-脚本读的是 `ReceiptStore` 写的同一套字段，只读完整行；尾部半行与坏行跳过。它不需要 `src/` 或构建产物。
+脚本读的是 `ReceiptStore` 写的同一套字段，只读完整行；尾部半行与坏行跳过；`kind:'projection'`
+但缺 `unit:'raw'` 的 pre-schema 回执也会跳过，并在 stderr 打印跳过计数。它不需要 `src/` 或构建产物。
 
 ### 5.2 §2.1 统计与快照
 
 `scripts/session-snapshot.json` 是一个**聚合**，不含任何会话正文：
 
 - `asOf`：冻结时刻（`2026-11-19T03:13:21Z`，设计稿冻结提交的时间）与选择规则；
-- 300 个会话的 `id`、`bytes`、`createdAt`；
+- 300 个会话的 `id`、`bytes`、`createdAt`；`bytes` 是**该时刻的原始前缀字节数**，不是压缩文件大小
+  （压缩大小没有保留，见下面的选择口径脚注）；
 - 每个会话的计数器：`steps`、`toolCalls`、`callsPerStep`、`requests`、`tokens`、
   `whitelist`、`valueTransfer`；
+- `toolChars`：每个会话按工具族归因的回执字符数；
+- `valueTransfer`：call-level 的逐字传递计数——位置是"下一步调用"，且上一步只有**一个**工具调用
+  （回执来源唯一）；`full` 是该调用的长度 ≥ 4 的字符串参数全部逐字出现，`partial` 是未全绑定但至少一个
+  ≥ 8 字符的参数逐字出现；
 - 两条数值序列：每个请求的 `totalTokens` 与每个回执的字符数（中位数/分位数需要，仍然不含正文）。
+
+快照按**一个会话一行**序列化：数组内的每个 session 对象占一行，diff 里可逐条 review；解析后的数字与
+单行 JSON 完全相同。
 
 复算（CI 用这个，不碰会话目录）：
 
@@ -211,8 +221,20 @@ node scripts/session-stats.mjs \
 ```
 
 `--as-of` 只统计该时刻及之前的记录，并按该时刻的**原始前缀字节**排序取前 300；这是因为设计稿的快照是
-历史截面，而实时会话文件一直在增长。快照一旦提交就是权威：`--snapshot` 不重新选样，CI 只复算已提交的
-聚合。若复算值与设计稿 §2.1 有出入，按快照的实际值报告，**不得**改快照去凑设计稿数字。
+历史截面，而实时会话文件一直在增长。
+
+空目录或全部文件解压失败时脚本**拒绝写快照并以非零退出**，避免一个 `$DSH_HOME` 拼写错误把已提交的聚合
+覆盖成零值；确实要生成空快照时显式传 `--allow-empty`。部分会话损坏时会打印跳过计数，快照的
+`selection.skipped` 也会记录。
+
+**选择口径脚注（与设计稿的差异）**：设计稿按 `session.v4.jsonl.zstd` 的**压缩后**文件大小取前 300，但
+压缩大小不会被会话日志保留；本快照按冻结时刻的**原始前缀字节**排序。两者在边界上会换入/换出不同会话，
+因此本稿的 p50/p90/p99（648/4,635/18,186）与提交快照的复算值（623/4,572/18,087）差约 4%/1.4%/0.5%，
+tool share 变动约 ±1.3pp。这是选择边界差，不是公式差；设计稿说的"<1% 漂移"只适用于同一选择规则的
+重跑，不描述提交的这个聚合。
+
+快照一旦提交就是权威：`--snapshot` 不重新选样，CI 只复算已提交的聚合。若复算值与设计稿 §2.1 有出入，
+按快照的实际值报告，**不得**改快照去凑设计稿数字。
 
 ## 6. 发布检查清单
 

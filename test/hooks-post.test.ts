@@ -326,6 +326,7 @@ test('O5 影子期 commit：写 shadow 收据，不入队、不扣预算、不�
   assert.ok(shadow, 'a shadow commit writes a shadow receipt')
   assert.equal(shadow.decision, 'commit')
   assert.equal(shadow.candidateId, 'A')
+  assert.equal(shadow.candidateTool, 'bash', 'byFamily keys on the candidate, not the executed call')
   assert.equal(typeof shadow.admitted, 'boolean')
   assert.equal(shadow.whitelisted, false, 'shadow records families outside the whitelist')
   assert.equal(env.queue.peek(SESSION), undefined)
