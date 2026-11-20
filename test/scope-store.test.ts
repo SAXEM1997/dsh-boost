@@ -33,12 +33,13 @@ function pidAlive(pid: number): boolean {
   }
 }
 
-test('缺失文件返回默认并标 degraded', async () => {
+test('缺失文件是干净默认：无 degraded、revision 0', async () => {
   const dir = await mkdtemp(join(tmpdir(), 'scope-'))
   const r = await new ScopeStore(dir).read()
   assert.equal(r.doc.mode, 'selected')
-  assert.equal(r.degraded, 'scope-degraded')
-  assert.equal(r.code, 'ERR_SCOPE_READ_FAILED')
+  assert.equal(r.doc.revision, 0)
+  assert.equal(r.degraded, undefined)
+  assert.equal(r.code, undefined)
 })
 
 test('version 1 映射为 scope-degraded + ERR_SCOPE_UNKNOWN_VERSION（R34）', async () => {
@@ -161,11 +162,13 @@ test('mutate 返回的数组被调用方改写，不污染缓存与下一次读'
   assert.deepEqual(stored.workspaceIds, ['ws-1'])
 })
 
-test('降级结果不进缓存：文件出现后下一次读取立即看到', async () => {
+test('降级结果不进缓存：坏文件修好后下一次读取立即看到', async () => {
   const dir = await tempDir()
+  const file = join(dir, 'scope.json')
   const s = new ScopeStore(dir)
-  assert.equal((await s.read()).code, 'ERR_SCOPE_READ_FAILED')
-  await writeFile(join(dir, 'scope.json'), JSON.stringify({ version: 2, revision: 4 }))
+  await writeFile(file, '{ not json')
+  assert.equal((await s.read()).code, 'ERR_SCOPE_PARSE_FAILED')
+  await writeFile(file, JSON.stringify({ version: 2, revision: 4 }))
   const after = await s.read()
   assert.equal(after.degraded, undefined)
   assert.equal(after.code, undefined)
@@ -175,7 +178,8 @@ test('降级结果不进缓存：文件出现后下一次读取立即看到', as
 test('read 不写盘：缺失文件读取后目录仍为空', async () => {
   const dir = await tempDir()
   const r = await new ScopeStore(dir).read()
-  assert.equal(r.degraded, 'scope-degraded')
+  assert.equal(r.degraded, undefined)
+  assert.equal(r.doc.revision, 0)
   assert.deepEqual(await readdir(dir), [])
 })
 

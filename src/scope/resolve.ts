@@ -176,20 +176,3 @@ export async function resolveVisible(
 ): Promise<boolean> {
   return (await resolveWorkspace(store, agent, registry)).visible
 }
-
-/**
- * Whether the host offers the registration seam this plugin actually uses.
- *
- * The control tool is mounted with `tools.register(definition, { when })`, so
- * `register` is the capability under test. `tools.resolve` is a different
- * capability (step-time resolution of the already-registered set); requiring
- * it dropped the only control tool on a host that could have registered it
- * (review row 44). The `when` option is part of the documented `register`
- * contract, so a callable `register` is the capability.
- *
- * The probe itself never throws: `undefined`, `null`, non-objects and a
- * non-callable `register` all answer `false`.
- */
-export function supportsStepWhen(tools: { register?: unknown } | undefined | null): boolean {
-  return typeof tools?.register === 'function'
-}

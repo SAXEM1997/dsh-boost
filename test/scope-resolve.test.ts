@@ -3,7 +3,7 @@ import assert from 'node:assert/strict'
 import { mkdtemp } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { workspaceIdOf, resolveVisible, resolveWorkspace, supportsStepWhen } from '../src/scope/resolve.ts'
+import { workspaceIdOf, resolveVisible, resolveWorkspace } from '../src/scope/resolve.ts'
 import { ScopeStore } from '../src/scope/store.ts'
 import { fakeHost } from './fakes/host.ts'
 
@@ -76,21 +76,13 @@ test('global 模式下能解析出 UUID 即可见', async () => {
   assert.equal(await resolveVisible(s, { session: { header: { cwd: '/w/a' } } }, registry), true)
 })
 
-test('supportsStepWhen 探测实际使用的 register，而不是另一个能力 resolve', () => {
-  assert.equal(supportsStepWhen({}), false)
-  // A host with `register` but no `resolve` can still take the tool (and its
-  // `when` option); probing `resolve` used to drop the only control tool.
-  assert.equal(supportsStepWhen({ register: () => () => {} }), true)
-  assert.equal(supportsStepWhen({ register: () => {}, resolve: () => [] } as any), true)
-  // `resolve` alone is not the capability this plugin registers through.
-  assert.equal(supportsStepWhen({ resolve: () => [] } as any), false)
-})
-
-test('supportsStepWhen 对 undefined / null / 非对象不抛错', () => {
-  assert.equal(supportsStepWhen(undefined), false)
-  assert.equal(supportsStepWhen(null), false)
-  assert.equal(supportsStepWhen(42 as any), false)
-  assert.equal(supportsStepWhen({ register: null }), false)
+test('不再声明 supportsStepWhen 能力（finding 1：恒真的声明已删除）', async () => {
+  // The old probe tested `typeof register === 'function'`, which every host
+  // since 0.2.2-rc.1 satisfies, so the claim could never be false and the
+  // ERR_HOST_NO_STEP_WHEN branch was dead. The tool registers with a
+  // constant-true `when`, so no capability check is needed at all.
+  const module = await import('../src/scope/resolve.ts')
+  assert.equal('supportsStepWhen' in module, false)
 })
 
 test('resolveVisible 返回前把结果写进 judgement 缓存（派发 R2）', async () => {

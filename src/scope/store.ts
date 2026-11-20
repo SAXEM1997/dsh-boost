@@ -4,10 +4,11 @@
  * reads.
  *
  * `scope.json` is read on every tool call and written only by the `boost`
- * control tool. Reads therefore degrade instead of throwing — a missing,
- * unreadable, corrupt or newer-versioned file means "nobody sees the plugin"
- * (`DEFAULT_SCOPE`) and a stable code for the receipt/status channel — and a
- * failed read never touches the file. Writes are compare-and-swap: the caller
+ * control tool. Reads never throw: a missing file is the clean default
+ * (revision 0, no code — a fresh install has simply configured nothing yet),
+ * while an unreadable, corrupt or newer-versioned file means "nobody sees the
+ * plugin" (`DEFAULT_SCOPE`) plus a stable code for the receipt/status channel.
+ * A failed read never touches the file. Writes are compare-and-swap: the caller
  * passes the revision it last saw, the store locks, verifies that revision,
  * mutates, bumps it, and renames a temporary file over `scope.json`. The rename
  * makes a crash leave either the old or the new document, never a half-written
@@ -93,18 +94,22 @@ export const ERR_SCOPE_LOCK_TAKEOVER = 'ERR_SCOPE_LOCK_TAKEOVER'
 const BOOT_NONCE = randomUUID()
 
 /**
- * One disk read. `ok: false` still carries a document to serve (the strict
- * default), the stable code to report, and whether the file simply did not
- * exist — only `write` uses `missing`, to tell a first write from an I/O error.
- * `cause` keeps the underlying error for the write path's diagnostic.
+ * One disk read.
+ *
+ * A missing file is its own arm, not a failure: it still carries the strict
+ * default to serve, but no code and no degraded flag, because "nothing has
+ * been configured yet" is the clean state a fresh install starts in. Both read
+ * paths and the write path use `missing` to tell a first write from an I/O
+ * error; only genuine failures carry a stable `code` and `cause`.
  */
 type DiskRead =
   | { ok: true; doc: ScopeDoc; mtimeMs: number; text: string }
+  | { ok: false; missing: true; doc: ScopeDoc }
   | {
       ok: false
+      missing: false
       doc: ScopeDoc
       code: ScopeCode
-      missing: boolean
       cause?: unknown
       /** The v1 field values an explicit upgrade must carry (see `parseVersionOneScope`). */
       upgrade?: ScopeDoc
@@ -160,13 +165,23 @@ function cloneDoc(doc: ScopeDoc): ScopeDoc {
   return structuredClone(doc)
 }
 
-/** A failed disk read degrades to the strict default; a missing file is a failure. */
+/**
+ * Classify a failed disk read.
+ *
+ * `ENOENT` is the clean default: the document does not exist yet, so nobody
+ * has been configured in and there is nothing to report. Every other failure
+ * (permissions, I/O, a directory where a file is expected) is a genuine
+ * degraded read and keeps `ERR_SCOPE_READ_FAILED`.
+ */
 function readFailed(error: unknown): DiskRead {
+  if (errorCode(error) === 'ENOENT') {
+    return { ok: false, missing: true, doc: cloneDoc(DEFAULT_SCOPE) }
+  }
   return {
     ok: false,
+    missing: false,
     doc: cloneDoc(DEFAULT_SCOPE),
     code: ERR_SCOPE_READ_FAILED,
-    missing: errorCode(error) === 'ENOENT',
     cause: error,
   }
 }
@@ -246,6 +261,9 @@ export class ScopeStore {
       // Ruling 1: a degraded document is never a cache entry. The next call
       // must retry the disk instead of serving the strict default forever.
       this.cached = undefined
+      // A missing file is the clean default (revision 0, no degraded code);
+      // a genuine failure keeps its stable code.
+      if (result.missing) return { doc: cloneDoc(result.doc) }
       return { doc: cloneDoc(result.doc), degraded: 'scope-degraded', code: result.code }
     }
 
@@ -282,20 +300,28 @@ export class ScopeStore {
       checkAbort(signal)
       const current = this.readDiskSync()
       checkAbort(signal)
-      if (!current.ok && current.code === ERR_SCOPE_FUTURE_VERSION) {
-        throw scopeError(
-          ERR_SCOPE_FUTURE_VERSION,
-          `refusing to rewrite ${this.file}: it declares a newer scope version`,
-        )
+      let base: ScopeDoc
+      if (current.ok) {
+        base = current.doc
+      } else if (current.missing) {
+        // A first write starts from the strict default at revision 0.
+        base = current.doc
+      } else {
+        if (current.code === ERR_SCOPE_FUTURE_VERSION) {
+          throw scopeError(
+            ERR_SCOPE_FUTURE_VERSION,
+            `refusing to rewrite ${this.file}: it declares a newer scope version`,
+          )
+        }
+        if (current.code === ERR_SCOPE_READ_FAILED) {
+          const detail = current.cause === undefined ? 'unknown read error' : messageOf(current.cause)
+          throw scopeError(ERR_SCOPE_READ_FAILED, `cannot read ${this.file}: ${detail}`)
+        }
+        // A v1 file was read as DEFAULT_SCOPE at revision 0, but its recognised
+        // fields are the user's configuration: base the upgrade on those so a
+        // partial `scope-set` cannot silently drop `global`/`workspaceIds`.
+        base = current.upgrade ?? current.doc
       }
-      if (!current.ok && current.code === ERR_SCOPE_READ_FAILED && !current.missing) {
-        const detail = current.cause === undefined ? 'unknown read error' : messageOf(current.cause)
-        throw scopeError(ERR_SCOPE_READ_FAILED, `cannot read ${this.file}: ${detail}`)
-      }
-      // A v1 file was read as DEFAULT_SCOPE at revision 0, but its recognised
-      // fields are the user's configuration: base the upgrade on those so a
-      // partial `scope-set` cannot silently drop `global`/`workspaceIds`.
-      const base = current.ok ? current.doc : current.upgrade ?? current.doc
       if (base.revision !== baseRevision) {
         throw scopeError(
           ERR_SCOPE_REVISION_CONFLICT,

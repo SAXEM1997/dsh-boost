@@ -54,7 +54,7 @@ const root = join(dirname(fileURLToPath(import.meta.url)), '..')
 const pkg = JSON.parse(readFileSync(join(root, 'package.json'), 'utf8'))
 
 /** The plugin contract the host loads: keep this in sync with `src/index.ts`. */
-const EXPECTED_INJECT = ['tools', 'llm', 'systemPrompt']
+const EXPECTED_INJECT = ['tools', 'systemPrompt']
 
 /** Locales the published package must expose; `zh` is the primary README. */
 const REQUIRED_LOCALES = ['en.json', 'zh.json']
@@ -247,13 +247,13 @@ type Assert<T extends true> = T
 
 type NameIsExact = Assert<Equal<typeof name, 'dsh-boost'>>
 type InjectIsExact = Assert<
-  Equal<typeof inject, readonly ['tools', 'llm', 'systemPrompt']>
+  Equal<typeof inject, readonly ['tools', 'systemPrompt']>
 >
 
 const fakeContext = {
   logger: { info() {}, warn() {} },
   on() {},
-  tools: { register() {}, resolve() { return [] } },
+  tools: { register() {}, resolve() { return Promise.resolve({ dispose() {}, view() { return new Map() } }) } },
   llm: { async *stream() {} },
   systemPrompt: { section() {} },
   get() { return undefined },

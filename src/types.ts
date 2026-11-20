@@ -2,35 +2,84 @@
  * Shared types for dsh-boost.
  *
  * `PluginContext` is the minimal projection of the host services this plugin
- * injects (`tools`, `llm`, `systemPrompt`); it is deliberately narrower than
- * the full cordis `Context` so the behaviour modules can be tested against a
- * fake host. `BoostConfig` mirrors the config surface published in
- * `cordis.patch.yml` (design §5.3).
+ * uses (`tools` and `systemPrompt` are required; `llm` is a soft service the
+ * selector resolves lazily); it is deliberately narrower than the full cordis
+ * `Context` so the behaviour modules can be tested against a fake host.
+ * `BoostConfig` mirrors the config surface published in `cordis.patch.yml`
+ * (design §5.3).
+ *
+ * Every shape here is structural. This module is reachable from the published
+ * `dist/index.d.ts`, and the package deliberately declares no host
+ * dependencies, so importing a host type here would make a consumer's
+ * `skipLibCheck: false` typecheck fail without the host tree. The one host
+ * augmentation the selector needs lives in `host-augment.d.ts`, which `tsc`
+ * consumes but never emits.
  *
  * @module dsh-boost/types
  */
-import type { GenerateOptions, StreamChunk } from '@deepseek-ai/dsh-llm'
 
 /** Minimal projection of the host `Agent`: only session identity and cwd are read. */
 export interface AgentLike {
-  session: { header: { id: string; cwd: string } }
+  session: { header: { id: string; cwd?: string } }
 }
 
-/** Host services and helpers required by the plugin's `inject` list. */
+/**
+ * The host's activation context for a step-time tool condition.
+ *
+ * Mirrors `dsh-tools`' `ToolActivationContext`; the plugin only passes it
+ * through, so the shape stays structural.
+ */
+export interface ToolActivationContext {
+  readonly agent: AgentLike
+  readonly modelSelection: Readonly<Record<string, unknown>>
+  readonly signal: AbortSignal
+}
+
+/** The host's step-admitted tool set (`dsh-tools`' `ResolvedToolSet`). */
+export interface ResolvedToolSet {
+  dispose(): void
+  view(scope: unknown): ReadonlyMap<string, unknown>
+}
+
+/** A model request as the selector builds it (structural; no host import). */
+export interface GenerateOptions {
+  readonly [key: string]: unknown
+}
+
+/** One streamed chunk as the selector consumes it (structural). */
+export interface StreamChunk {
+  readonly [key: string]: unknown
+}
+
+/** Host services and helpers used by the plugin. */
 export interface PluginContext {
   logger: {
     info(msg: string): void
     warn(msg: string): void
   }
-  on(event: string, handler: (...args: any[]) => unknown): void
+  /**
+   * Register a waterfall listener.
+   *
+   * `prepend` is cordis's ordering option: a prepended listener is unshifted,
+   * and cordis runs the first-registered listener outermost.
+   */
+  on(
+    event: string,
+    handler: (...args: any[]) => unknown,
+    options?: { prepend?: boolean },
+  ): void
   tools: {
     register(
       def: unknown,
-      opts?: { when?: (c: { agent: AgentLike; signal: AbortSignal }) => boolean | Promise<boolean> },
+      opts?: { when?: (c: ToolActivationContext) => boolean | Promise<boolean> },
     ): void
-    resolve(): readonly unknown[]
+    resolve(context: ToolActivationContext): Promise<ResolvedToolSet>
   }
-  llm: {
+  /**
+   * The host LLM service. Soft: projection and admission never touch it, and
+   * the selector fails closed with `selector-unavailable` when it is absent.
+   */
+  llm?: {
     stream(opts: GenerateOptions): AsyncIterable<StreamChunk>
   }
   systemPrompt: {
@@ -62,10 +111,4 @@ export interface BoostConfig {
   stepsPerTurn: number
   horizonSteps: number
   historyTurns: number
-}
-
-declare module '@deepseek-ai/dsh-llm/types' {
-  interface LlmRequestPurposeMap {
-    'boost-selector': true
-  }
 }

@@ -166,22 +166,26 @@ async function createAssembly(options: { spill?: Any; tokenMeter?: Any; config?:
               return options.tokenMeter.estimateMessage(message)
             },
           }
+  // `llm` is a soft service reached through `ctx.get`; a real cordis context
+  // exposes the same object on both paths, so the fake does too.
+  const llm = {
+    stream(options: GenerateOptions): AsyncIterable<StreamChunk> {
+      if (options.purpose === SELECTOR_PURPOSE) {
+        state.selectorRequests.push(options)
+        return streamOf(state.selector)
+      }
+      return streamOf(state.main)
+    },
+  }
   const host = fakeHost({
     get(name: string) {
       if (name === 'workspaceRegistry') return registry
       if (name === 'spillStore') return options.spill
       if (name === 'tokenMeter') return tokenMeter
+      if (name === 'llm') return llm
       return undefined
     },
-    llm: {
-      stream(options: GenerateOptions): AsyncIterable<StreamChunk> {
-        if (options.purpose === SELECTOR_PURPOSE) {
-          state.selectorRequests.push(options)
-          return streamOf(state.selector)
-        }
-        return streamOf(state.main)
-      },
-    },
+    llm,
   })
   plugin.apply(host, { stepsPerTurn: 8, ...(options.config ?? {}) })
 

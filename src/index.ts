@@ -26,6 +26,8 @@
  *
  * @module dsh-boost
  */
+import { readFileSync } from 'node:fs'
+import { createRequire } from 'node:module'
 import type { ToolDefinition } from '@deepseek-ai/dsh-tools'
 import { measureBoostFixedOverhead } from './tools/boost.js'
 import { RuntimeStepHorizon, StepBudget } from './admission/ledger.js'
@@ -45,7 +47,8 @@ import { ProjectionCounters } from './projection/counters.js'
 import { PROTOCOL_NAME, PROTOCOL_TEXT } from './prompt/protocol.js'
 import { ReceiptStore } from './receipts/store.js'
 import { SELECTOR_PURPOSE } from './selector/jev.js'
-import { resolveWorkspace, supportsStepWhen } from './scope/resolve.js'
+import type { LlmLike } from './selector/jev.js'
+import { resolveWorkspace } from './scope/resolve.js'
 import type { WorkspaceRegistry } from './scope/resolve.js'
 import { ScopeStore } from './scope/store.js'
 import { boostTool } from './tools/boost.js'
@@ -54,7 +57,16 @@ import type { PluginContext } from './types.js'
 
 export const name = 'dsh-boost'
 
-export const inject = ['tools', 'llm', 'systemPrompt'] as const
+/**
+ * Required host services.
+ *
+ * `llm` is deliberately absent: projection and admission use no model, and
+ * only the selector does. A hard injection would leave the whole plugin
+ * pending — no hooks, no tool, no warning — on a composition without the LLM
+ * runtime, even though it could still project. The selector resolves `llm`
+ * lazily and fails closed with `selector-unavailable` when it is absent.
+ */
+export const inject = ['tools', 'systemPrompt'] as const
 
 /** Whether the host exposes both services the hook mounts attach to. */
 function canRegister(ctx: PluginContext): boolean {
@@ -66,17 +78,116 @@ function messageOf(error: unknown): string {
   return error instanceof Error ? error.message : String(error)
 }
 
+/** The dsh host line this build was verified against (`engines.dsh`). */
+const VERIFIED_HOST_VERSION = '0.2.2-rc.4'
+
+/**
+ * Stable host code: the resolved host version is not the verified one.
+ *
+ * A warning, never a hard failure: an unverified version is a risk, not proof
+ * that an API this build uses has moved. It belongs to the `ERR_HOST_*` family
+ * this module already logs (`ERR_HOST_NO_AGENT_REQUEST`,
+ * `ERR_HOST_COMPLETE_SECTION`).
+ */
+const ERR_HOST_VERSION_MISMATCH = 'ERR_HOST_VERSION_MISMATCH'
+
+/** The app-boot package whose version IS the dsh runtime version. */
+const HOST_VERSION_PACKAGE = '@deepseek-ai/dsh-app-boot'
+
+/** The host's package resolver (`pluginPackages` in a profile process). */
+type PackageResolver = {
+  packageOf?(specifier: string, parentURL: string): { version?: unknown } | undefined
+}
+
+/** Node's resolver, used only when the host service is unavailable. */
+const requireFromHere = createRequire(import.meta.url)
+
+/**
+ * The resolved dsh host version, or `undefined` when it cannot be determined.
+ *
+ * `dsh-app-boot`'s own manifest is the runtime version the compatibility
+ * preflight compares `engines.dsh` against, so it is the authority here too.
+ * The profile's `pluginPackages` service is preferred because it resolves
+ * through the same runtime interception the host used (a linked or mixed tree
+ * reports the version actually loaded); a plain Node resolve from this module
+ * is the fallback for an embedded composition without that service. Reading a
+ * manifest is not a host import: the package is never loaded, and nothing in
+ * `dist/` statically imports it.
+ *
+ * Never throws: an absent service, an unresolvable package and a malformed
+ * manifest all mean "unknown", which is logged but not warned about.
+ */
+function hostVersionOf(ctx: PluginContext): string | undefined {
+  try {
+    const packages = serviceOf<PackageResolver>(ctx, 'pluginPackages')
+    const pkg = packages?.packageOf?.(HOST_VERSION_PACKAGE, import.meta.url)
+    if (typeof pkg?.version === 'string' && pkg.version !== '') return pkg.version
+  } catch {
+    // A foreign resolver is the same as no resolver.
+  }
+  try {
+    const manifest = requireFromHere.resolve(`${HOST_VERSION_PACKAGE}/package.json`)
+    const parsed = JSON.parse(readFileSync(manifest, 'utf8')) as { version?: unknown }
+    return typeof parsed.version === 'string' && parsed.version !== '' ? parsed.version : undefined
+  } catch {
+    return undefined
+  }
+}
+
+/**
+ * Log the resolved host version once and warn on a mismatch.
+ *
+ * The version guard is deliberately advisory. npm does not read `engines.dsh`;
+ * the host enforces it only through the managed-install compatibility preflight,
+ * which does not run for every composition. A warning here is the only signal
+ * an embedded or mixed tree gets, and it must never stop the plugin: a version
+ * this build did not verify may still work.
+ */
+function reportHostVersion(ctx: PluginContext): void {
+  const version = hostVersionOf(ctx)
+  if (version === undefined) {
+    ctx.logger?.info?.(
+      `dsh-boost: dsh host version unknown (verified against ${VERIFIED_HOST_VERSION}); compatibility cannot be checked`,
+    )
+    return
+  }
+  if (version === VERIFIED_HOST_VERSION) {
+    ctx.logger?.info?.(`dsh-boost: dsh host ${version} (verified)`)
+    return
+  }
+  ctx.logger?.warn?.(
+    `dsh-boost: ${ERR_HOST_VERSION_MISMATCH}: this build is verified against dsh ${VERIFIED_HOST_VERSION}, but the host reports ${version}; continuing, but a renamed host API may make the plugin inert`,
+  )
+}
+
 /**
  * Duplicate applies observed in this process.
  *
  * The host exposes no stable duplicate-mount code for a prompt section, so the
- * plugin cannot match a code. Any throw from the first mount (the section) is
- * treated as "this plugin is already wired": the counter makes repeated applies
- * visible in the log without changing the mounts. Matching the error text was
- * rejected because a wording change would classify a duplicate as a generic
- * wiring failure (review row 46).
+ * only evidence is the plain Error's message. A throw counts as "this plugin is
+ * already wired" only when that message names OUR section and says it is
+ * already registered; every other failure is a wiring error with its own code
+ * (see `isDuplicateSectionError`). The counter makes repeated applies visible
+ * in the log without changing the mounts.
  */
 let duplicateMountAttempts = 0
+
+/**
+ * Whether a section-registration throw is the host's genuine duplicate error.
+ *
+ * `dsh-system-prompt` builds a plain `Error` whose message starts with
+ * `prompt section "<name>" is already registered` (global and scoped variants
+ * both start that way) and exposes no code. Matching that prefix for our own
+ * section is the only duplicate evidence available; a future wording change
+ * falls through to the generic branch, which warns with the raw error and keeps
+ * the control tool mountable instead of silently disabling everything.
+ */
+function isDuplicateSectionError(error: unknown): boolean {
+  return (
+    error instanceof Error &&
+    error.message.startsWith(`prompt section "${PROTOCOL_NAME}" is already registered`)
+  )
+}
 
 /**
  * Read a soft host service through `ctx.get`.
@@ -522,53 +633,66 @@ function wireSessionEvents(
   // route silently. A session that reached `llm/stream` after a pre-step but
   // never saw `agent/request` is proof enough; the model request itself is
   // passed through untouched.
-  ctx.on('llm/stream', (options: unknown, next: () => unknown) => {
-    try {
-      const request = (options ?? {}) as { sessionId?: unknown; purpose?: unknown }
-      const sessionId = request.sessionId
-      if (
-        !warnedMissingRequest &&
-        typeof sessionId === 'string' &&
-        preStepSeen.has(sessionId) &&
-        !requestSeen.has(sessionId)
-      ) {
-        warnedMissingRequest = true
-        ctx.logger?.warn?.(
-          'ERR_HOST_NO_AGENT_REQUEST: agent/request was not observed before llm/stream; the selector route cannot be captured (the event is deprecated and may have been removed)',
-        )
-      }
+  //
+  // This listener is also the complete-section detector, and it MUST be
+  // outermost: the synthesizer mounted by `registerHooks` consumes a queued
+  // entry synchronously, so a detector registered after it would only mark the
+  // session unsubstitutable *after* the first affected request had already been
+  // substituted. Cordis runs the first-registered listener outermost
+  // (`events.ts` unshifts on `prepend`), so `prepend: true` is what puts the
+  // detector before the synthesizer regardless of mount order (finding 4).
+  ctx.on(
+    'llm/stream',
+    (options: unknown, next: () => unknown) => {
+      try {
+        const request = (options ?? {}) as { sessionId?: unknown; purpose?: unknown }
+        const sessionId = request.sessionId
+        if (
+          !warnedMissingRequest &&
+          typeof sessionId === 'string' &&
+          preStepSeen.has(sessionId) &&
+          !requestSeen.has(sessionId)
+        ) {
+          warnedMissingRequest = true
+          ctx.logger?.warn?.(
+            'ERR_HOST_NO_AGENT_REQUEST: agent/request was not observed before llm/stream; the selector route cannot be captured (the event is deprecated and may have been removed)',
+          )
+        }
 
-      // A `complete: true` prompt section replaces every other section after
-      // the assembly waterfall, so the protocol text `system-prompt/assemble`
-      // patched in is gone from the request the model actually receives. The
-      // host exposes no code or flag for that restoration; the outgoing system
-      // prompt is the first place it is observable. Detect it, count it, and
-      // fail closed: without the protocol there is nothing to teach the plan
-      // grammar, so substitution (and the projection that shares the same
-      // visibility gate) must not act for this request (review row 12).
-      if (
-        typeof sessionId === 'string' &&
-        request.purpose !== SELECTOR_PURPOSE &&
-        scope.judgement(sessionId)
-      ) {
-        const systemText = systemTextOf(options)
-        if (systemText !== undefined && !systemText.includes(PROTOCOL_PROBE)) {
-          counters.protocolSuppressed()
-          counters.protocolMissing()
-          scope.remember(sessionId, false)
-          if (!warnedCompleteSection) {
-            warnedCompleteSection = true
-            ctx.logger?.warn?.(
-              'ERR_HOST_COMPLETE_SECTION: the final system prompt does not carry the dsh-boost protocol section (a complete prompt section replaced the assembly); substitution is disabled for affected requests',
-            )
+        // A `complete: true` prompt section replaces every other section after
+        // the assembly waterfall, so the protocol text
+        // `system-prompt/assemble` patched in is gone from the request the
+        // model actually receives. The host exposes no code or flag for that
+        // restoration; the outgoing system prompt is the first place it is
+        // observable. Detect it, count it, and fail closed: without the
+        // protocol there is nothing to teach the plan grammar, so substitution
+        // (and the projection that shares the same visibility gate) must not
+        // act for this request (review row 12).
+        if (
+          typeof sessionId === 'string' &&
+          request.purpose !== SELECTOR_PURPOSE &&
+          scope.judgement(sessionId)
+        ) {
+          const systemText = systemTextOf(options)
+          if (systemText !== undefined && !systemText.includes(PROTOCOL_PROBE)) {
+            counters.protocolSuppressed()
+            counters.protocolMissing()
+            scope.remember(sessionId, false)
+            if (!warnedCompleteSection) {
+              warnedCompleteSection = true
+              ctx.logger?.warn?.(
+                'ERR_HOST_COMPLETE_SECTION: the final system prompt does not carry the dsh-boost protocol section (a complete prompt section replaced the assembly); substitution is disabled for affected requests',
+              )
+            }
           }
         }
+      } catch {
+        // Detection must never break the model request.
       }
-    } catch {
-      // Detection must never break the model request.
-    }
-    return next()
-  })
+      return next()
+    },
+    { prepend: true },
+  )
 
   // `session/event` carries a plain `type` string, so `turn/end` is matched by
   // value, not by a stable code. That match is a convenience: it flushes early
@@ -618,21 +742,19 @@ function wireSessionEvents(
 /**
  * Register the `boost` tool family.
  *
- * After T19 the family is just this one tool; T23b's substitution path depends
- * on the same `tools.resolve` probe. The tool itself is scope-exempt
+ * After T19 the family is just this one tool. The tool itself is scope-exempt
  * (`when: () => true`) because it is the only way a user can enable a workspace
  * that is not enabled yet — gating it on the scope document would make
  * `selected + []` impossible to leave. The protocol section is not exempt; T17
  * already handles it.
  *
- * Without step-level `when` a conditional registration would silently become
- * unconditional, so the whole family is skipped and the stable code is logged.
+ * No step-`when` capability probe is needed: the condition is constant-true, so
+ * a host that ignored the registration options would register it
+ * unconditionally — exactly the behaviour this build wants. A previous probe
+ * only tested `typeof tools.register === 'function'`, which every host since
+ * 0.2.2-rc.1 satisfies, so its `ERR_HOST_NO_STEP_WHEN` branch could never run.
  */
 function registerBoostTool(ctx: PluginContext, deps: BoostDeps): void {
-  if (!supportsStepWhen(ctx.tools)) {
-    ctx.logger?.warn?.('ERR_HOST_NO_STEP_WHEN')
-    return
-  }
   // Annotating with the host's ToolDefinition makes a host-side tightening a
   // build error instead of a runtime registration failure. The tool is
   // scope-exempt by design (`when: () => true`), so it needs no registry: the
@@ -668,13 +790,15 @@ export function apply(ctx: PluginContext, config: unknown): void {
   if (repairs.length > 0) {
     ctx.logger?.info?.(`dsh-boost: ${repairs.length} configuration value(s) repaired`)
   }
+  // The only version guard outside the managed-install preflight. Advisory:
+  // an unverified host is a warning, never a refusal to load.
+  reportHostVersion(ctx)
 
   if (!canRegister(ctx)) {
     ctx.logger?.warn?.('dsh-boost: host hook services unavailable; registration skipped')
     return
   }
 
-  let hooksMounted = false
   try {
     // The root was resolved above (D4) so the log can show it; both stores use
     // the same value. `resolveBoostRoot` is the only root rule (design §10), so
@@ -699,6 +823,10 @@ export function apply(ctx: PluginContext, config: unknown): void {
     // projections and admission.
     const registry = lazyService<WorkspaceRegistry>(ctx, 'workspaceRegistry')
     const spill = lazyService<SpillBackend>(ctx, 'spillStore')
+    // `llm` is soft (see `inject`): projection and admission never need it, and
+    // the selector checks it at call time. A getter keeps a provider that
+    // becomes active after `apply` reachable on the next decision.
+    const llm = lazyService<LlmLike>(ctx, 'llm')
     const meter = meterSeamOf(ctx)
     const projectionCounters = new ProjectionCounters()
 
@@ -714,7 +842,6 @@ export function apply(ctx: PluginContext, config: unknown): void {
       get hasSpill() {
         return spill() !== undefined
       },
-      supportsStepWhen: supportsStepWhen(ctx.tools),
       get hasWorkspaceRegistry() {
         return registry() !== undefined
       },
@@ -758,22 +885,28 @@ export function apply(ctx: PluginContext, config: unknown): void {
         return meter.kind()
       },
       projectionCounters,
-      llm: ctx.llm,
+      get llm() {
+        return llm()
+      },
       selectorRoute: (sessionId) => routes.get(sessionId),
     }
-    // The section mount is the first thing `registerHooks` touches and the
-    // host's duplicate error carries no code: any throw here means a previous
-    // apply already owns the mounts. Count it and leave them untouched instead
-    // of risking a second hook registration.
+    // The section mount is the first thing `registerHooks` touches. Only the
+    // host's genuine duplicate error means a previous apply already owns the
+    // mounts; every other throw is a wiring failure that must be named and must
+    // not take the control tool down with it (finding 8).
     try {
       registerHooks(ctx, deps)
-      hooksMounted = true
     } catch (error) {
-      duplicateMountAttempts += 1
+      if (isDuplicateSectionError(error)) {
+        duplicateMountAttempts += 1
+        ctx.logger?.warn?.(
+          `dsh-boost: ERR_BOOST_ALREADY_MOUNTED: duplicate apply #${duplicateMountAttempts} found an existing mount; registration skipped (${messageOf(error)})`,
+        )
+        return
+      }
       ctx.logger?.warn?.(
-        `dsh-boost: ERR_BOOST_ALREADY_MOUNTED: duplicate apply #${duplicateMountAttempts} found an existing mount; registration skipped (${messageOf(error)})`,
+        `dsh-boost: ERR_BOOST_SECTION_REGISTER_FAILED: prompt section registration failed; continuing with the remaining mounts (${messageOf(error)})`,
       )
-      return
     }
 
     // The clock/visibility warm and the session-end cleanup. Wired separately
@@ -784,12 +917,12 @@ export function apply(ctx: PluginContext, config: unknown): void {
       ctx.logger?.warn?.(`dsh-boost: session wiring failed: ${messageOf(error)}`)
     }
 
-    // After the hooks: `registerHooks` mounts the prompt section first and
-    // throws on a duplicate, so a second `apply` aborts above before it can
-    // register the tool twice.
-    registerBoostTool(
-      ctx,
-      {
+    // After the hooks: a genuine duplicate aborts above before it can register
+    // the tool twice. A different section failure still reaches here, and so
+    // does a tool registration failure of its own — neither may be swallowed
+    // behind the other's diagnosis.
+    try {
+      registerBoostTool(ctx, {
         scope,
         receipts,
         host: hostFacts,
@@ -810,18 +943,15 @@ export function apply(ctx: PluginContext, config: unknown): void {
         unknownTools: () => projectionCounters.unknownToolCounts(),
         protocolSuppressed: () => projectionCounters.protocolSuppressions(),
         completeSectionSuppressions: () => projectionCounters.protocolMissings(),
-      },
-    )
-  } catch (error) {
-    // The tool is the user's only control surface, so its failure must not be
-    // reported as a hook failure (that would hide the degradation behind a
-    // misleading message).
-    if (hooksMounted) {
+      })
+    } catch (error) {
+      // The tool is the user's only control surface; its failure is reported
+      // on its own, never as a hook failure.
       ctx.logger?.warn?.(
         `dsh-boost: boost tool registration failed (ERR_BOOST_TOOL_REGISTER_FAILED): ${messageOf(error)}`,
       )
-      return
     }
+  } catch (error) {
     ctx.logger?.warn?.(`dsh-boost: hook registration skipped: ${messageOf(error)}`)
   }
 }

@@ -102,7 +102,12 @@ export function fakeHost(overrides: Record<string, unknown> = {}): any {
     systemPrompt: {
       section(section: Section): () => void {
         if (sections.has(section.name)) {
-          throw new Error(`fakeHost: system prompt section "${section.name}" is already registered`)
+          // The real host's wording: a plain Error whose message names the
+          // section and says it is already registered. `apply` classifies a
+          // duplicate mount on exactly that message.
+          throw new Error(
+            `prompt section "${section.name}" is already registered (for a per-agent override, register through that agent's \`agent.ctx\` instead)`,
+          )
         }
         sections.set(section.name, section)
         lastSection = section
@@ -135,9 +140,23 @@ export function fakeHost(overrides: Record<string, unknown> = {}): any {
     },
 
     // --- hook surface (real waterfall contract: fixed args, zero-arg next) ---
-    on(name: string, handler: (...args: any[]) => unknown): void {
+    /**
+     * Register one listener, honouring cordis's `prepend` option.
+     *
+     * Cordis runs the first-registered listener outermost, so a listener
+     * registered with `{ prepend: true }` (or the boolean shorthand) must run
+     * before every earlier one. Recording the real order is what lets a test
+     * catch a detector that was mounted after the hook it must precede.
+     */
+    on(
+      name: string,
+      handler: (...args: any[]) => unknown,
+      options?: boolean | { prepend?: boolean },
+    ): void {
       const list = hooks.get(name) ?? []
-      list.push(handler)
+      const prepend = options === true || (typeof options === 'object' && options?.prepend === true)
+      if (prepend) list.unshift(handler)
+      else list.push(handler)
       hooks.set(name, list)
     },
     /**

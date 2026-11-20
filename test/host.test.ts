@@ -846,13 +846,16 @@ test('status reports fixedOverheadTokens and the snake_case projection ledger', 
 test('status degrades with stable codes, not the internal scope-degraded label', async (t) => {
   const dir = await mkdtemp(join(tmpdir(), 'dsh-boost-status-'))
   t.after(() => rm(dir, { recursive: true, force: true }))
+  // A malformed document is a genuine degradation; a missing one is the clean
+  // default and must stay silent (pinned in scope-store.test.ts).
+  await writeFile(join(dir, 'scope.json'), '{ not json')
   const { runBoost } = await import('../src/tools/boost.ts')
   const { ScopeStore } = await import('../src/scope/store.ts')
   const r = await runBoost({ args: { cmd: 'status' }, scope: new ScopeStore(dir), receipts: new ReceiptStore(dir) })
   assert.equal(r.ok, true)
   if (!r.ok) return
   const data = r.data as Any
-  assert.deepEqual(data.degraded, ['ERR_SCOPE_READ_FAILED'])
+  assert.deepEqual(data.degraded, ['ERR_SCOPE_PARSE_FAILED'])
   assert.equal(data.degraded.includes('scope-degraded'), false)
 })
 

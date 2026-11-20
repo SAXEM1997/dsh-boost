@@ -119,9 +119,21 @@ async function createIntegration(options: { config?: Any } = {}): Promise<Integr
 
   const state: Integration['state'] = { main: [], selector: [], selectorRequests: [] }
   const registry = { list: () => [{ id: WORKSPACE, path: CWD }] }
+  // `llm` is a soft service: the selector reaches it through `ctx.get`, so the
+  // fake must expose the same object both ways (a real cordis context does).
+  const llm = {
+    stream(request: GenerateOptions): AsyncIterable<StreamChunk> {
+      if (request.purpose === SELECTOR_PURPOSE) {
+        state.selectorRequests.push(request)
+        return streamOf(state.selector)
+      }
+      return streamOf(state.main)
+    },
+  }
   const host = fakeHost({
     get(name: string) {
       if (name === 'workspaceRegistry') return registry
+      if (name === 'llm') return llm
       // Substitution is now gated on the token meter (design §9); the shipped
       // `dsh-base` profile loads `dsh-token-meter`, so this is the realistic
       // host these end-to-end paths run on.
@@ -134,15 +146,7 @@ async function createIntegration(options: { config?: Any } = {}): Promise<Integr
       }
       return undefined
     },
-    llm: {
-      stream(request: GenerateOptions): AsyncIterable<StreamChunk> {
-        if (request.purpose === SELECTOR_PURPOSE) {
-          state.selectorRequests.push(request)
-          return streamOf(state.selector)
-        }
-        return streamOf(state.main)
-      },
-    },
+    llm,
   })
   plugin.apply(host, { stepsPerTurn: 8, ...(options.config ?? {}) })
 

@@ -522,3 +522,67 @@ test('row 12: a complete section swallowing the protocol is detected and substit
   )
   assert.deepEqual(await receiptCodes(app.root, 's1'), ['skip:no-scope'])
 })
+
+// ---------------------------------------------------------------------------
+// Finding 4: the complete-section detector must be outermost on llm/stream.
+// ---------------------------------------------------------------------------
+
+test('finding 4: the complete-section detector runs before the synthesizer', async () => {
+  const app = await applyHost()
+  app.services.set('tokenMeter', { estimateMessage: () => 7 })
+  await new ScopeStore(app.root).write(
+    doc => ({ ...doc, mode: 'global', shadow: false, projection: 'off' }),
+    0,
+  )
+  app.services.set('workspaceRegistry', GLOBAL_REGISTRY)
+  const agent = makeAgent('s1', '/real/w/a')
+
+  await preStep(app.host, agent, 1, 1)
+
+  // The model answers with a one-candidate plan; a single candidate is the
+  // deterministic-single exemption, so the next matching receipt enqueues.
+  const plan =
+    '<CHISEL_PLAN>\n' +
+    '{"goal":"g","steps":[{"id":"A","tool":"read","args":{"file_path":"/real/w/a/f"},"guards":[{"text_contains":"TRIGGER"}]}]}\n' +
+    '</CHISEL_PLAN>'
+  app.host.llm.stream = async function* () {
+    yield { type: 'text-delta', text: plan }
+  }
+  for await (const _chunk of app.host.stream('s1', {})) {
+    // Drain the real request so the plan is remembered.
+  }
+
+  await app.host.callHook(
+    'tools/post-execute',
+    [
+      { name: 'read', callId: 'c1', agent, arguments: { file_path: '/real/w/a/f' } },
+      { content: [{ type: 'text', text: 'TRIGGER' }] },
+    ],
+    () => ({ kind: 'accept' }),
+  )
+
+  // A complete section replaced the prompt, and the request still carries the
+  // anchored receipt (otherwise an anchor reset would pass for the wrong
+  // reason). The detector must mark the session before the synthesizer reads
+  // the queued entry; registration order decides, and cordis runs the first
+  // registered listener outermost.
+  app.host.nextCalls = 0
+  app.host.synthesized = 0
+  const chunks: any[] = []
+  for await (const chunk of app.host.stream('s1', {
+    messages: [
+      { role: 'system', content: [{ type: 'text', text: 'persona only' }] },
+      { role: 'tool', content: [{ type: 'text', text: 'TRIGGER' }] },
+    ],
+  })) {
+    chunks.push(chunk)
+  }
+
+  assert.equal(app.host.synthesized, 0, 'the queued substitution must not be synthesized')
+  assert.equal(app.host.nextCalls, 1, 'the real model request must pass through')
+  assert.equal(
+    chunks.some(chunk => chunk?.type === 'tool-call-delta'),
+    false,
+    'no synthesized call may reach the request',
+  )
+})

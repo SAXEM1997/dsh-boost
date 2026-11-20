@@ -172,7 +172,9 @@ test('scope-set 拒绝 version / revision 字段且不写盘', async () => {
     const read = await d.scope.read()
     assert.equal(read.doc.revision, 0, JSON.stringify(body))
     assert.equal(read.doc.mode, 'selected', JSON.stringify(body))
-    assert.equal(read.degraded, 'scope-degraded', JSON.stringify(body))
+    // A fresh root has no scope.json; that is the clean default, not a
+    // degraded read. The invalid body still leaves the document untouched.
+    assert.equal(read.degraded, undefined, JSON.stringify(body))
   }
 })
 
@@ -369,10 +371,8 @@ test('status 空收据目录返回零账目而不是抛错', async () => {
     retrievals: 0,
   })
   assert.deepEqual(status.scope, { mode: 'selected', workspaceIds: [], revision: 0 })
-  // A fresh root has no scope.json; the store's degraded read is the honest
-  // answer, not a status failure — and status reports the stable code, not the
-  // store's internal `scope-degraded` label.
-  assert.deepEqual(status.degraded, ['ERR_SCOPE_READ_FAILED'])
+  // A fresh root has no scope.json; that is the clean default, not a failure.
+  assert.deepEqual(status.degraded, [])
 })
 
 test('status 计数跨分片，空 sessionId 的 skip:no-scope 也计入', async () => {
@@ -881,7 +881,7 @@ test('status 把 projection-skipped:no-spill 映射为 ERR_HOST_NO_SPILL（过�
 
   const status = await getStatus(d)
   assert.equal(status.counts['projection-skipped:no-spill'], 1)
-  assert.deepEqual(status.degraded, ['ERR_HOST_NO_SPILL', 'ERR_SCOPE_READ_FAILED'])
+  assert.deepEqual(status.degraded, ['ERR_HOST_NO_SPILL'])
   // Without a host probe (this test builds none), status must not invent the
   // capability codes: the token-meter label comes from the host facts, not the
   // receipt stream.
