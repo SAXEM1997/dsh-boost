@@ -570,6 +570,148 @@ test('status 净额 = 非取回毛额回放 − 取回内容回放 − 取回调
   assert.equal(status.projection_horizon_steps, 20)
 })
 
+test('F4 每条投影按自己的 horizon 回放：历史净额不随当前 horizon 跳动', async () => {
+  const d = await deps()
+  const ts = new Date().toISOString()
+  // Two receipts from different moments. One was measured with no remaining
+  // steps, the other with three; neither may be re-valued by today's horizon.
+  await d.receipts.append({
+    version: 1,
+    ts,
+    sessionId: 's1',
+    turn: 1,
+    kind: 'projection',
+    code: 'projected',
+    unit: 'raw',
+    saved_projection_tokens: 100,
+    horizon_steps: 0,
+  })
+  await d.receipts.append({
+    version: 1,
+    ts,
+    sessionId: 's2',
+    turn: 1,
+    kind: 'projection',
+    code: 'projected',
+    unit: 'raw',
+    saved_projection_tokens: 100,
+    horizon_steps: 3,
+  })
+  await d.receipts.flush()
+
+  const status = await runBoost({ args: { cmd: 'status' }, ...d, horizonSteps: 20 })
+  assert.equal(status.ok, true, JSON.stringify(status))
+  if (!status.ok) return
+  const data = status.data as BoostStatus
+  assert.equal(data.projection_gross_tokens, 200)
+  // 100 × (1 + 0) + 100 × (1 + 3); the current horizon of 20 applies to none.
+  assert.equal(data.projection_gross_replay_tokens, 500)
+  assert.equal(data.saved.projectionGross, 500)
+  assert.equal(data.projection_horizon_steps, 20, 'the current horizon is still reported')
+  assert.equal(data.projection_horizon_reestimated, 0, 'every receipt carried its own horizon')
+})
+
+test('F4 老收据缺 horizon_steps：用当前 horizon 复算并在输出里标明是重估', async () => {
+  const d = await deps()
+  await d.receipts.append({
+    version: 1,
+    ts: new Date().toISOString(),
+    sessionId: 's1',
+    turn: 1,
+    kind: 'projection',
+    code: 'projected',
+    unit: 'raw',
+    saved_projection_tokens: 100,
+  })
+  await d.receipts.flush()
+
+  const status = await runBoost({ args: { cmd: 'status' }, ...d, horizonSteps: 5 })
+  assert.equal(status.ok, true, JSON.stringify(status))
+  if (!status.ok) return
+  const data = status.data as BoostStatus
+  assert.equal(data.projection_gross_replay_tokens, 600, '100 × (1 + 5)')
+  assert.equal(data.projection_horizon_reestimated, 1, 'the operator must see this was re-estimated')
+})
+
+test('F4 当前 horizon 变化只影响缺字段的老收据', async () => {
+  const d = await deps()
+  const ts = new Date().toISOString()
+  await d.receipts.append({
+    version: 1,
+    ts,
+    sessionId: 's1',
+    turn: 1,
+    kind: 'projection',
+    code: 'projected',
+    unit: 'raw',
+    saved_projection_tokens: 100,
+    horizon_steps: 2,
+  })
+  await d.receipts.append({
+    version: 1,
+    ts,
+    sessionId: 's2',
+    turn: 1,
+    kind: 'projection',
+    code: 'projected',
+    unit: 'raw',
+    saved_projection_tokens: 100,
+  })
+  await d.receipts.flush()
+
+  const low = await runBoost({ args: { cmd: 'status' }, ...d, horizonSteps: 0 })
+  const high = await runBoost({ args: { cmd: 'status' }, ...d, horizonSteps: 10 })
+  assert.equal(low.ok && high.ok, true)
+  if (!low.ok || !high.ok) return
+  const before = low.data as BoostStatus
+  const after = high.data as BoostStatus
+
+  // The pinned receipt contributes 300 in both calls; only the legacy one moves.
+  assert.equal(before.projection_gross_replay_tokens, 300 + 100)
+  assert.equal(after.projection_gross_replay_tokens, 300 + 1_100)
+  assert.equal(before.projection_horizon_reestimated, 1)
+  assert.equal(after.projection_horizon_reestimated, 1)
+})
+
+test('F4 净额按每条取回收据自己的 horizon 回放内容，调用块只收一次', async () => {
+  const d = await deps()
+  const ts = new Date().toISOString()
+  await d.receipts.append({
+    version: 1,
+    ts,
+    sessionId: 's1',
+    turn: 1,
+    kind: 'projection',
+    code: 'projected',
+    unit: 'raw',
+    saved_projection_tokens: 100,
+    horizon_steps: 0,
+  })
+  await d.receipts.append({
+    version: 1,
+    ts,
+    sessionId: 's1',
+    turn: 1,
+    kind: 'projection',
+    code: 'projection-retrieval',
+    retrieved: true,
+    retrieval_call_tokens: 10,
+    retrieval_content_tokens: 20,
+    retrieval_tokens: 30,
+    horizon_steps: 2,
+  })
+  await d.receipts.flush()
+
+  const status = await runBoost({ args: { cmd: 'status' }, ...d, horizonSteps: 20 })
+  assert.equal(status.ok, true, JSON.stringify(status))
+  if (!status.ok) return
+  const data = status.data as BoostStatus
+  assert.equal(data.projection_gross_replay_tokens, 100, '100 × (1 + 0)')
+  // 100 − 20 × (1 + 2) − 10.
+  assert.equal(data.projection_net_tokens, 30)
+  assert.equal(data.saved.projectionNet, 30)
+})
+
 test('unpriced retrieval makes the net unknown instead of free', async () => {
   const d = await deps()
   await d.receipts.append({
@@ -744,6 +886,34 @@ test('status 把 projection-skipped:no-spill 映射为 ERR_HOST_NO_SPILL（过�
   // capability codes: the token-meter label comes from the host facts, not the
   // receipt stream.
   assert.equal(status.degraded.includes('ERR_HOST_NO_TOKENMETER'), false)
+})
+
+test('status 把 projection-skipped:no-footer 映射为 ERR_HOST_NO_SPILL_NOTICE', async () => {
+  const d = await deps()
+  await d.receipts.append({
+    version: 1,
+    ts: new Date().toISOString(),
+    sessionId: 's1',
+    turn: 1,
+    kind: 'skip',
+    code: 'projection-skipped:no-footer',
+  })
+  await d.receipts.flush()
+
+  const status = await getStatus(d)
+  assert.equal(status.counts['projection-skipped:no-footer'], 1)
+  // A missing notice module disables every apply-mode projection, so it is a
+  // host degradation, not an ordinary "not worth it" skip. Without the mapping
+  // the operator saw a healthy spill path and zero projections.
+  assert.ok(
+    status.degraded.includes('ERR_HOST_NO_SPILL_NOTICE'),
+    JSON.stringify(status.degraded),
+  )
+  // `degraded` carries stable codes only: the receipt code is an input.
+  assert.equal(
+    status.degraded.some((code) => code.startsWith('projection-skipped:')),
+    false,
+  )
 })
 
 test('status 在 scope.json 不可读时报稳定码切仍给出账目', async () => {

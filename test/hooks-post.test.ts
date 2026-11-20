@@ -981,6 +981,115 @@ test('O11 投影 shadow 只记账：kind=shadow、before/after、decision 不被
   assert.equal(env.receipts.some((r) => r.kind === 'projection'), false)
 })
 
+test('F1 缺 spill notice 模块：只记一条降级日志，收据保持原样', async () => {
+  const warnings: string[] = []
+  const big = 'x'.repeat(4000)
+  const env = setup({
+    doc: doc({ projection: 'on' }),
+    deps: {
+      estimateText: (text: string) => Math.ceil(text.length / 4),
+      logger: { warn: (message: string) => warnings.push(message) },
+      // The host package is a devDependency here; this seam is how a test
+      // states "the notice module resolved nothing" without uninstalling it.
+      resolveFooter: () => undefined,
+      spill: {
+        saveText: async () => ({ locator: '/spill/read.txt', retrievalHint: 'read it' }),
+      },
+    },
+  })
+
+  const first = await runPost(env.host, big, { kind: 'accept' }, { arguments: { file_path: '/big' } })
+  const second = await runPost(
+    env.host,
+    big,
+    { kind: 'accept' },
+    { arguments: { file_path: '/big' }, callId: 'root-call-2' },
+  )
+
+  assert.equal(Object.hasOwn(first, 'content'), false, 'a missing footer must leave the receipt alone')
+  assert.equal(Object.hasOwn(second, 'content'), false)
+  assert.equal(
+    env.receipts.filter((r) => r.code === 'projection-skipped:no-footer').length,
+    2,
+    'each skipped projection is receipted',
+  )
+  assert.equal(
+    warnings.filter((message) => message.includes('ERR_HOST_NO_SPILL_NOTICE')).length,
+    1,
+    `one log line, not one per receipt: ${JSON.stringify(warnings)}`,
+  )
+})
+
+test('F4 投影收据记录决策时的 horizon_steps，而不是留给 status 用当前值复算', async () => {
+  const big = 'x'.repeat(4000)
+  const env = setup({
+    doc: doc({ projection: 'on' }),
+    deps: {
+      config: { ...DEFAULT_CONFIG, horizonSteps: 7 },
+      estimateText: (text: string) => Math.ceil(text.length / 4),
+      spill: {
+        saveText: async () => ({ locator: '/spill/read.txt', retrievalHint: 'read it' }),
+      },
+    },
+  })
+
+  await runPost(env.host, big, { kind: 'accept' }, { arguments: { file_path: '/big' } })
+
+  const projection = env.receipts.find((r) => r.kind === 'projection' && r.code === 'projected')
+  assert.ok(projection, 'the applied projection is receipted')
+  assert.equal(projection.horizon_steps, 7, 'the receipt pins the horizon its saving was measured under')
+})
+
+test('F4 装配提供 per-session 运行期 horizon 时，收据记录它而不是配置值', async () => {
+  const big = 'x'.repeat(4000)
+  const env = setup({
+    doc: doc({ projection: 'on' }),
+    deps: {
+      config: { ...DEFAULT_CONFIG, horizonSteps: 7 },
+      // Design §5.3: min(config, session mean). The assembly owns the runtime
+      // instance, so the decision path must ask for *this* session's value.
+      horizonFor: (sessionId: string) => (sessionId === SESSION ? 3 : 99),
+      estimateText: (text: string) => Math.ceil(text.length / 4),
+      spill: {
+        saveText: async () => ({ locator: '/spill/read.txt', retrievalHint: 'read it' }),
+      },
+    },
+  })
+
+  await runPost(env.host, big, { kind: 'accept' }, { arguments: { file_path: '/big' } })
+
+  const projection = env.receipts.find((r) => r.kind === 'projection' && r.code === 'projected')
+  assert.ok(projection, 'the applied projection is receipted')
+  assert.equal(projection.horizon_steps, 3, 'the runtime horizon wins over the configured one')
+})
+
+test('F4 取回收据同样记录 horizon_steps：它的内容也参与回放', async () => {
+  const big = 'x'.repeat(4000)
+  const env = setup({
+    doc: doc({ projection: 'on' }),
+    deps: {
+      config: { ...DEFAULT_CONFIG, horizonSteps: 4 },
+      estimateText: (text: string) => Math.ceil(text.length / 4),
+      retrievals: new RetrievalLedger(),
+      spill: {
+        saveText: async () => ({ locator: '/spill/read.txt', retrievalHint: 'read it' }),
+      },
+    },
+  })
+
+  await runPost(env.host, big, { kind: 'accept' }, { arguments: { file_path: '/big' } })
+  await runPost(
+    env.host,
+    'the omitted middle',
+    { kind: 'accept' },
+    { arguments: { file_path: '/spill/read.txt' }, callId: 'retrieval-1' },
+  )
+
+  const retrieval = env.receipts.find((r) => r.code === 'projection-retrieval')
+  assert.ok(retrieval, 'a read of the spill locator is a counted retrieval')
+  assert.equal(retrieval.horizon_steps, 4)
+})
+
 test('O11 projection off 不投影、不写投影收据', async () => {
   const env = setup({ doc: doc({ projection: 'off' }), deps: { estimateText: () => 1 } })
   env.plans.set(SESSION, { goal: 'g', steps: [candidate('A', 'IMPOSSIBLE')] })

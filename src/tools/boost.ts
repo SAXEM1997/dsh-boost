@@ -34,8 +34,10 @@
  * - `status.degraded` is a list of **stable codes only** (`ERR_HOST_*` /
  *   `ERR_SCOPE_*`). The scope store's internal `scope-degraded` label and the
  *   receipt stream's `projection-skipped:*` are inputs, not output: a receipt
- *   code is mapped to `ERR_HOST_NO_SPILL`, and a degraded scope read passes its
- *   `ERR_SCOPE_*` code through. The two estimator absences are separate codes:
+ *   code is mapped to `ERR_HOST_NO_SPILL` (no spill backend) or
+ *   `ERR_HOST_NO_SPILL_NOTICE` (backend present, notice module cannot render
+ *   the footer), and a degraded scope read passes its `ERR_SCOPE_*` code
+ *   through. The two estimator absences are separate codes:
  *   `ERR_HOST_NO_TOKENMETER` is the host service probe (`apply` records whether
  *   the synchronous token meter exists), while `ERR_HOST_NO_ESTIMATOR` is the
  *   pure fixed-cost package being unreachable. One can exist without the other,
@@ -71,7 +73,7 @@ import {
 } from '../scope/doc.js'
 import type { ScopeCode, ScopeDoc } from '../scope/doc.js'
 import type { ScopeStore } from '../scope/store.js'
-import type { ReceiptStore } from '../receipts/store.js'
+import type { Receipt, ReceiptStore } from '../receipts/store.js'
 
 /** Stable failure code: `cmd` names no subcommand this tool implements. */
 const ERR_BOOST_UNKNOWN_CMD = 'ERR_BOOST_UNKNOWN_CMD'
@@ -98,6 +100,17 @@ const SCOPE_CODES: ReadonlySet<string> = new Set([
 
 /** Stable host degradation codes (design §9; the frozen set `status` reports). */
 const ERR_HOST_NO_SPILL = 'ERR_HOST_NO_SPILL'
+/**
+ * Stable degradation code: the host spill-notice module has no footer renderer.
+ *
+ * Apply-mode projection cannot compose its footer without `formatSpillNotice`,
+ * so every receipt is left intact and recorded as
+ * `projection-skipped:no-footer`. That is a host-level absence, not an ordinary
+ * "not worth it" skip: without this code `status` reported a healthy spill path
+ * while projection silently never ran. Its producer is the receipt stream
+ * (there is no service probe — the module is reached by `import()` only).
+ */
+const ERR_HOST_NO_SPILL_NOTICE = 'ERR_HOST_NO_SPILL_NOTICE'
 const ERR_HOST_NO_TOKENMETER = 'ERR_HOST_NO_TOKENMETER'
 const ERR_HOST_NO_ESTIMATOR = 'ERR_HOST_NO_ESTIMATOR'
 const ERR_HOST_PLATFORM_UNSUPPORTED = 'ERR_HOST_PLATFORM_UNSUPPORTED'
@@ -143,9 +156,16 @@ const ERR_HOST_COMPLETE_SECTION = 'ERR_HOST_COMPLETE_SECTION'
  * the spill backend is absent (design §5.4), so it is the real producer behind
  * `ERR_HOST_NO_SPILL`. The same code is also derived from the host probe when
  * `projection: 'on'`; the two channels are deduplicated, not mutually exclusive.
+ *
+ * `projection-skipped:no-footer` is a different absence with a different fix:
+ * the spill backend exists but the host spill-notice module does not render a
+ * footer, so `projectApply` refuses to replace anything. Mapping it to
+ * `ERR_HOST_NO_SPILL_NOTICE` is what keeps the plugin's headline feature from
+ * being silently off while `status` calls the spill path healthy.
  */
 const RECEIPT_DEGRADATION: ReadonlyArray<{ readonly code: string; readonly degraded: string }> = [
   { code: 'projection-skipped:no-spill', degraded: ERR_HOST_NO_SPILL },
+  { code: 'projection-skipped:no-footer', degraded: ERR_HOST_NO_SPILL_NOTICE },
   // The substitution refusal writes the stable code itself, so a status built
   // without host facts still reports the reason the decision path recorded.
   { code: ERR_HOST_NO_TOKENMETER, degraded: ERR_HOST_NO_TOKENMETER },
@@ -199,7 +219,14 @@ export interface BoostDeps {
    * receipt that says `unknown` is more useful than one that is wrong.
    */
   estimateKind?: 'host' | 'unknown'
-  /** Replay horizon used by the net formula; defaults to the design's 20. */
+  /**
+   * The current replay horizon; defaults to the design's 20.
+   *
+   * Receipts carry their own `horizon_steps`, so this is only the fallback for
+   * receipts written before that field existed (counted in
+   * `projection_horizon_reestimated`) — not a factor applied to the whole
+   * ledger.
+   */
   horizonSteps?: number
   /** Locators evicted by the per-session cap; status-time read. */
   locatorEvictions?: () => number
@@ -279,15 +306,18 @@ export interface BoostStatus {
     substitution: number
     /**
      * Σ `saved_projection_tokens` over non-retrieval projections, **replayed**
-     * by `(1 + horizonSteps)`.
+     * by each receipt's own `horizon_steps`.
      *
      * Replay-aware so this legacy object no longer mixes a one-time gross with
      * a replay net (review R2). The one-time figure is the top-level
-     * `projection_gross_tokens`.
+     * `projection_gross_tokens`. A receipt that predates `horizon_steps` is
+     * replayed at the current horizon; `projection_horizon_reestimated` counts
+     * those, so a re-estimated figure is never mistaken for a measured one.
      */
     projectionGross: number | 'unknown'
     /**
-     * `(gross_non_retrieval − retrieval_content) × (1 + horizon) − retrieval_calls`.
+     * Σ saved × (1 + that receipt's horizon) − Σ content × (1 + its horizon)
+     * − Σ call blocks − legacy replay-aware costs.
      *
      * `'unknown'` when any retrieval in the ledger is unpriced: an unmeasured
      * cost must never silently become zero (review R3).
@@ -327,8 +357,18 @@ export interface BoostStatus {
    * refused (design §9).
    */
   estimate_kind: 'host' | 'unknown'
-  /** The `(1 + horizon)` replay factor the net formula applies to both sides. */
+  /** The current `(1 + horizon)` replay factor; the fallback for old receipts. */
   projection_horizon_steps: number
+  /**
+   * Projection receipts replayed at {@link projection_horizon_steps} because
+   * they predate the per-receipt `horizon_steps` field.
+   *
+   * `0` means every replay figure in this report is the horizon its own
+   * decision was made under. A non-zero value marks that part of the net is
+   * re-estimated, not measured: an operator reading the shadow-week go/no-go
+   * must be able to tell the two apart.
+   */
+  projection_horizon_reestimated: number
   /**
    * Σ one-time `saved_projection_tokens` over applied projections whose call
    * was **not** itself a retrieval.
@@ -338,7 +378,7 @@ export interface BoostStatus {
    * from both sides (review I3).
    */
   projection_gross_tokens: number | 'unknown'
-  /** {@link projection_gross_tokens} after `(1 + horizon)` replay. */
+  /** {@link projection_gross_tokens} replayed at each receipt's own horizon. */
   projection_gross_replay_tokens: number | 'unknown'
   /** Σ one-time retrieval totals (call + content); `0` for unpriced receipts. */
   projection_retrieval_tokens: number
@@ -362,12 +402,14 @@ export interface BoostStatus {
    */
   projection_retrievals: number
   /**
-   * `(gross_non_retrieval − retrieval_content) × (1 + horizon) − retrieval_calls`.
+   * Σ saved × (1 + receipt horizon) − Σ retrieval content × (1 + its horizon)
+   * − Σ retrieval call blocks.
    *
    * The retrieval's own projection is not in the gross, the content it made
-   * visible replays, and its call block is charged once. `'unknown'` when a
-   * retrieval is unpriced or a meterless projection was clipped: a lower bound
-   * cannot be computed from a missing measurement.
+   * visible replays at the horizon in effect when the retrieval happened, and
+   * its call block is charged once. `'unknown'` when a retrieval is unpriced or
+   * a meterless projection was clipped: a lower bound cannot be computed from a
+   * missing measurement.
    */
   projection_net_tokens: number | 'unknown'
   /** Locators dropped by the per-session cap; a lossy ledger is visible. */
@@ -399,6 +441,26 @@ export interface BoostStatus {
 type ScopePatch = Partial<Pick<ScopeDoc, (typeof PATCH_FIELDS)[number]>>
 
 /**
+ * The replay horizon one projection receipt was measured under.
+ *
+ * The decision path writes `horizon_steps` on every projection receipt it
+ * produces. A receipt from before that field existed is replayed at the
+ * current horizon and flagged as re-estimated, so `status` can tell the
+ * operator how much of the net is measured rather than re-valued. A malformed
+ * value is treated as absent, never trusted.
+ */
+function replayOf(
+  receipt: Receipt,
+  fallback: number,
+): { horizon: number; reestimated: boolean } {
+  const raw = receipt.horizon_steps
+  if (typeof raw === 'number' && Number.isFinite(raw) && raw >= 0) {
+    return { horizon: Math.floor(raw), reestimated: false }
+  }
+  return { horizon: fallback, reestimated: true }
+}
+
+/**
  * The receipt aggregation behind `status`, kept separate from the document
  * read so the accounting has one home and one test surface.
  *
@@ -412,11 +474,23 @@ type ScopePatch = Partial<Pick<ScopeDoc, (typeof PATCH_FIELDS)[number]>>
  * `readErrors()` reports the count, so `status` has exactly one source for
  * `ERR_RECEIPTS_UNREADABLE` and a throwing store is an internal failure, not a
  * second degradation channel.
+ *
+ * The replay sums are computed here, per receipt, from each receipt's own
+ * `horizon_steps`. A receipt written before that field existed is replayed at
+ * `fallbackHorizon` (the current horizon) and counted in
+ * `horizonReestimated`, so the report can say how much of the net is measured
+ * rather than re-estimated.
  */
-async function aggregate(receipts: ReceiptStore): Promise<{
+async function aggregate(
+  receipts: ReceiptStore,
+  fallbackHorizon: number,
+): Promise<{
   counts: Record<string, number>
   substitution: number
   projectionGross: number
+  projectionGrossReplay: number
+  retrievalContentReplay: number
+  horizonReestimated: number
   unpricedProjections: number
   retrievalTokens: number
   retrievalContentTokens: number
@@ -430,6 +504,9 @@ async function aggregate(receipts: ReceiptStore): Promise<{
   const counts: Record<string, number> = Object.create(null)
   let substitution = 0
   let projectionGross = 0
+  let projectionGrossReplay = 0
+  let retrievalContentReplay = 0
+  let horizonReestimated = 0
   let unpricedProjections = 0
   let retrievalTokens = 0
   let retrievalContentTokens = 0
@@ -456,13 +533,19 @@ async function aggregate(receipts: ReceiptStore): Promise<{
 
     if (receipt.kind !== 'projection') continue
 
+    const replay = replayOf(receipt, fallbackHorizon)
+
     if (receipt.unit === 'raw' && receipt.call_was_retrieval !== true && receipt.retrieved !== true) {
       // T23b/T26 write `saved_projection_tokens`; `saved` is the pre-T23b
       // spelling this consumer accepted first. Never estimate a value here.
       // A retrieval's own projection is excluded from gross: its visible
       // window is charged as retrieval content instead (review I3).
       const saved = receipt.saved_projection_tokens ?? receipt.saved
-      if (typeof saved === 'number' && Number.isFinite(saved)) projectionGross += saved
+      if (typeof saved === 'number' && Number.isFinite(saved)) {
+        projectionGross += saved
+        projectionGrossReplay += saved * (1 + replay.horizon)
+        if (replay.reestimated) horizonReestimated += 1
+      }
       // A meterless projection carries `estimate:'unknown'` and no saved
       // figure. Reporting the remaining numeric sum as the gross would present
       // an unmeasured effect as zero (review R4).
@@ -490,6 +573,8 @@ async function aggregate(receipts: ReceiptStore): Promise<{
       retrievalTokens += total
       retrievalCallTokens += call
       retrievalContentTokens += content
+      retrievalContentReplay += content * (1 + replay.horizon)
+      if (replay.reestimated) horizonReestimated += 1
       continue
     }
 
@@ -518,6 +603,9 @@ async function aggregate(receipts: ReceiptStore): Promise<{
     counts,
     substitution,
     projectionGross,
+    projectionGrossReplay,
+    retrievalContentReplay,
+    horizonReestimated,
     unpricedProjections,
     retrievalTokens,
     retrievalContentTokens,
@@ -689,7 +777,10 @@ function degradationCodes(
 /** `status`: the scope document plus the receipt ledgers, never a failure. */
 async function statusCommand(deps: BoostDeps): Promise<BoostResult> {
   const read = await deps.scope.read()
-  const totals = await aggregate(deps.receipts)
+  const horizon = horizonOf(deps)
+  // Each receipt replays at its own horizon; `horizon` is only the fallback for
+  // receipts that predate the field, and `horizonReestimated` counts them.
+  const totals = await aggregate(deps.receipts, horizon)
   const fixedOverhead = await fixedOverheadOf(deps)
   const degraded = degradationCodes(totals.degraded, read, deps.host, fixedOverhead)
   // A shard the scan could not read is evidence, not a status failure: the
@@ -709,16 +800,14 @@ async function statusCommand(deps: BoostDeps): Promise<BoostResult> {
   // the workspace is visible but substitution cannot be taught, so the operator
   // must see why the plugin is inert.
   if (counterOf(deps.completeSectionSuppressions) > 0) degraded.push(ERR_HOST_COMPLETE_SECTION)
-  const horizon = horizonOf(deps)
   const estimateKind = estimateKindOf(deps)
-  const factor = 1 + horizon
 
   // Meterless projections have `estimate:'unknown'` receipts with no saved
   // figure. Reporting the numeric sum of the rest as 0/0 would be
   // indistinguishable from "projection had no effect" (review R4).
   const meterlessEvidence = totals.unpricedProjections > 0
   const grossOneTime = meterlessEvidence ? 'unknown' : totals.projectionGross
-  const grossReplay = grossOneTime === 'unknown' ? 'unknown' : grossOneTime * factor
+  const grossReplay = grossOneTime === 'unknown' ? 'unknown' : totals.projectionGrossReplay
 
   // A retrieval's own projection is excluded from gross; its content replays
   // with the gross, its call block is charged once, and a legacy cost was
@@ -728,7 +817,8 @@ async function statusCommand(deps: BoostDeps): Promise<BoostResult> {
   const projectionNet =
     netUnknown
       ? 'unknown'
-      : (totals.projectionGross - totals.retrievalContentTokens) * factor -
+      : totals.projectionGrossReplay -
+        totals.retrievalContentReplay -
         totals.retrievalCallTokens -
         totals.legacyRetrievalCost
 
@@ -753,6 +843,7 @@ async function statusCommand(deps: BoostDeps): Promise<BoostResult> {
     fixedOverhead,
     estimate_kind: estimateKind,
     projection_horizon_steps: horizon,
+    projection_horizon_reestimated: totals.horizonReestimated,
     projection_gross_tokens: grossOneTime,
     projection_gross_replay_tokens: grossReplay,
     projection_retrieval_tokens: totals.retrievalTokens,

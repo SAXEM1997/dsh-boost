@@ -285,6 +285,38 @@ export interface HookDeps {
    * Production omits it and the dynamically imported host function is used.
    */
   hasSpillNotice?: (text: string) => boolean
+  /**
+   * The host spill footer renderer, injected instead of imported.
+   *
+   * The same seam and the same reason as {@link hasSpillNotice}: the notice
+   * module is reached by `import()` only, and a test must be able to exercise
+   * the "module absent" path (which disables apply-mode projection) without
+   * uninstalling the host package. Returning `undefined` means the module has
+   * no renderer; production omits this and the dynamically imported host
+   * function is used.
+   */
+  resolveFooter?: () => FormatFooter | undefined | Promise<FormatFooter | undefined>
+  /**
+   * The session's runtime replay horizon (design §5.3), when the assembly can
+   * supply it.
+   *
+   * The horizon is `min(config horizon, mean of the session's last
+   * `historyTurns` turns)`. Its instance (`RuntimeStepHorizon`) is built in
+   * `src/index.ts` and read there by `status`; the decision path can only see
+   * it through this seam. A projection receipt pins whatever this returns, so
+   * a historical saving is never re-valued by a later cross-session minimum.
+   * Absent (the current production wiring) means the resolved config's
+   * `horizonSteps` is the horizon in effect.
+   */
+  horizonFor?: (sessionId: string) => number
+  /**
+   * The host logger, for the few conditions that have no other surface.
+   *
+   * `registerHooks` fills it from `ctx.logger` when absent, so production never
+   * passes it explicitly. A missing footer renderer is the one current caller:
+   * it logs once, and `status` reports the same condition as a stable code.
+   */
+  logger?: { warn(message: string): void }
 }
 
 /** The execution facts a `tools/post-execute` listener reads here. */
@@ -638,11 +670,47 @@ function resolveNoticePredicate(
  *
  * `projectApply` cannot statically import the spill policy for the same reason
  * the notice predicate cannot. A missing package makes apply-mode projection
- * degrade to `projection-skipped:no-footer` in `projectApply` itself.
+ * degrade to `projection-skipped:no-footer` in `projectApply` itself — and,
+ * because that turns the plugin's headline feature off, the first resolution
+ * that yields nothing is logged once (never per receipt, which would drown the
+ * log of a busy session). `status` maps the same receipt code to
+ * `ERR_HOST_NO_SPILL_NOTICE`, so the degradation also reaches the operator who
+ * never reads the log.
  */
 let footerFormatter: Promise<FormatFooter | undefined> | undefined
+/** One warning per process; a missing host module is not a per-call event. */
+let footerMissingLogged = false
 
-function resolveFooterFormatter(): Promise<FormatFooter | undefined> {
+/** Log the missing-footer degradation once; a foreign logger must not throw. */
+function noteMissingFooter(deps: HookDeps): void {
+  if (footerMissingLogged) return
+  footerMissingLogged = true
+  try {
+    deps.logger?.warn?.(
+      'dsh-boost: ERR_HOST_NO_SPILL_NOTICE: @deepseek-ai/dsh-spill-policy/notice resolved no formatSpillNotice; ' +
+        'apply-mode projection is disabled (projection-skipped:no-footer) until the host spill policy is available',
+    )
+  } catch {
+    // A logger failure must not become a tool failure.
+  }
+}
+
+function resolveFooterFormatter(deps: HookDeps): Promise<FormatFooter | undefined> {
+  // The seam wins over the memoised import, exactly like `hasSpillNotice`: a
+  // test states "the module resolved nothing" without uninstalling the host
+  // package. It is deliberately not memoised — it belongs to one deps object.
+  if (typeof deps.resolveFooter === 'function') {
+    return Promise.resolve()
+      .then(() => deps.resolveFooter?.())
+      .then((formatter) => {
+        if (formatter === undefined) noteMissingFooter(deps)
+        return formatter
+      })
+      .catch(() => {
+        noteMissingFooter(deps)
+        return undefined
+      })
+  }
   footerFormatter ??= import('@deepseek-ai/dsh-spill-policy/notice')
     .then((module) => {
       if (typeof module.formatSpillNotice !== 'function') return undefined
@@ -655,6 +723,10 @@ function resolveFooterFormatter(): Promise<FormatFooter | undefined> {
         )
     })
     .catch(() => undefined)
+    .then((formatter) => {
+      if (formatter === undefined) noteMissingFooter(deps)
+      return formatter
+    })
   return footerFormatter
 }
 
@@ -827,6 +899,10 @@ async function recordProjectionRetrieval(
       tool: name,
       retrieved: true,
       locator: pending.locator,
+      // The visible content replays over this horizon in `status`'s net, so it
+      // must be the horizon in effect when the retrieval happened, not one read
+      // from the whole ledger later.
+      horizon_steps: projectionHorizonOf(deps, sessionId),
       preview: previewOf(visibleText),
       ...(exec.arguments !== undefined ? { args: exec.arguments } : {}),
     }
@@ -1538,6 +1614,37 @@ function safeEstimate(estimate: (t: string) => number, text: string): number | u
   }
 }
 
+/**
+ * The replay horizon in effect for one projection decision, pinned on its receipt.
+ *
+ * `status` applies `(1 + horizon)` to every projection's saving. Reading one
+ * current horizon at status time re-valued receipts from other sessions and
+ * other moments whenever the cross-session minimum moved, so a historical net
+ * saving jumped when an unrelated session started or ended. The receipt now
+ * carries the horizon its decision was made under; `status` only falls back to
+ * the current horizon for receipts that predate the field, and says how many
+ * those were.
+ *
+ * The runtime horizon is design §5.3's `min(config, mean of the session's last
+ * historyTurns turns)`. Its instance lives in `src/index.ts` (`apply` builds
+ * one `RuntimeStepHorizon`), so the decision path can only read it through
+ * {@link HookDeps.horizonFor}; until that one line is wired, the resolved
+ * config's `horizonSteps` is the value in effect. A throwing or malformed
+ * answer falls back the same way, never to a fabricated number.
+ */
+function projectionHorizonOf(deps: HookDeps, sessionId: string): number {
+  try {
+    const live = deps.horizonFor?.(sessionId)
+    if (typeof live === 'number' && Number.isFinite(live) && live >= 0) return Math.floor(live)
+  } catch {
+    // A foreign horizon is evidence, never a reason to lose the receipt.
+  }
+  const raw = deps.config?.horizonSteps
+  return typeof raw === 'number' && Number.isFinite(raw) && raw >= 0
+    ? Math.floor(raw)
+    : DEFAULT_CONFIG.horizonSteps
+}
+
 /** `projection-skipped:<reason>`; `projectApply` already prefixes one reason. */
 function projectionSkipCode(reason: string): string {
   return reason.startsWith('projection-skipped:') ? reason : `projection-skipped:${reason}`
@@ -1619,6 +1726,9 @@ async function projectDecision(
           ledgerEntry(ctx, 'shadow', 'projection-shadow', {
             decision: 'projection',
             unit: 'raw',
+            // The shadow ledger's one-time figure is replayable with the same
+            // horizon as the applied one; pinning it keeps the two comparable.
+            horizon_steps: projectionHorizonOf(deps, ctx.sessionId),
             ...(ctx.retrievalCall === true ? { call_was_retrieval: true } : {}),
             ...(priced
               ? {
@@ -1644,7 +1754,7 @@ async function projectDecision(
       callId: typeof ctx.exec.callId === 'string' ? ctx.exec.callId : undefined,
       label: family,
       spill: deps.spill,
-      formatFooter: await resolveFooterFormatter(),
+      formatFooter: await resolveFooterFormatter(deps),
     })
 
     if (outcome.kind === 'applied') {
@@ -1657,7 +1767,8 @@ async function projectDecision(
       // (`deps.estimateKind`, defaulting to `'unknown'`), never a guess.
       // One-time `before`/`after`/`saved_projection_tokens` are the
       // authoritative names (§5.3); `status` applies the replay factor once to
-      // the aggregate, never per receipt.
+      // the aggregate, never per receipt. `horizon_steps` is the horizon this
+      // decision was made under, so a later status cannot re-value it.
       const before = estimate === undefined ? undefined : safeEstimate(estimate, target)
       const after = estimate === undefined ? undefined : safeEstimate(estimate, content)
       if (before !== undefined && after !== undefined) {
@@ -1665,6 +1776,7 @@ async function projectDecision(
           deps,
           ledgerEntry(ctx, 'projection', 'projected', {
             unit: 'raw',
+            horizon_steps: projectionHorizonOf(deps, ctx.sessionId),
             ...(ctx.retrievalCall === true ? { call_was_retrieval: true } : {}),
             before,
             after,
@@ -1677,6 +1789,7 @@ async function projectDecision(
           deps,
           ledgerEntry(ctx, 'projection', 'projected', {
             unit: 'raw',
+            horizon_steps: projectionHorizonOf(deps, ctx.sessionId),
             ...(ctx.retrievalCall === true ? { call_was_retrieval: true } : {}),
             estimate: 'unknown',
           }),
@@ -2131,6 +2244,10 @@ export function registerHooks(ctx: PluginContext, deps: HookDeps): void {
   // (the plan's 23c-2 assembly list does) would otherwise leave the created
   // receipt/dispatch maps unreachable and leaked per session.
   deps.sessionState = state
+  // The logger is a host service the caller already has; publishing it here
+  // keeps the degradation warnings reachable without widening every caller's
+  // deps literal. A deps object that already names one keeps it.
+  deps.logger ??= ctx.logger
   registerProtocolSection(ctx, deps.scope)
   registerPostExecute(ctx, deps, state)
   registerLlmStream(ctx, deps)
