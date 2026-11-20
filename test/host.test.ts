@@ -870,12 +870,12 @@ test('status probes the host: missing meter/spill/step-when are stable codes', a
   const r = await runBoost({
     args: { cmd: 'status' },
     ...base,
-    host: { hasTokenMeter: false, hasSpill: false, supportsStepWhen: false },
+    host: { hasTokenMeter: false, hasSpill: false },
   })
   assert.equal(r.ok, true)
   if (!r.ok) return
   const degraded = (r.data as Any).degraded as string[]
-  for (const code of ['ERR_HOST_NO_TOKENMETER', 'ERR_HOST_NO_SPILL', 'ERR_HOST_NO_STEP_WHEN']) {
+  for (const code of ['ERR_HOST_NO_TOKENMETER', 'ERR_HOST_NO_SPILL']) {
     assert.ok(degraded.includes(code), `${code} missing from ${JSON.stringify(degraded)}`)
   }
   assert.equal(degraded.some((code) => !/^ERR_(HOST|SCOPE)_/.test(code)), false)

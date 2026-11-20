@@ -311,8 +311,43 @@ function sessionIdOf(options: GenerateOptions | undefined): string | undefined {
 }
 
 /**
+ * Which session has been lent the shared fallback runtime.
+ *
+ * `apply` always passes `sessions`, so this exists for embedders and tests that
+ * hand in one `clock`/`budget`/`usage` instead. Those three carry per-session
+ * state — a turn's step counter, a pending usage mark — so lending one to a
+ * second session attributes B's tokens to A's candidate. That surfaces as a
+ * saving that never happened, which is the one error this plugin must not
+ * produce. The first session to arrive keeps the loan; every other session gets
+ * `undefined`, which each caller already reads as "no substitution" (fail
+ * closed), and the warning is emitted once per deps object rather than per call.
+ */
+const fallbackOwner = new WeakMap<object, { sessionId: string; warned: boolean }>()
+
+/** Whether the shared fallback runtime may serve this session. */
+function mayBorrowShared(deps: HookDeps, sessionId: string): boolean {
+  const held = fallbackOwner.get(deps)
+  if (held === undefined) {
+    fallbackOwner.set(deps, { sessionId, warned: false })
+    return true
+  }
+  if (held.sessionId === sessionId) return true
+  if (!held.warned) {
+    held.warned = true
+    try {
+      deps.logger?.warn(
+        `dsh-boost: no per-session runtime is wired, and session ${sessionId} is not the one already using the shared clock/budget/usage; substitution stays off for it rather than mixing two sessions' measurements`,
+      )
+    } catch {
+      // A logger that throws must not turn a measurement guard into a failure.
+    }
+  }
+  return false
+}
+
+/**
  * The session's clock: the per-session runtime when wired, the shared instance
- * otherwise.
+ * otherwise — but only for the one session that instance belongs to.
  *
  * Exported because `tools/post-execute` must resolve the *same* clock for the
  * turn/step it stamps into a `callId`; two copies of this precedence rule could
@@ -320,28 +355,34 @@ function sessionIdOf(options: GenerateOptions | undefined): string | undefined {
  */
 export function sessionClock(deps: HookDeps, sessionId: string): TurnClock | undefined {
   try {
-    return deps.sessions?.clockFor(sessionId) ?? deps.clock
+    const owned = deps.sessions?.clockFor(sessionId)
+    if (owned !== undefined) return owned
   } catch {
-    return deps.clock
+    // Fall through to the shared instance, subject to the ownership rule.
   }
+  return deps.clock !== undefined && mayBorrowShared(deps, sessionId) ? deps.clock : undefined
 }
 
 /** The session's turn budget; the same precedence as {@link sessionClock}. */
 export function sessionBudget(deps: HookDeps, sessionId: string): StepBudget | undefined {
   try {
-    return deps.sessions?.budgetFor(sessionId) ?? deps.budget
+    const owned = deps.sessions?.budgetFor(sessionId)
+    if (owned !== undefined) return owned
   } catch {
-    return deps.budget
+    // Fall through to the shared instance, subject to the ownership rule.
   }
+  return deps.budget !== undefined && mayBorrowShared(deps, sessionId) ? deps.budget : undefined
 }
 
 /** The session's usage ledger; the same precedence as {@link sessionClock}. */
 export function sessionUsage(deps: HookDeps, sessionId: string): UsageLedger | undefined {
   try {
-    return deps.sessions?.usageFor(sessionId) ?? deps.usage
+    const owned = deps.sessions?.usageFor(sessionId)
+    if (owned !== undefined) return owned
   } catch {
-    return deps.usage
+    // Fall through to the shared instance, subject to the ownership rule.
   }
+  return deps.usage !== undefined && mayBorrowShared(deps, sessionId) ? deps.usage : undefined
 }
 
 /** The session's anchors without ever failing the request. */

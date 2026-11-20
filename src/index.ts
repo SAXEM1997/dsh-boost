@@ -750,9 +750,10 @@ function wireSessionEvents(
  *
  * No step-`when` capability probe is needed: the condition is constant-true, so
  * a host that ignored the registration options would register it
- * unconditionally — exactly the behaviour this build wants. A previous probe
- * only tested `typeof tools.register === 'function'`, which every host since
- * 0.2.2-rc.1 satisfies, so its `ERR_HOST_NO_STEP_WHEN` branch could never run.
+ * unconditionally — exactly the behaviour this build wants. The old probe only
+ * tested `typeof tools.register === 'function'`, which every host since
+ * 0.2.2-rc.1 satisfies, so the branch it fed could never run; it was removed
+ * rather than left as a claim that can never be false.
  */
 function registerBoostTool(ctx: PluginContext, deps: BoostDeps): void {
   // Annotating with the host's ToolDefinition makes a host-side tightening a
@@ -885,6 +886,10 @@ export function apply(ctx: PluginContext, config: unknown): void {
         return meter.kind()
       },
       projectionCounters,
+      // The live horizon, so a projection receipt pins the value its own
+      // decision was made under instead of whatever the cross-session minimum
+      // happens to be when an operator runs `boost status` (design §5.3).
+      horizonFor: (sessionId) => horizon.remainingFor(sessionId),
       get llm() {
         return llm()
       },

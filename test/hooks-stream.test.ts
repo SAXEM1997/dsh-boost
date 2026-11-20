@@ -1100,3 +1100,37 @@ test('M2 无 text-delta 的响应清空旧计划（no-chunk 路径）', async ()
     'a response without a plan block withdraws the previous plan even when it had no text',
   )
 })
+
+test('没有 per-session runtime 时，共享的 clock/budget/usage 只借给第一个会话（行 35）', async () => {
+  const { sessionClock, sessionBudget, sessionUsage } = await import(
+    '../src/hooks/llm-stream.ts'
+  )
+  const warnings: string[] = []
+  // An embedder that wires one shared runtime and no registry: legal, but the
+  // three objects carry per-session state, so a second session must not see
+  // them — mixing two sessions is how a fake saving gets produced.
+  const deps: Any = {
+    config: DEFAULT_CONFIG,
+    clock: { step: () => 1, turn: () => 1 },
+    budget: { take: () => true },
+    usage: { markSubstituted: () => undefined },
+    logger: { warn: (message: string) => warnings.push(message) },
+  }
+
+  assert.equal(sessionClock(deps, SESSION), deps.clock, 'the first session keeps the loan')
+  assert.equal(sessionBudget(deps, SESSION), deps.budget)
+  assert.equal(sessionUsage(deps, SESSION), deps.usage)
+
+  assert.equal(sessionClock(deps, OTHER), undefined, 'a second session gets no shared clock')
+  assert.equal(sessionBudget(deps, OTHER), undefined, 'a second session gets no shared budget')
+  assert.equal(sessionUsage(deps, OTHER), undefined, 'a second session gets no shared usage')
+
+  assert.equal(warnings.length, 1, 'the warning is emitted once, not per accessor call')
+  assert.match(warnings[0] ?? '', new RegExp(OTHER))
+
+  // A wired registry is unaffected: each session gets its own instance.
+  const registry = new SessionRuntime(DEFAULT_CONFIG.stepsPerTurn)
+  const wired: Any = { config: DEFAULT_CONFIG, sessions: registry }
+  assert.notEqual(sessionUsage(wired, SESSION), sessionUsage(wired, OTHER))
+  assert.ok(sessionUsage(wired, OTHER) !== undefined)
+})

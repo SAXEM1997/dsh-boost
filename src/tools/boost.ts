@@ -114,7 +114,6 @@ const ERR_HOST_NO_SPILL_NOTICE = 'ERR_HOST_NO_SPILL_NOTICE'
 const ERR_HOST_NO_TOKENMETER = 'ERR_HOST_NO_TOKENMETER'
 const ERR_HOST_NO_ESTIMATOR = 'ERR_HOST_NO_ESTIMATOR'
 const ERR_HOST_PLATFORM_UNSUPPORTED = 'ERR_HOST_PLATFORM_UNSUPPORTED'
-const ERR_HOST_NO_STEP_WHEN = 'ERR_HOST_NO_STEP_WHEN'
 const ERR_HOST_NO_WORKSPACE_REGISTRY = 'ERR_HOST_NO_WORKSPACE_REGISTRY'
 
 /**
@@ -184,8 +183,6 @@ export interface BoostHostFacts {
   hasTokenMeter?: boolean
   /** Whether `ctx.get('spillStore')` exposed the projection backend. */
   hasSpill?: boolean
-  /** Whether `ctx.tools.resolve` exists (step-level `when` support). */
-  supportsStepWhen?: boolean
   /**
    * Whether `ctx.get('workspaceRegistry')` ever became available.
    *
@@ -748,10 +745,11 @@ function toolCountsOf(read: (() => Record<string, number>) | undefined): Record<
  * unreachable, which makes the fixed-overhead figure `'unknown'`. A host with
  * the package but no service reports the latter only.
  *
- * `ERR_HOST_NO_STEP_WHEN` is a host fact, but on exactly that host `apply` does
- * not register the `boost` tool at all (design §5.5), so the code is normally
- * observed in the registration warning rather than through `status`; it is
- * still rendered when a fact reaches `runBoost` directly.
+ * `when` on `tools.register` has been part of `ToolRegistrationOptions` since
+ * the oldest host line this plugin declares, so there is no "host without
+ * step-level `when`" to report: probing it would evaluate every other plugin's
+ * predicate against a fabricated `Agent`, and a fact that can never be true is
+ * a claim, not a measurement. `apply` registers unconditionally instead.
  */
 function degradationCodes(
   observed: readonly string[],
@@ -768,7 +766,6 @@ function degradationCodes(
   // `spillStore` matters only in apply mode; shadow mode never touches it
   // (design §5.4), so reporting it while projection is `shadow` would be noise.
   if (host?.hasSpill === false && read.doc.projection === 'on') codes.push(ERR_HOST_NO_SPILL)
-  if (host?.supportsStepWhen === false) codes.push(ERR_HOST_NO_STEP_WHEN)
   if (host?.hasWorkspaceRegistry === false) codes.push(ERR_HOST_NO_WORKSPACE_REGISTRY)
 
   return [...new Set(codes)]
