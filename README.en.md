@@ -25,9 +25,13 @@ The plugin does two things:
    decision. With several candidates, a selector that may only return a single label picks one.
 
 The expected v1 range is **3.5% (floor) to 10.0% (ceiling)** of raw `totalTokens`. It was
-**estimated offline** against a 300-session corpus during design: not a guarantee, and not a figure
-the shipped `session-snapshot.json` can recompute (the snapshot stores aggregate counts only, not
-the components of the estimate). The shadow week narrows and then replaces it with measurements.
+**estimated offline, ex ante** against a 300-session corpus during design: not a guarantee, and
+not a figure the shipped `session-snapshot.json` can recompute (the snapshot stores aggregate
+counts only, not the components of the estimate) — **nothing in the deliverable can recompute
+it**. Nor can the shadow week turn the range into a measured percentage: the shadow report
+outputs four ratios only (see "Shadow week"), with no total-token denominator, and `boost
+status` carries absolute values only; replacing the range with measurements needs a denominator
+statistic that a later version must add.
 
 ## Requirements
 
@@ -352,7 +356,17 @@ evidence" degraded path would be unreachable.
 - Only two things: **replace tool receipts in place** and **substitute read-only calls** (`read` /
   `grep` / `glob`).
 - **No batched tool execution** (no PTC / `run_code`; design N1).
-- **No deduplication or merging of tool calls** (design N5).
+- **No deduplication or merging of tool calls** (design N5) — this was not started at all, and
+  v1 ships **no tool that measures duplicate-call rate**: the "shadow-week duplication
+  statistic" the design reserved as its restart trigger was never delivered; `shadow-report.mjs`
+  does not produce it.
+- **The shadow week saves nothing by design**: it only records (the protocol section is still
+  injected and the selector is still called); its output is four ratios, not saved tokens.
+- **v1 does not judge "better results"**: there is a token ledger and a 20-task regression gate,
+  no quality metric; whether substituted outcomes are better is unjudgeable in v1.
+- **Installed but not enabled is a small net loss**: the `boost` tool registers as soon as the
+  plugin is assembled, and its schema costs a measured 393 tokens on every request (see the
+  breakdown in "Enable it") while yielding nothing.
 - **No desktop profile** (design D6).
 - Does not replace or take over DSH's compaction, pruning, or spill decisions (design N3);
   projection changes only the model-visible content and keeps the original in the host spill.
