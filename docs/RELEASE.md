@@ -2,7 +2,8 @@
 
 本文是 `dsh-boost` 0.1.0 的发布验收手册。它覆盖三件事：
 
-1. `npm pack` 后在 **isolated** 布局里安装，并验证两条软依赖降级路径；
+1. `npm run verify:package` 一条命令的打包与产物验收（§1），以及零 peerDependencies 现状下
+   两条降级路径的验收方式（§2）；
 2. 20 任务回归门的**判定过程**与 pass 谓词（任务清单由操作者自备）；
 3. 影子周脚本的跑法、`session-snapshot.json` 的来源与复算方式。
 
@@ -11,50 +12,47 @@
 
 ---
 
-## 1. 打包
+## 1. 打包与产物验收：一条命令
 
 在仓库根目录：
 
 ```bash
-npm ci
-npm run build
-npm pack --dry-run
-npm pack
+npm run verify:package
 ```
 
-`npm ci` 依赖已提交的 `package-lock.json`，先 `npm ci` 再打包才能复现同一棵依赖树（TypeScript、
-`tsx`、`@types/node` 都由 lockfile 钉住）。`package.json` 的 `prepack` 会在每次 `npm pack`
-（含 `--dry-run`）前执行 `npm run build`，所以干净 clone 上即使 `dist/` 不存在，打出的包也会
-包含构建产物；`prepublishOnly` 不再是唯一的构建防线。
+`scripts/verify-package.mjs` 把机械验收一次做完（本 checkout 实测 exit 0：tarball 110 个条目，
+JSON 回执的 `checks` 七项全绿）：
 
-`npm pack` 只校验包名与版本；缺 `files` 条目它仍可能 exit 0。因此产物完整性必须显式检查，且
-**不能**用“任意一行匹配”的 `grep -E`：`tar -tzf … | grep -E '…|…|…'` 在五个必需文件只命中
-一个时也 exit 0。用排序后的清单做集合相等比较：
+1. `npm pack` 打出真实 tarball。`package.json` 的 `prepare` 会在 pack（含 `--dry-run`）前执行
+   `npm run build`（生命周期钩子名是 `prepare`；`prepack` 已不存在——`--dry-run` 同样触发
+   `prepare`，本机已复验），所以干净 clone 上即使 `dist/` 不存在，打出的包也会包含构建产物。
+2. 断言 11 个必需条目一个不少：`package.json`、`LICENSE`、`NOTICE`、`README.md`、
+   `README.en.md`、`cordis.patch.yml`、`dist/index.js`、`dist/index.d.ts`、`dist/index.js.map`、
+   `locale/en.json`、`locale/zh.json`。
+3. 断言 dev 树不进包：`src/`、`test/`、`scripts/`、`docs/`、`.superpowers/` 前缀一律拒绝，且
+   `dist/` 里不允许出现没有对应源文件的孤儿产物（stale build）。
+4. 把 tarball 装进一次性消费项目，带 `--ignore-scripts`——证明**装好的包内不做任何构建**，
+   tarball 里的 `dist/` 就是最终产物。
+5. 在该项目里 `import('dsh-boost')` 与 `require('dsh-boost')` 都拿到 `name` / `inject` /
+   `apply`：`exports` 的 `.` 条目同时带 `import` / `require` / `default`，Node ≥ 24.9 的
+   require(esm) 加载的是同一份 ESM。
+6. `require.resolve('dsh-boost/package.json')` 与 `require.resolve('dsh-boost/locale/en.json')`
+   都能解析——`exports` 不声明这两个子路径时 Node 抛 `ERR_PACKAGE_PATH_NOT_EXPORTED`，宿主的
+   `readPluginMeta` 会把该错误当成“文件不存在”，插件的名称、描述与 locale 字典就全部回退成空。
 
-```bash
-required=$(printf '%s\n' \
-  package/LICENSE \
-  package/NOTICE \
-  package/cordis.patch.yml \
-  package/dist/index.js \
-  package/dist/index.d.ts | sort)
-actual=$(tar -tzf dsh-boost-0.1.0.tgz \
-  | grep -E '^package/(dist/index\.js|dist/index\.d\.ts|cordis\.patch\.yml|NOTICE|LICENSE)$' \
-  | sort)
-if [ "$actual" != "$required" ]; then
-  echo "tarball manifest mismatch; missing:"
-  comm -23 <(printf '%s\n' "$required") <(printf '%s\n' "$actual")
-  exit 1
-fi
-test "$(printf '%s\n' "$actual" | grep -c .)" -eq 5
-```
+成功只往 stdout 打一行 JSON 回执；失败保留临时目录并打印其路径供检查。
+`prepublishOnly` 现在就是 `npm run ci && npm run verify:package`（`ci` = typecheck + test +
+build），所以 `npm publish` 本身会跑完这道门，它不再只是构建防线。
 
-`[ "$actual" != "$required" ]` 能抓的只有**缺项**：`actual` 由只放行五个模式的 `grep -E` 过滤
-而来，tarball 里**多出的任何其他文件根本不会出现在 `actual` 里**，这个检查对它失明（顺序
-不同也不影响，两侧都经过 `sort`）；最后的计数同样只断言“五行都在”。要抓多余文件，必须另做
-完整清单比较，例如 `diff <(tar -tzf dsh-boost-0.1.0.tgz | sed '/^package\/$/d' | sort) <(…预期的
-完整文件清单…)`，或人工 review `npm pack --dry-run` 的完整输出。`test -f dist/index.js` /
-`dist/index.d.ts` 仍建议保留，但它们是本地构建目录的检查，不能证明 tarball 里有这两项。
+### 1.1 手工回退（只保留仍然增值的两件事）
+
+- `npm ci`：按已提交的 `package-lock.json` 复现开发依赖树（TypeScript、`tsx`、`@types/node`
+  都由 lockfile 钉住）。`verify:package` 用的是当前工作树，不替你做这一步。
+- 人工 review 完整清单：`npm pack --dry-run` 的完整输出或 `tar -tzf dsh-boost-0.1.0.tgz`。
+  注意 `verify:package` 的清单断言是“必需项齐全 + 禁止前缀不出现”，**不是**全量清单 diff：
+  tarball 里既非必需、也不落在禁止前缀下的多余文件它同样抓不到（旧版手工 `grep -E` 集合比较
+  对多余文件同样失明——`actual` 由只放行白名单模式的过滤器产生，多余文件根本不进比较）。
+  要这个保证，就对完整清单做 `diff`。
 
 验收前的硬约束（设计 §11）：
 
@@ -64,47 +62,28 @@ test "$(printf '%s\n' "$actual" | grep -c .)" -eq 5
   可寻址归属判定——不一致时行照常装配，但会在管理面变成不可寻址、移除判定失灵；`name` 指向
   不存在的包则加载**响亮失败**。四名一致是为了保住管理面的可寻址性。
 - `version` 必须存在，否则 `npm pack` 在第一步就报 `Invalid package, must have name and version`。
-- `files` 与实际布局一致：`scripts/` 与 `test/` 是 dev-only，**不**进包；`dist/` 由 `prepack` 构建。
+- `files` 与实际布局一致：`scripts/`、`test/`、`src/` 是 dev-only，**不**进包（`files` 只带
+  `dist`、`locale`、`cordis.patch.yml`、两份 README、`LICENSE`、`NOTICE`）；`dist/` 由 `prepare`
+  构建，sourcemap 以 `inlineSources` 内联源码，装好的包没有 `src/` 也能对上源码。
 
-## 2. 空项目安装（isolated 布局）
+## 2. 装进宿主（一次性 DSH_HOME）
 
-**这一步必须在一个没有任何 `node_modules` 祖先目录的空项目里做。** 一个真正不存在的包在任何布局下都会
-`ERR_MODULE_NOT_FOUND`；hoisted（提升）布局掩盖的是**缺失**本身——它可能从上层祖先的 `node_modules`
-解析到同一份副本，于是"宿主没装这个包"根本复现不出来。isolated 布局才让缺失真实可见。
+机械的那一半——空项目安装、模块加载、元数据路径解析——已并入 §1 的 `npm run verify:package`
+（一次性消费项目 + `import`/`require` 探针 + 子路径解析断言）。**本包不再声明任何
+peerDependencies**（§2.4），所以“peer 在空项目里解析到哪个 rc”这一步已经不存在：裸装 tarball
+只新增 `dsh-boost` 一个包（约 1.4 MB），不会带出任何 `@deepseek-ai/*` 宿主树；旧版用 isolated
+布局把“缺失 peer”真实暴露出来的动机也随之消失。§1 的第 5、6 步就是当年手工
+`import('dsh-boost')` 与两条 `import.meta.resolve` 检查的自动化版本。
 
-```bash
-rm -rf /tmp/dsh-boost-accept && mkdir -p /tmp/dsh-boost-accept
-cd /tmp/dsh-boost-accept
-npm init -y
-npm_config_cache=/tmp/npmcache npm install /path/to/dsh-boost-0.1.0.tgz
-
-# 确认安装布局是扁平的、没有上层 node_modules 兜底：
-npm ls --all | head -40
-test -d node_modules/dsh-boost
-
-# 看 peer 实际解析到哪个 rc：范围必须同时接受 rc.4 与 rc.5，不能钉死一个版本。
-npm ls @deepseek-ai/dsh-llm @deepseek-ai/dsh-tools
-
-# 插件在无宿主进程时也必须能作为模块加载：
-node --input-type=module -e "const m = await import('dsh-boost'); console.log(m.name)"
-
-# M3 回归：宿主用 Node resolver 读元数据，这两个路径必须能解析。
-node --input-type=module -e "console.log(import.meta.resolve('dsh-boost/package.json'))"
-node --input-type=module -e "console.log(import.meta.resolve('dsh-boost/locale/en.json'))"
-```
-
-最后两条 `import.meta.resolve` 缺一不可：`exports` 不声明 `./package.json` / `./locale/*.json` 时
-Node 抛 `ERR_PACKAGE_PATH_NOT_EXPORTED`，宿主的 `readPluginMeta` 把该错误当成“文件不存在”，
-插件的名称、描述与 locale 字典就全部回退成空。
-
-随后在一个一次性的 `DSH_HOME` 里装配（不碰真实 profile）。`--profile` 是 `dsh plugin` 的**必填**
+剩下需要活宿主的部分照旧。`--profile` 是 `dsh plugin` 的**必填**
 选项，且要放在 `add` 这个被透传的 pnpm 子命令**之前**；写成 `dsh plugin add <path>` 会在安装前
 因缺少必填项失败：
 
 ```bash
 export DSH_HOME=/tmp/dsh-boost-accept/dsh-home
 mkdir -p "$DSH_HOME"
-dsh plugin --profile accept add /tmp/dsh-boost-accept/node_modules/dsh-boost
+dsh plugin --profile accept add /path/to/dsh-boost-0.1.0.tgz
+# 或本地 checkout 目录；从 registry 安装时写 dsh-boost@^0.1.0（§2.4：latest 仍指向旧 API）
 # 确认宿主确实把这一行并入了装配计划：
 dsh --profile accept --dump-config | grep -A2 'id: dsh-boost'
 ```
@@ -138,51 +117,34 @@ for (const [id, w] of Object.entries(s.tables.workspaces)) console.log(id, w.pat
 最后一次 `status` 必须显示 `scope.workspaceIds` 含该 id、`shadow` 为 `true`、`projection` 为
 `"on"`。这三项是后续所有观察的前置条件；只看“我记得设了”不算数。
 
-> 降级验收要在**宿主实际解析依赖的那棵树**里移除包。用 `dsh plugin --profile accept` 装进 profile
-> 时，宿主在 `$DSH_HOME/profiles/accept` 下解析；`/tmp/dsh-boost-accept` 的 `npm uninstall`
+> 降级验收要在**宿主实际解析依赖的那棵树**里移除包（这一条适用于宿主树里的包，如 spill 后端；
+> 本包自身已无可移除的 peer，§2.4）。用 `dsh plugin --profile accept` 装进 profile
+> 时，宿主在 `$DSH_HOME/profiles/accept` 下解析；消费项目目录里的 `npm uninstall`
 > 只改了另一份副本，不能证明宿主缺包。用
 > `dsh plugin --profile accept remove <pkg>` 移除，或用
 > `find "$DSH_HOME/profiles/accept/node_modules" -maxdepth 4 -name '<pkg>'` 确认它本来就不在
-> profile 里（可选 peer 未被安装时就是这种情况）。
+> profile 里。
 
 `boost status` 是验收的观察面：它输出 `shadow` / `projection` 两个开关、按 `code` 的收据计数、替换账与
 投影账（投影账为净额并附 `projection_retrievals`）、实测固定开销 token，以及稳定降级码。插件本身不说话，
 **不要**用"我记得开了"代替 status。
 
-### 2.1 降级门：`@deepseek-ai/dsh-token-meter`（先装、验健康，再卸、验降级）
+### 2.1 降级门：宿主缺 `tokenMeter`（先验健康，再验降级）
 
-`dsh-token-meter` 是 **optional peer**（`peerDependenciesMeta`），npm 在隔离项目里**不会**自动
-安装它，profile 里初始也没有——直接 `npm uninstall` 是 **no-op**：什么都没移除，降级状态
-在测试开始前就存在，这样的“门”永远绿。这个门必须**先构造被测状态**：
+**门的构造方式变了。** `tokenMeter` 从来是宿主服务（`ctx.get('tokenMeter')`），不是本包安装的
+包；过去它同时是 optional peer，可以用 npm 往消费项目里装/卸来构造“缺失”——**包已不声明任何
+peer**（§2.4），消费项目 `node_modules` 里装什么、卸什么都不再影响宿主进程里的服务，
+`npm uninstall` 那条路线整条作废。现在这个门由两层承担：
 
-```bash
-# 1) 先把 peer 装进宿主实际解析的那棵树（二选一）。
-# isolated 项目布局：
-cd /tmp/dsh-boost-accept
-npm install @deepseek-ai/dsh-token-meter@0.2.2-rc.4
-npm ls @deepseek-ai/dsh-token-meter          # 必须确认真的存在
-# profile 布局（§2 的 dsh plugin 布局）：
-dsh plugin --profile accept add @deepseek-ai/dsh-token-meter
-find "$DSH_HOME/profiles/accept/node_modules" -maxdepth 4 -name 'dsh-token-meter' -print
+- **单元测试注入宿主事实**：`test/host.test.ts` 与 `test/boost-tool.test.ts` 以
+  `host: { hasTokenMeter: false }` 之类的宿主事实断言下表的全部预期（`npm test` 全套）。
+  缺服务时的加载、替换拒绝与 `ERR_HOST_NO_TOKENMETER` 都在这层被锁定。
+- **活宿主复核**只在真要部署一台缺该服务的宿主时手工做：先验健康态（agent 会话里 `boost
+  status` 的 `degraded` 不含 `ERR_HOST_NO_TOKENMETER`、`estimate_kind` 为 `"host"`、
+  `fixedOverheadTokens` 是数字），再在缺服务的宿主上重启并按下表验降级。验不到健康态，后面的
+  “降级”就无从谈起——门在此处就该判失败。
 
-# 2) 【前置断言】重启宿主后先验健康：agent 会话里 boost status 必须显示
-#    degraded 不含 ERR_HOST_NO_TOKENMETER、estimate_kind 为 "host"、fixedOverheadTokens 是数字。
-#    验不到健康态，后面的“降级”就无从谈起——门在此处就该判失败。
-
-# 3) 再从同一棵树移除（isolated 布局用 npm，profile 布局用 dsh plugin remove）。
-cd /tmp/dsh-boost-accept
-npm uninstall @deepseek-ai/dsh-token-meter
-npm ls @deepseek-ai/dsh-token-meter || true   # 必须确认真的不存在
-dsh plugin --profile accept remove @deepseek-ai/dsh-token-meter || true
-find "$DSH_HOME/profiles/accept/node_modules" -maxdepth 4 -name 'dsh-token-meter' -print
-
-# 4) 重启宿主，按下表验降级。
-```
-
-以宿主实际解析的那棵树里的 `npm ls` / `find` 结果为准；另一棵树的“已卸载”不算证据。**没有
-第 1、2 步的安装与健康验证，这个门什么都没测**——降级状态先于测试存在，第 3 步是空跑。
-
-预期（设计 §9 / §11）：
+预期（设计 §9 / §11；行为未变，变的只是构造方式）：
 
 | 观察点 | 期望 |
 |---|---|
@@ -192,7 +154,7 @@ find "$DSH_HOME/profiles/accept/node_modules" -maxdepth 4 -name 'dsh-token-meter
 | 投影账 | token 估算记 `'unknown'`，**不伪造数字**；`projection_gross_tokens` / `projection_net_tokens` 为 `'unknown'` |
 | `boost status` 的 `degraded` | 含稳定码 `ERR_HOST_NO_TOKENMETER` |
 | 收据 | 每个被拒的替换决策有 `skip` / `ERR_HOST_NO_TOKENMETER`（代码里也写稳定码本身） |
-| 失败形态 | **不是** `ERR_MODULE_NOT_FOUND`。若看到它，说明代码里出现了对可选 peer 的静态 import，回到 isolated 环境排查 |
+| 失败形态 | **不是** `ERR_MODULE_NOT_FOUND`。若看到它，说明代码里出现了对宿主侧包的静态 import（本包声明零 peer，见 §2.4）；用 §1 verify:package 的一次性消费项目复现排查 |
 
 ### 2.2 降级门：spill 后端（卸错包什么都验不到）
 
@@ -221,7 +183,7 @@ find "$DSH_HOME" /path/to/dsh/install -maxdepth 6 -type d -name 'dsh-spill-local
 | `boost status` 的 `degraded` | 含稳定码 `ERR_HOST_NO_SPILL` |
 | `projection: 'shadow'` | 不受影响：影子只记投影前后 token，不落盘、不改 content |
 | 替换 | 不受影响（替换不依赖 spill 后端） |
-| 失败形态 | 不应是 `ERR_MODULE_NOT_FOUND`（`spillStore` 经 `ctx.get` 动态获取）；注意与另一条降级区分——**若只卸 `dsh-spill-policy`（页脚格式化器、本包的 optional peer），得到的是 `projection-skipped:no-footer`，`ERR_HOST_NO_SPILL` 不会出现**；那条路径同样可验，但它是另一个门 |
+| 失败形态 | 不应是 `ERR_MODULE_NOT_FOUND`（`spillStore` 经 `ctx.get` 动态获取）；注意与另一条降级区分——**若只移除 `dsh-spill-policy`（页脚格式化器；它已不是本包声明的依赖，代码经守护的动态 import 从宿主树解析 `@deepseek-ai/dsh-spill-policy/notice`，解析不到即降级），得到的是 `projection-skipped:no-footer`，`ERR_HOST_NO_SPILL` 不会出现**；那条路径同样可验，但它是另一个门 |
 
 ### 2.3 两条路径都要留证据
 
@@ -235,24 +197,54 @@ grep -c '"code":"projection-skipped:no-spill"' "$DSH_HOME"/boost/receipts/*.json
 grep -c '"code":"ERR_HOST_NO_TOKENMETER"' "$DSH_HOME"/boost/receipts/*.jsonl
 ```
 
-若 `ERR_MODULE_NOT_FOUND` 出现，直接在 isolated 目录里跑 `node -e "import('dsh-boost')"` 复现并记录栈；
-hoisted 布局下的"通过"不算通过。
+若 `ERR_MODULE_NOT_FOUND` 出现，跑 §1 的 `npm run verify:package`（或手工在一次性空项目里
+`npm install <tarball>` 后 `node -e "import('dsh-boost')"`）复现并记录栈；本包声明零 peer
+（§2.4），任何布局下都不应再出现依赖解析歧义。
 
-### 2.4 安装矩阵记录（2026-11-20，基线 `8765f0f` + 本修复 `5df8185`）
+### 2.4 依赖声明现状（2026-11-20，`0567347` 起）：零 peerDependencies
 
-`dsh-llm` 的 peer 改用与另外三个 peer 相同的范围
-`">=0.2.2-rc.1 <0.3.0-0"`；`devDependencies` 的精确钉法保留（registry 的 `latest` 是
-`0.0.1-rc.1`，属于另一套旧 API，不能跟随）。两侧各在空项目里从 tarball 安装一次：
+`package.json` **不声明任何 `peerDependencies` / `peerDependenciesMeta`**。四个
+`@deepseek-ai/*`（`dsh-llm`、`dsh-tools`、`dsh-spill-policy`、`dsh-token-meter`）只以精确钉版
+出现在 `devDependencies`（`0.2.2-rc.4`；registry 的 `latest` 是另一套旧 API，不能跟随范围）。
+删除的原因：npm 11 会把声明的 peerOptional **直接装上**——在 rc.4 宿主树里装带 peer 的旧
+tarball 会拉进 `dsh-spill-policy@rc.5` 并 `ERESOLVE`（当时实测 exit 1），“optional 标记允许
+宿主不装”的初衷反被堵死。删除之后的事实：
 
-| 场景 | 命令 | 结果 |
-|---|---|---|
-| **修复前**，空项目 + rc.5 解析链 | `npm install` 旧 tarball | **exit 1**，`ERESOLVE`：`Found: dsh-llm@0.2.2-rc.4`，而 `dsh-tools@rc.5` 的 peer 要求 `dsh-llm@0.2.2-rc.5`；错误里出现 `peer dsh-llm@"0.2.2-rc.4" from dsh-boost` |
-| **rc.5**，空项目直接装新 tarball | `npm install ./dsh-boost-0.1.0.tgz` | **exit 0**；`dsh-llm@0.2.2-rc.5`、`dsh-tools@0.2.2-rc.5`；`import('dsh-boost')` 返回 `name/inject/apply`；`package.json` 与 `locale/en.json` 均可 `import.meta.resolve` |
-| **rc.4**，先装四件套 rc.4 再装新 tarball | `npm install @deepseek-ai/dsh-{tools,llm,spill-policy,token-meter}@0.2.2-rc.4`，再 `npm install ./dsh-boost-0.1.0.tgz` | **exit 0**；解析保持 rc.4，未被升级；模块加载与两个元数据路径解析同上 |
-| **实际装配命令** | `DSH_HOME=/tmp/… dsh plugin --profile accept add <tarball 或包目录>` | **exit 0**；`dsh --profile accept --dump-config` 中出现 `id: dsh-boost` / `name: dsh-boost` 行 |
+- 裸装 tarball 只新增 1 个包（约 1.4 MB），不再带出 20 个包/15 MB 的重复宿主树；
+- 模块**不依赖它们也能加载**：`dsh-llm` / `dsh-tools` 在运行时是纯 type import；
+  `@deepseek-ai/dsh-token-meter/estimate` 与 `@deepseek-ai/dsh-spill-policy/notice` 是带兜底的
+  动态 import，从**宿主树**解析——宿主提供它们，解析不到走降级（§2.1、§2.2）；
+- 与宿主的兼容性由 `engines.dsh`（`>=0.2.2-rc.1 <0.3.0-0`）声明；`engines.node` 是
+  `>=24.9.0`（对齐宿主 `@deepseek-ai/dsh@0.2.2-rc.4` 的 Node 下限）。
 
-本表记录的是 **install / peer 解析 / 模块加载 / 宿主装配**这一半；§2.1、§2.2 的降级矩阵要在
-agent 会话里由模型调用 `boost` 才能观察（步骤已在 §2.0 给出），本次未在无交互的 shell 中伪造。
+安装规格：**`dsh-boost@^0.1.0`**（或发布者选用了 `next` dist-tag 时用 `dsh-boost@next`），不是
+裸 `dsh-boost`——registry 的 `latest` 仍指向不兼容的旧 API（`0.0.1-rc.1`），直到 0.1.0 被发布
+到 `latest`。发布者要做其中一件：`npm publish`（`prepublishOnly` 会跑 `ci` + `verify:package`，
+发布后 `latest` 即 0.1.0；`.npmrc` 钉的是 npmmirror 安装源，`publishConfig.registry` 已把发布
+指向 registry.npmjs.org），或 0.1.0 已按其它 tag 发布时 `npm dist-tag add dsh-boost@0.1.0
+latest`。`package.json` 的 `description` 写着同一件事。
+
+本节取代旧版安装矩阵（rc.4 / rc.5 两侧对照、含一行 `ERESOLVE` 失败）：那张表记录的是 **peer
+还存在时**的安装行为，自 `0567347` 起不再适用；§1 的 `verify:package` 与上面的裸装事实是现行
+依据。
+
+### 2.5 降级码矩阵（稳定码全表）
+
+`boost status` 的 `degraded` 数组与 `boost` 工具调用的失败 `code` 都是稳定契约。§2.1、§2.2 是
+可构造的门的验收细则；本表是操作者看到某个码时的速查（含本轮新增的三枚）：
+
+| 码 | 观察面 | 可观察症状 | 操作者动作 |
+|---|---|---|---|
+| `ERR_HOST_NO_WORKSPACE_REGISTRY` | `status.degraded` | cwd 永远映射不到工作区，一切 fail-closed，“装上了却什么都不发生” | 宿主未提供 workspaceRegistry；换正确宿主 |
+| `ERR_HOST_NO_TOKENMETER` | `status.degraded` + 被拒替换的收据 | 替换全部拒绝，投影账记 `unknown` | 宿主缺 `tokenMeter` 服务（§2.1） |
+| `ERR_HOST_NO_ESTIMATOR` | `status.degraded` | `fixedOverheadTokens` 为 `'unknown'` | 宿主树缺 `@deepseek-ai/dsh-token-meter/estimate`；与上一行是两件事 |
+| `ERR_HOST_NO_SPILL` | `status.degraded`（仅 `projection:'on'`） | 超限回执不投影，`projection-skipped:no-spill` | 恢复/检查的是 spill **后端**（`dsh-spill-local`，§2.2） |
+| `ERR_HOST_PLATFORM_UNSUPPORTED` | `status.degraded` | win32 上替换拒绝，投影不受影响 | 平台限制，无需处置 |
+| `ERR_HOST_NO_STEP_WHEN` | 注册警告 | 整族工具（含 `boost`）不注册，`status` 本身不可用 | 宿主不支持步骤级 `when` |
+| `ERR_RECEIPTS_UNREADABLE` | `status.degraded` | 至少一个收据分片读不出来（EACCES、名为 `x.jsonl` 的目录等）；`status` 仍是**全量聚合**——健康分片照常计数——并带该码，数字因此可能不完整 | 检查 `$DSH_HOME/boost/receipts/` 的权限与异常条目，修复后重跑 `status`，对比修复前后计数 |
+| `ERR_HOST_COMPLETE_SECTION` | `status.degraded` | 宿主的 `complete: true` 提示段在装配瀑布之后替换了整个系统提示，协议段没有到达出站请求；受影响请求上替换与投影 fail-closed（会话被判不可见），工作区明明可见插件却不动作 | 找出宿主提示配置里覆盖瀑布装配的 complete 段（通常属于另一个插件）；移除它，或接受这些请求上替换/投影不可用 |
+| `ERR_SCOPE_ABORTED` | `scope-set` / `shadow` 工具的失败 `code`（**不在** `degraded` 里） | 调用方的取消信号打断了 `boost` 写入；锁已释放、`scope.json` 原样未动，无残留 | 重读 `status` 取当前 `revision` 后重试即可 |
+| 其余 `ERR_SCOPE_*`（`READ_FAILED` / `PARSE_FAILED` / `REVISION_CONFLICT` / `LOCKED` / `LOCK_TAKEOVER` …） | 读走 `status.degraded`，写走工具失败 `code` | scope 文档读失败按 fail-closed 默认、写冲突按 CAS 拒绝、锁按超时接管 | 按码处置：修文件/权限，或重读 revision 重试 |
 
 ## 3. 20 任务回归门（只规定过程，不附带任务集）
 
@@ -364,10 +356,12 @@ node scripts/shadow-report.mjs --dir "$DSH_HOME/boost/receipts"
 快照按**一个会话一行**序列化：数组内的每个 session 对象占一行，diff 里可逐条 review；解析后的数字与
 单行 JSON 完全相同。
 
-复算（手工可重复，不碰会话目录；本仓库没有配置 CI 流水线，不存在“CI 用这个”的自动步骤）：
+复算（手工可重复，不碰会话目录；本仓库没有配置 CI 流水线，不存在“CI 用这个”的自动步骤）。
+机器可读的管道用下面两种之一：不带 `--silent` 的 `npm run stats` 会把 npm 的
+`> dsh-boost@0.1.0 stats` 横幅打进 **stdout**（stderr 重定向拦不住），直接接 `jq` 之类会破：
 
 ```bash
-npm run stats
+npm run --silent stats
 # 等价于
 node scripts/session-stats.mjs --snapshot scripts/session-snapshot.json
 ```
@@ -399,16 +393,15 @@ tool share 变动约 ±1.3pp。这是选择边界差，不是公式差；设计�
 
 ## 6. 发布检查清单
 
-- [ ] `npm ci` 成功（lockfile 与 `package.json` 一致），`npm run build` 干净，`dist/index.js` 与 `dist/index.d.ts` 存在
-- [ ] `npm pack --dry-run` 与 `npm pack` 均成功，`version` 非空
-- [ ] tarball 的排序清单比较通过（§1），五个必需文件一个不少
-- [ ] isolated 空项目安装成功（rc.4 与 rc.5 各一次），`node -e "import('dsh-boost')"` 无 `ERR_MODULE_NOT_FOUND`
-- [ ] `import.meta.resolve('dsh-boost/package.json')` 与 `…/locale/en.json` 均可解析（M3）
-- [ ] `dsh plugin --profile <name> add <path>` 成功，`--dump-config` 里有 `id: dsh-boost` 行
+- [ ] `npm ci` 成功（lockfile 与 `package.json` 一致），开发树可复现
+- [ ] `npm run verify:package` exit 0（§1）：11 个必需条目齐全、无 dev 树/孤儿产物、一次性项目 `--ignore-scripts` 安装、`import` 与 `require` 均拿到 `name/inject/apply`、`package.json` 与 `locale/en.json` 子路径可解析（M3）
+- [ ] `prepublishOnly`（`npm run ci && npm run verify:package`）在发布前整体跑过一遍
+- [ ] `dsh plugin --profile <name> add dsh-boost@^0.1.0`（或本地路径/tarball）成功，`--dump-config` 里有 `id: dsh-boost` 行
 - [ ] 测试工作区已写入 `scope.workspaceIds`，`shadow: true`、`projection: 'on'` 经 `boost status` 确认
-- [ ] no-tokenmeter 门按 §2.1 完整跑过：**先装 peer、验健康态（无 `ERR_HOST_NO_TOKENMETER`）**，再卸、验降级（替换拒绝、投影可用、账目 `unknown`）
-- [ ] no-spill 门按 §2.2 完整跑过：移除的是 spill **后端**（`dsh-spill-local`），观察到超限回执不投影、`projection-skipped:no-spill`、`ERR_HOST_NO_SPILL`；只卸 `dsh-spill-policy` 的话只能验到 `projection-skipped:no-footer`
-- [ ] 两条降级路径都在宿主实际解析的依赖树里验证，并保留 status/收据证据
+- [ ] no-tokenmeter 门按 §2.1 承担：单元测试注入 `hasTokenMeter: false` 锁定预期（替换拒绝、投影可用、账目 `unknown`、`ERR_HOST_NO_TOKENMETER`）；活宿主复核仅在确要部署缺该服务的宿主时做，先验健康态再验降级
+- [ ] no-spill 门按 §2.2 完整跑过：移除的是 spill **后端**（`dsh-spill-local`），观察到超限回执不投影、`projection-skipped:no-spill`、`ERR_HOST_NO_SPILL`；只移除 `dsh-spill-policy`（页脚格式化器，从宿主树解析）的话只能验到 `projection-skipped:no-footer`
+- [ ] 两条降级路径都保留 status/收据证据；验收中出现的每个稳定码都按 §2.5 的矩阵处置并留证（含本轮新增的 `ERR_RECEIPTS_UNREADABLE` / `ERR_HOST_COMPLETE_SECTION` / `ERR_SCOPE_ABORTED`）
 - [ ] 20 任务门按 §3 跑过，pass 谓词逐字对照，结论只有"过门/未过门"
 - [ ] 第一次开启替换的真实回合检查 `content[].thinking` 400（不是影子周）；若有，替换在该路由关闭
-- [ ] `npm run stats` 在干净 clone 上可复算 §5.2 的聚合（口径对应设计稿 §2.1）
+- [ ] `npm run --silent stats` 在干净 clone 上可复算 §5.2 的聚合（口径对应设计稿 §2.1）
+- [ ] 发布侧：`npm publish` 走 `publishConfig.registry`（registry.npmjs.org、public）；或 0.1.0 已按其它 tag 发布时执行 `npm dist-tag add dsh-boost@0.1.0 latest`；发布后确认 registry 的 `latest` 不再是旧 API（`0.0.1-rc.1`），裸 `dsh-boost` 安装才可用

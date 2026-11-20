@@ -62,10 +62,32 @@ of 393 tokens per request.
   receipt preview and the saving. Sharded per session, crash-safe, and fail-closed after 3
   consecutive write failures.
 - **失败即可见的降级**：`boost status` 暴露稳定的 `ERR_HOST_*` 码与 `protocol_suppressed`
-  计数，所以"插件没生效"与"宿主缺能力"可以区分开。
+  计数，所以"插件没生效"与"宿主缺能力"可以区分开。收据分片读不出来时另报
+  `ERR_RECEIPTS_UNREADABLE`（status 仍是全量聚合并标注不完整）；宿主的 `complete: true`
+  提示段顶掉装配出的协议段时报 `ERR_HOST_COMPLETE_SECTION`（受影响请求替换与投影
+  fail-closed）；`boost` 写入被调用方信号取消时返回 `ERR_SCOPE_ABORTED`（锁已释放、
+  `scope.json` 未动，可安全重试）。
   Visible degradation: `boost status` reports stable `ERR_HOST_*` codes and a
   `protocol_suppressed` counter, so "the plugin is inert" and "the host lacks a capability" are
-  distinguishable.
+  distinguishable. An unreadable receipt shard additionally reports
+  `ERR_RECEIPTS_UNREADABLE` (status stays a total and flags the figures incomplete); a host
+  `complete: true` prompt section displacing the assembled protocol section reports
+  `ERR_HOST_COMPLETE_SECTION` (substitution and projection fail closed for affected requests);
+  a `boost` write cancelled by the caller's signal returns `ERR_SCOPE_ABORTED` (lock released,
+  `scope.json` untouched, safe to retry).
+- **零 peerDependencies 的安装面**：包不声明任何 peerDependencies——安装只新增 `dsh-boost`
+  本体，不再拉出重复的 `@deepseek-ai/*` 宿主树；运行时能力由宿主提供，缺了走降级。
+  `exports` 同时带 `require`/`default`（Node ≥ 24.9 的 require(esm) 可用）；`src/` 不进包，
+  `dist` 的 sourcemap 内联源码。registry 的 `latest` 改指 0.1.0 之前请安装
+  `dsh-boost@^0.1.0`（发布者执行 `npm publish`，或对已按其它 tag 发布的 0.1.0 运行
+  `npm dist-tag add dsh-boost@0.1.0 latest`）。
+  Zero-peerDependencies install surface: the package declares no peerDependencies — installing
+  it adds only `dsh-boost` itself and no longer pulls a duplicate `@deepseek-ai/*` host tree;
+  the host provides the runtime capabilities and gaps degrade. `exports` also maps
+  `require`/`default` (Node >= 24.9 require(esm) works); `src/` is no longer shipped and the
+  `dist` source maps inline the sources. Until the registry `latest` points at 0.1.0, install
+  `dsh-boost@^0.1.0` (the publisher runs `npm publish`, or `npm dist-tag add dsh-boost@0.1.0
+  latest` once 0.1.0 is out under another tag).
 
 ### 已知限制 Known limitations
 

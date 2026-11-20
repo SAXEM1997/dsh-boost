@@ -6,8 +6,9 @@
 
 ## 它解决什么
 
-DSH 每次模型请求都会回放全部历史。本机 300 个最长会话的实测聚合（`npm run stats`，快照时刻
-`2026-11-19T03:13:21Z`）：54,141 步、54,088 个请求，合计 10,575,904,022 raw token。按步均值
+DSH 每次模型请求都会回放全部历史。本机 300 个最长会话的实测聚合（`npm run --silent stats`——不带
+`--silent` 时 npm 会把 `> dsh-boost@0.1.0 stats` 横幅打进 stdout，机器解析请用 `--silent` 或直接
+`node scripts/session-stats.mjs`；快照时刻 `2026-11-19T03:13:21Z`）：54,141 步、54,088 个请求，合计 10,575,904,022 raw token。按步均值
 195,340 token，按请求均值 195,531、中位 187,681；97.01% 的输入是缓存读。工具回执是体积主体
 （bash 61.75%、read 22.13%、ssh 10.01%），而下一步真正会用到的部分通常远小于回执本身。
 
@@ -27,7 +28,11 @@ v1 的预期收益区间是 **3.5%（保底）– 10.0%（上界）**，按 raw 
 
 ## 前置条件
 
-- Node.js `>=22.18.0`，DSH `>=0.2.2-rc.1 <0.3.0-0`（两者都在 `package.json` 的 `engines` 里）。
+- Node.js `>=24.9.0`，DSH `>=0.2.2-rc.1 <0.3.0-0`（两者都在 `package.json` 的 `engines` 里；
+  Node 下限对齐宿主 `@deepseek-ai/dsh@0.2.2-rc.4`）。
+- **本包不声明任何 peerDependencies**：安装它不会带出任何 `@deepseek-ai/*` 包，模块脱离它们也能
+  加载；运行时能力（`tokenMeter`、`spillStore`、估算器、页脚格式化器）由 DSH 宿主进程提供，
+  缺失时走降级（见「宿主依赖」）。
 - **替换只在 POSIX 上可用。** Windows（`win32`）上替换被拒绝，`boost status` 的 `degraded`
   会带 `ERR_HOST_PLATFORM_UNSUPPORTED`；投影不依赖平台，仍然工作。
 - v1 面向 web profile；不支持 desktop profile。
@@ -37,16 +42,22 @@ v1 的预期收益区间是 **3.5%（保底）– 10.0%（上界）**，按 raw 
 `dsh plugin` 要求指定 profile，剩下的参数原样转发给该 profile 目录里的 pnpm：
 
 ```bash
-# 已发布到 registry 时
-dsh plugin --profile <name> add dsh-boost
+# 已发布到 registry 时：latest 仍指向不兼容的旧 API（0.0.1-rc.1），必须钉版本——
+# 或发布者启用了 next dist-tag 时用 dsh-boost@next
+dsh plugin --profile <name> add dsh-boost@^0.1.0
 
 # 或从本地 checkout 安装（先构建；dist/ 不入库）
 npm run build
 dsh plugin --profile <name> add /absolute/path/to/dsh-boost
 ```
 
-例如 web profile：`dsh plugin --profile web add dsh-boost`。`dsh plugin` 把操作转发给 pnpm，
+例如 web profile：`dsh plugin --profile web add dsh-boost@^0.1.0`。`dsh plugin` 把操作转发给 pnpm，
 所以 pnpm 必须在 PATH 上。
+
+包是 ESM（`"type": "module"`），`exports` 的 `.` 条目同时映射 `require` / `default`：Node ≥ 24.9
+下 `require('dsh-boost')` 与 `import` 加载同一份代码，装好的包里**不做任何构建**（`files` 只带
+`dist`、`locale`、`cordis.patch.yml`、两份 README、`LICENSE`、`NOTICE`，不带 `src/`；`dist` 的
+sourcemap 内联了源码）。
 
 包里的 `dsh.bundle.patch` 指向 `cordis.patch.yml`，所以安装后宿主会把它登记为 profile 的一个
 bundle，patch 的 `insert` 行落在 profile root 上。**装完必须重启 DSH**：插件在宿主启动时加载，
@@ -95,7 +106,9 @@ bundle，patch 的 `insert` 行落在 profile root 上。**装完必须重启 DS
   任何命令替你做这件事。找不到 UUID 且是单用户机器时，可以用 `"mode": "global"` 放开到所有
   **已定义**的工作区；没有工作区的会话仍然不可见。
 - `baseRevision` 取你刚读到的 `data.scope.revision`（首次写入是 `0`）。这是 compare-and-swap：
-  revision 过期会返回 `ERR_SCOPE_REVISION_CONFLICT`，重读 `status` 再试。
+  revision 过期会返回 `ERR_SCOPE_REVISION_CONFLICT`，重读 `status` 再试。调用被调用方的取消
+  信号打断时返回 `ERR_SCOPE_ABORTED`：锁已释放、`scope.json` 原样未动，重读 `revision` 重试
+  即可，不留残留。
 - `body` 里的 `version` 与 `revision` 是 store 自有的，带这两个字段会被拒绝。
 
 写入成功后再 `status` 一次，健康输出应当满足：
@@ -309,6 +322,8 @@ plugin manager 才能把运行中的 entry 认成本包的行、通过 profile p
 | `@deepseek-ai/dsh-token-meter/estimate` | 软（动态 import） | 固定开销无法测量，`fixedOverheadTokens` 为 `'unknown'`；`status.degraded` 带 `ERR_HOST_NO_ESTIMATOR` |
 | `win32` 平台 | 运行时检查 `isPosixOnly()` | 拒绝替换，投影照常；`status.degraded` 带 `ERR_HOST_PLATFORM_UNSUPPORTED` |
 | `tools.resolve` 的步骤级 `when` | 软探测 | 整族（含 `boost` 工具）不注册，`ERR_HOST_NO_STEP_WHEN`；它通常出现在注册警告里，`status` 本身不可用 |
+| 收据分片可读性 | `boost status` 全量扫描（非依赖） | 至少一个收据分片读不出来（EACCES、名为 `x.jsonl` 的目录等）时 `status.degraded` 带 `ERR_RECEIPTS_UNREADABLE`；`status` 仍是**全量聚合**——健康分片照常计数——所以数字可能不完整。查 `$DSH_HOME/boost/receipts/` 的权限与异常条目，修复后重跑并对比计数 |
+| 提示段装配瀑布 | 出站请求探测（非依赖） | 宿主的 `complete: true` 提示段在装配瀑布之后替换了整个系统提示、协议段没有到达请求时，`status.degraded` 带 `ERR_HOST_COMPLETE_SECTION`；受影响请求上替换与投影 fail-closed（工作区明明可见插件却不动作）。找出宿主里覆盖瀑布的 complete 段（通常属于另一个插件）并移除，或接受这些请求上不动作 |
 
 `ERR_HOST_NO_TOKENMETER` 与 `ERR_HOST_NO_ESTIMATOR` 是**两件不同的事**，不要合并：
 前者是宿主服务（`ctx.get('tokenMeter')`）不存在，替换被拒绝；后者是纯估算包
@@ -340,15 +355,19 @@ plugin manager 才能把运行中的 entry 认成本包的行、通过 profile p
 
 ## 文档
 
-以下文档在**仓库**里，不在 npm tarball 里（`files` 只带 `dist`、`src`、`locale`、
-`cordis.patch.yml`、两份 README、`LICENSE`、`NOTICE`）。在 npm 页面上请从仓库读取。
+以下文档在**仓库**里，不在 npm tarball 里（`files` 只带 `dist`、`locale`、`cordis.patch.yml`、
+两份 README、`LICENSE`、`NOTICE`；`src/` 也不进包，`dist` 的 sourcemap 内联了源码）。在 npm
+页面上请从仓库读取。
+
+源码目前只存在于内网 GitLab 远端；公开镜像尚不存在（此前的 GitHub 仓库地址 404），因此
+`package.json` 暂不带 `repository` 字段，npm 页面不会显示仓库链接——请从内网 GitLab 取源码。
 
 | 文档 | 内容 |
 |---|---|
 | [设计稿](docs/superpowers/specs/2026-11-18-dsh-token-efficiency-design.md) | 目标、证据、架构、契约、度量、风险、发布形态 |
 | [宿主契约附录](docs/superpowers/plans/2026-11-18-host-contracts.md) | 逐条抄自宿主源码的接口准绳 |
 | [三层委派研究](docs/research/2026-11-18-three-tier-delegation.md) | 缓存、路由阈值、压缩、校验的 25 条一手来源 |
-| [发布验收](docs/RELEASE.md) | `npm pack` / isolated 安装、两条软依赖降级路径、20 任务回归门、影子周与统计复算 |
+| [发布验收](docs/RELEASE.md) | `npm run verify:package` 一条命令验收、零 peerDependencies 现状与安装规格、降级码矩阵、20 任务回归门、影子周与统计复算 |
 
 ## 许可证
 

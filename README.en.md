@@ -9,7 +9,9 @@ read-only substitution**.
 ## What it does
 
 DSH replays the whole history on every model request. Across the 300 longest sessions measured
-locally (`npm run stats`, snapshot at `2026-11-19T03:13:21Z`): 54,141 steps and 54,088 requests,
+locally (`npm run --silent stats` — without `--silent`, npm prints its `> dsh-boost@0.1.0 stats`
+banner to stdout, so use `--silent` or `node scripts/session-stats.mjs` for machine-readable
+output; snapshot at `2026-11-19T03:13:21Z`): 54,141 steps and 54,088 requests,
 10,575,904,022 raw tokens in total. The mean is 195,340 tokens per step and 195,531 per request
 (median 187,681 per request); 97.01% of the input was cache reads. Tool receipts dominate the
 volume (bash 61.75%, read 22.13%, ssh 10.01%), yet the part of a receipt the next step actually
@@ -35,7 +37,12 @@ statistic that a later version must add.
 
 ## Requirements
 
-- Node.js `>=22.18.0` and DSH `>=0.2.2-rc.1 <0.3.0-0` (both in `package.json` `engines`).
+- Node.js `>=24.9.0` and DSH `>=0.2.2-rc.1 <0.3.0-0` (both in `package.json` `engines`; the Node
+  floor matches the host `@deepseek-ai/dsh@0.2.2-rc.4`).
+- **The package declares no peerDependencies**: installing it pulls in no `@deepseek-ai/*`
+  package, and the module loads without any of them; the runtime capabilities (`tokenMeter`,
+  `spillStore`, the estimator, the footer formatter) are provided by the DSH host process, and a
+  missing one degrades (see "Host dependencies").
 - **Substitution is POSIX-only.** On Windows (`win32`) substitution is refused and
   `boost status` reports `ERR_HOST_PLATFORM_UNSUPPORTED` in `degraded`; projection does not
   depend on the platform and keeps working.
@@ -47,16 +54,23 @@ statistic that a later version must add.
 directory:
 
 ```bash
-# once published to a registry
-dsh plugin --profile <name> add dsh-boost
+# once published to a registry: latest still points at the incompatible old
+# API (0.0.1-rc.1), so pin the version — or use dsh-boost@next if the
+# publisher enabled a next dist-tag
+dsh plugin --profile <name> add dsh-boost@^0.1.0
 
 # or from a local checkout (build first; dist/ is not committed)
 npm run build
 dsh plugin --profile <name> add /absolute/path/to/dsh-boost
 ```
 
-For the web profile: `dsh plugin --profile web add dsh-boost`. `dsh plugin` forwards the operation
+For the web profile: `dsh plugin --profile web add dsh-boost@^0.1.0`. `dsh plugin` forwards the operation
 to pnpm, so pnpm must be on `PATH`.
+
+The package is ESM (`"type": "module"`) and the `.` entry of `exports` also maps `require` /
+`default`: on Node >= 24.9, `require('dsh-boost')` loads the very same code as `import`. Nothing
+is built inside the installed package (`files` ships only `dist`, `locale`, `cordis.patch.yml`,
+both READMEs, `LICENSE`, and `NOTICE` — no `src/`; the `dist` source maps inline the sources).
 
 The package's `dsh.bundle.patch` points at `cordis.patch.yml`, so after installation the host
 registers it as a profile bundle and the patch's `insert` row lands over the profile root. **You
@@ -111,7 +125,9 @@ Then list the workspace to expose:
   scope to every *defined* workspace; sessions with no workspace stay invisible.
 - `baseRevision` is `data.scope.revision` from the status you just read (`0` for the first write).
   This is compare-and-swap: a stale revision returns `ERR_SCOPE_REVISION_CONFLICT`; read `status`
-  again and retry.
+  again and retry. When the caller's cancellation signal interrupts the write, the tool returns
+  `ERR_SCOPE_ABORTED`: the lock is released, `scope.json` is untouched, and retrying with a
+  freshly read revision is safe — no residue is left behind.
 - `version` and `revision` are store-owned; a `body` carrying either is rejected.
 
 After the write, call `status` again. A healthy result looks like this:
@@ -355,6 +371,8 @@ plugin fail to load.
 | `@deepseek-ai/dsh-token-meter/estimate` | soft (dynamic import) | Fixed overhead cannot be measured, so `fixedOverheadTokens` is `'unknown'`; `status.degraded` reports `ERR_HOST_NO_ESTIMATOR` |
 | `win32` platform | runtime `isPosixOnly()` check | Substitution is refused, projection still works; `status.degraded` reports `ERR_HOST_PLATFORM_UNSUPPORTED` |
 | Step-level `when` on `tools.resolve` | soft probe | The whole family (including the `boost` tool) is not registered, `ERR_HOST_NO_STEP_WHEN`; it normally surfaces in the registration warning because `status` itself is unavailable |
+| Receipt shard readability | `boost status` full scan (not a dependency) | When at least one receipt shard cannot be read (EACCES, a directory named `x.jsonl`, …), `status.degraded` carries `ERR_RECEIPTS_UNREADABLE`; `status` stays a **total over the healthy shards** — they are still counted — so the figures may be incomplete. Check permissions and stray entries in `$DSH_HOME/boost/receipts/`, fix, and re-run `status`, comparing counts |
+| Prompt assembly waterfall | outgoing-request probe (not a dependency) | When the host's `complete: true` prompt section replaces the assembled system prompt after the waterfall and the protocol section never reaches the request, `status.degraded` carries `ERR_HOST_COMPLETE_SECTION`; substitution and projection fail closed for the affected requests (the plugin stays inert although the workspace is visible). Find the complete section overriding the waterfall (usually another plugin's) and remove it, or accept the inaction on those requests |
 
 `ERR_HOST_NO_TOKENMETER` and `ERR_HOST_NO_ESTIMATOR` are **two different things**; do not merge
 them. The first is the host service (`ctx.get('tokenMeter')`) being absent, which refuses
@@ -394,15 +412,20 @@ evidence" degraded path would be unreachable.
 ## Documentation
 
 These documents live in the **repository**, not in the npm tarball (`files` ships only `dist`,
-`src`, `locale`, `cordis.patch.yml`, both READMEs, `LICENSE`, and `NOTICE`). If you are reading on
+`locale`, `cordis.patch.yml`, both READMEs, `LICENSE`, and `NOTICE`; `src/` is not shipped
+either, and the `dist` source maps inline the sources). If you are reading on
 the npm page, open them from the repository.
+
+The source currently lives only on the internal GitLab remote; no public mirror exists yet (the
+previous GitHub repository address 404s), so `package.json` deliberately omits the `repository`
+field and the npm page will show no repository link — fetch the source from the internal GitLab.
 
 | Document | Contents |
 |---|---|
 | [Design](docs/superpowers/specs/2026-11-18-dsh-token-efficiency-design.md) | Goals, evidence, architecture, contracts, measurement, risks, release shape |
 | [Host contracts appendix](docs/superpowers/plans/2026-11-18-host-contracts.md) | Interface reference copied line by line from the host sources |
 | [Three-tier delegation research](docs/research/2026-11-18-three-tier-delegation.md) | 25 primary sources on caching, routing thresholds, compression, and verification |
-| [Release acceptance](docs/RELEASE.md) | `npm pack` / isolated install, both soft-dependency degraded paths, the 20-task regression gate, and the shadow week and stats recompute |
+| [Release acceptance](docs/RELEASE.md) | The one-command `npm run verify:package` acceptance, the zero-peerDependencies state and install spec, the degradation-code matrix, the 20-task regression gate, and the shadow week and stats recompute |
 
 ## License
 
