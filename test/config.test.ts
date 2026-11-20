@@ -64,3 +64,74 @@ test('返回深拷贝：改写结果不污染 DEFAULT_CONFIG', () => {
   assert.equal(DEFAULT_CONFIG.admission.thresholdTokens, 1024)
   assert.equal(DEFAULT_CONFIG.selector.maxTokens, 512)
 })
+
+// ---------------------------------------------------------------------------
+// Minor: every key used to accept negative/fractional values silently.
+// ---------------------------------------------------------------------------
+
+test('负值被拒绝并逐键回退默认值，修复会被报告', () => {
+  const repairs: string[] = []
+  const c = resolveConfig(
+    {
+      projection: { read: { triggerChars: -1, headChars: Number.NaN, tailChars: -2 } },
+      admission: { thresholdTokens: -5 },
+      selector: { maxTokens: -1 },
+      stepsPerTurn: -2,
+      horizonSteps: -3,
+      historyTurns: -4,
+    },
+    message => repairs.push(message),
+  )
+  assert.deepEqual(c.projection.read, DEFAULT_CONFIG.projection.read)
+  assert.deepEqual(c.admission, DEFAULT_CONFIG.admission)
+  assert.deepEqual(c.selector, DEFAULT_CONFIG.selector)
+  assert.equal(c.stepsPerTurn, DEFAULT_CONFIG.stepsPerTurn)
+  assert.equal(c.horizonSteps, DEFAULT_CONFIG.horizonSteps)
+  assert.equal(c.historyTurns, DEFAULT_CONFIG.historyTurns)
+  assert.ok(repairs.length >= 8, `expected a repair per rejected key: ${JSON.stringify(repairs)}`)
+})
+
+test('小数值向下取整而不是被静默保留', () => {
+  const repairs: string[] = []
+  const c = resolveConfig(
+    {
+      projection: { read: { triggerChars: 3000.9, headChars: 2000.8, tailChars: 500.7 } },
+      stepsPerTurn: 4.9,
+      historyTurns: 2.5,
+      selector: { maxTokens: 512.9 },
+    },
+    message => repairs.push(message),
+  )
+  assert.deepEqual(c.projection.read, { triggerChars: 3000, headChars: 2000, tailChars: 500 })
+  assert.equal(c.stepsPerTurn, 4)
+  assert.equal(c.historyTurns, 2)
+  assert.equal(c.selector.maxTokens, 512)
+  assert.equal(repairs.length, 6)
+})
+
+test('跨键不变量：head + tail 必须小于 trigger，否则整族回退默认值', () => {
+  const repairs: string[] = []
+  const c = resolveConfig(
+    { projection: { read: { triggerChars: 1000, headChars: 2000, tailChars: 500 } } },
+    message => repairs.push(message),
+  )
+  assert.deepEqual(c.projection.read, DEFAULT_CONFIG.projection.read)
+  assert.equal(repairs.length, 1)
+  assert.match(repairs[0], /triggerChars/)
+
+  const tight = resolveConfig({ projection: { read: { triggerChars: 2901, headChars: 2500, tailChars: 400 } } })
+  assert.deepEqual(tight.projection.read, { triggerChars: 2901, headChars: 2500, tailChars: 400 })
+})
+
+test('0 是合法阈值/预算，但 selector 的 0 输出上限无效', () => {
+  const c = resolveConfig({
+    admission: { thresholdTokens: 0 },
+    selector: { maxTokens: 0 },
+    stepsPerTurn: 0,
+    horizonSteps: 0,
+  })
+  assert.equal(c.admission.thresholdTokens, 0)
+  assert.equal(c.stepsPerTurn, 0)
+  assert.equal(c.horizonSteps, 0)
+  assert.equal(c.selector.maxTokens, DEFAULT_CONFIG.selector.maxTokens)
+})

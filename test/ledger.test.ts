@@ -1,6 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { remainingSteps, worthSubstituting, StepBudget } from '../src/admission/ledger.ts'
+import { remainingSteps, RuntimeStepHorizon, worthSubstituting, StepBudget } from '../src/admission/ledger.ts'
 
 test('不足 5 个 turn 直接用 horizon；满 5 个才取均值（R11）', () => {
   assert.equal(remainingSteps({ stepsSoFar: [50, 60, 70, 80, 90], horizonSteps: 20, historyTurns: 5 }), 20)
@@ -156,4 +156,69 @@ test('StepBudget 的非有限 max 是空预算（Infinity 也不是无限）', (
     assert.equal(b.take(), false)
     assert.equal(b.count(), 0)
   }
+})
+
+// ---------------------------------------------------------------------------
+// I9: `historyTurns`/`remainingSteps` are wired through a runtime horizon.
+// ---------------------------------------------------------------------------
+
+test('I9: RuntimeStepHorizon uses the mean of the last historyTurns completed turns', () => {
+  const h = new RuntimeStepHorizon(20, 5)
+  for (let turn = 1; turn <= 5; turn += 1) {
+    for (let step = 1; step <= 2; step += 1) h.observe('s1', turn, step)
+  }
+  // Five turns are only complete once the next turn starts.
+  assert.equal(h.remaining(), 20)
+  h.observe('s1', 6, 1)
+  assert.equal(h.remaining(), 2)
+  assert.equal(h.remainingFor('s1'), 2)
+})
+
+test('I9: fewer than historyTurns completed turns falls back to the configured horizon', () => {
+  const h = new RuntimeStepHorizon(20, 5)
+  for (let turn = 1; turn <= 3; turn += 1) {
+    for (let step = 1; step <= 9; step += 1) h.observe('s1', turn, step)
+  }
+  assert.equal(h.remaining(), 20)
+})
+
+test('I9: a retried step does not inflate the turn count, and backwards turns are ignored', () => {
+  const h = new RuntimeStepHorizon(20, 2)
+  h.observe('s1', 1, 1)
+  h.observe('s1', 1, 3)
+  h.observe('s1', 1, 2) // retry of an earlier step: max stays 3
+  h.observe('s1', 2, 1)
+  h.observe('s1', 3, 1) // finalises turn 1 = 3, turn 2 = 1
+  assert.equal(h.remaining(), 2) // mean(3,1) = 2
+  h.observe('s1', 1, 99) // a reused/backwards turn must not rewrite history
+  assert.equal(h.remaining(), 2)
+})
+
+test('I9: the aggregate horizon is the conservative minimum across live sessions', () => {
+  const h = new RuntimeStepHorizon(20, 2)
+  for (let turn = 1; turn <= 2; turn += 1) {
+    for (let step = 1; step <= 5; step += 1) h.observe('s1', turn, step)
+    for (let step = 1; step <= 10; step += 1) h.observe('s2', turn, step)
+  }
+  h.observe('s1', 3, 1)
+  h.observe('s2', 3, 1)
+  assert.equal(h.remaining(), 5)
+  assert.equal(h.remainingFor('s2'), 10)
+  assert.equal(h.size(), 2)
+  h.clear('s1')
+  assert.equal(h.remaining(), 10)
+  assert.equal(h.size(), 1)
+})
+
+test('I9: the class is total on malformed observations', () => {
+  const h = new RuntimeStepHorizon(20, 5)
+  assert.doesNotThrow(() => {
+    h.observe('', 1, 1)
+    h.observe('s1', Number.NaN, 1)
+    h.observe('s1', 1, Number.POSITIVE_INFINITY)
+    h.observe('s1', -1, 2)
+    h.observe('s1', 1, 0)
+  })
+  assert.equal(h.remaining(), 20)
+  assert.equal(h.size(), 0)
 })

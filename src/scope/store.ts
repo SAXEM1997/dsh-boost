@@ -38,7 +38,9 @@
  *
  * The judgement cache is intentionally per agent key (the session id). A
  * single global value would leak one workspace's visibility into every other
- * agent (design §5.5). `remember` is the only writer; there is no eviction.
+ * agent (design §5.5). `remember` is the only writer; `forget` is called from
+ * the plugin's `session/disposed` handler so a long-lived process does not keep
+ * one entry per session forever.
  *
  * @module dsh-boost/scope/store
  */
@@ -69,10 +71,24 @@ import type { ScopeCode, ScopeDoc } from './doc.js'
 
 const SCOPE_FILE = 'scope.json'
 const LOCK_FILE = 'scope.lock'
-/** A lock older than this is a reclaim candidate — but only if its pid is dead. */
+/** A lock older than this is a reclaim candidate when its pid is dead (or unrecorded). */
 const LOCK_STALE_MS = 60_000
+/**
+ * After this much time a lock is taken over even when its recorded pid is alive.
+ *
+ * `startedAt` (not `mtime`) is the age source when present. The write section
+ * inside the lock is synchronous and tiny, so a ten-minute hold means a crashed
+ * writer whose pid the OS reused; without this bound such a lock wedges every
+ * `boost scope` write until it is deleted by hand. Ten times the dead-pid
+ * timeout keeps a genuinely slow writer safe.
+ */
+const LOCK_TAKEOVER_MS = 10 * LOCK_STALE_MS
 /** Largest value `process.kill` accepts as a pid (signed 32-bit). */
 const MAX_PID = 2_147_483_647
+/** Stable code logged when a live-pid lock is reclaimed on age alone. */
+export const ERR_SCOPE_LOCK_TAKEOVER = 'ERR_SCOPE_LOCK_TAKEOVER'
+/** Per-process identity in the lock file: distinguishes a reused pid from this boot. */
+const BOOT_NONCE = randomUUID()
 
 /**
  * One disk read. `ok: false` still carries a document to serve (the strict
@@ -156,16 +172,36 @@ function decode(text: string, mtimeMs: number): DiskRead {
   return { ok: true, doc: parsed.doc, mtimeMs, text }
 }
 
+/** Test seam and operator hook for the lock's time-based takeover. */
+export interface ScopeStoreOptions {
+  /** Age after which a live-pid lock is ignored (defaults to ten dead-pid timeouts). */
+  lockTakeoverMs?: number
+  /** Age after which a dead-pid lock is reclaimable (defaults to 60 s). */
+  lockStaleMs?: number
+  /** Clock, injectable so tests do not sleep. */
+  now?: () => number
+  /** Sink for the takeover warning; defaults to a process warning. */
+  warn?: (message: string) => void
+}
+
 export class ScopeStore {
   private readonly file: string
   private readonly lockFile: string
+  private readonly lockStaleMs: number
+  private readonly lockTakeoverMs: number
+  private readonly now: () => number
+  private readonly warn: (message: string) => void
   private cached?: { mtimeMs: number; text: string; doc: ScopeDoc }
   private lockOwner?: string
   private readonly judgements = new Map<string, boolean>()
 
-  constructor(private readonly dir: string) {
+  constructor(private readonly dir: string, options: ScopeStoreOptions = {}) {
     this.file = join(dir, SCOPE_FILE)
     this.lockFile = join(dir, LOCK_FILE)
+    this.lockStaleMs = options.lockStaleMs ?? LOCK_STALE_MS
+    this.lockTakeoverMs = options.lockTakeoverMs ?? LOCK_TAKEOVER_MS
+    this.now = options.now ?? Date.now
+    this.warn = options.warn ?? ((message: string) => process.emitWarning(message))
   }
 
   /**
@@ -250,6 +286,17 @@ export class ScopeStore {
     this.judgements.set(key, visible)
   }
 
+  /**
+   * Drop one session's cached judgement on session disposal.
+   *
+   * The judgement map is per session and otherwise lives as long as the plugin;
+   * without this a process that served many sessions would retain one boolean
+   * (and its string key) per session forever.
+   */
+  forget(key: string): void {
+    this.judgements.delete(key)
+  }
+
   /** Synchronous per-agent lookup: a miss is `fallback`, and fail-closed is `false`. */
   judgement(key: string, fallback?: boolean): boolean {
     return this.judgements.get(key) ?? fallback ?? false
@@ -302,20 +349,44 @@ export class ScopeStore {
   /**
    * Take the write lock, reclaiming a stale lock at most once.
    *
-   * A lock is stale only when it is older than 60 s **and** its recorded pid is
-   * dead (or unrecorded/unparseable/out of pid range); a live writer is never
-   * evicted by timeout alone. The staleness decision and the unlink are
-   * synchronous here, so they share one tick. A residual cross-process race
-   * remains: two writers can both judge the same lock stale, and one can unlink
-   * the other's fresh lock. `releaseLock` therefore only removes a lock whose
-   * content it wrote, and the CAS revision check still refuses to merge
-   * divergent writes; a lost update in that window is possible, corruption is
-   * not.
+   * Two independent staleness rules:
+   *
+   * 1. dead-owner reclaim — older than `lockStaleMs` **and** the recorded pid is
+   *    dead (or unrecorded/unparseable/out of pid range);
+   * 2. bounded takeover — the lock's `startedAt` (falling back to mtime) is
+   *    older than `lockTakeoverMs`, **even when its pid is alive**. A pid is
+   *    reused after a crash, so rule 1 alone can leave `scope.lock` held for the
+   *    whole process lifetime in a container. The hold window is one small
+   *    synchronous write, so a lock this old is a crashed writer.
+   *
+   * The takeover re-reads the lock immediately before unlinking and refuses if
+   * its bytes or mtime changed, which narrows the cross-process race. Two
+   * writers can still judge the same lock stale; `releaseLock` only removes a
+   * lock whose content it wrote, and the CAS revision check still refuses to
+   * merge divergent writes, so the residual race cannot corrupt the document.
    */
   private async acquireLock(): Promise<void> {
     if (await this.createLock()) return
-    if (!this.lockIsStale()) {
+    const first = this.readLock()
+    const decision = this.classifyLock(first)
+    if (decision === 'held') {
       throw scopeError(ERR_SCOPE_LOCKED, `${this.lockFile} is held by another writer`)
+    }
+    if (decision === 'takeover') {
+      this.warn(
+        `${ERR_SCOPE_LOCK_TAKEOVER}: taking over ${this.lockFile} from pid ${
+          first?.pid ?? 'unknown'
+        } after ${Math.round(this.ageOf(first) / 1000)}s; the recording process may have crashed and its pid been reused`,
+      )
+    }
+
+    // Re-read before the unlink: a writer that replaced the lock between the
+    // decision and here must not be evicted on a stale observation.
+    const again = this.readLock()
+    if (again !== undefined && first !== undefined) {
+      if (again.text !== first.text || again.mtimeMs !== first.mtimeMs) {
+        throw scopeError(ERR_SCOPE_LOCKED, `${this.lockFile} changed while being reclaimed`)
+      }
     }
     try {
       unlinkSync(this.lockFile)
@@ -339,7 +410,11 @@ export class ScopeStore {
       throw scopeError(ERR_SCOPE_LOCKED, `cannot create ${this.lockFile}: ${messageOf(error)}`)
     }
 
-    const content = JSON.stringify({ pid: process.pid, startedAt: Date.now() })
+    const content = JSON.stringify({
+      pid: process.pid,
+      startedAt: this.now(),
+      nonce: BOOT_NONCE,
+    })
     let failure: unknown
     try {
       await handle.writeFile(content)
@@ -349,7 +424,8 @@ export class ScopeStore {
       await handle.close().catch(() => {})
     }
     if (failure !== undefined) {
-      // A lock without owner data would block for 60 s; remove what we created.
+      // A lock without owner data would block for the stale timeout; remove
+      // what we created.
       await unlink(this.lockFile).catch(() => {})
       throw scopeError(ERR_SCOPE_LOCKED, `cannot write ${this.lockFile}: ${messageOf(failure)}`)
     }
@@ -357,38 +433,62 @@ export class ScopeStore {
     return true
   }
 
-  /** Both halves of the reclamation condition: old enough, and owner dead. */
-  private lockIsStale(): boolean {
+  /**
+   * One read of the lock: bytes, mtime and the owner fields they record.
+   *
+   * `undefined` means absent (the `EEXIST` raced a release): the caller may
+   * retry the create. An unreadable-but-present lock is returned with the mtime
+   * and no owner fields, so it becomes reclaimable only after the dead-pid
+   * timeout — never immediately, because an unreadable live lock must not be
+   * evicted on a guess.
+   */
+  private readLock(): { text: string; mtimeMs: number; pid?: number; startedAt?: number } | undefined {
     let mtimeMs: number
     try {
       mtimeMs = statSync(this.lockFile).mtimeMs
-    } catch (error) {
-      // It vanished between EEXIST and stat; let the retry race for it.
-      return errorCode(error) === 'ENOENT'
-    }
-    if (Date.now() - mtimeMs <= LOCK_STALE_MS) return false
-    const pid = this.readLockPid()
-    return pid === undefined || !isProcessAlive(pid)
-  }
-
-  /**
-   * The pid recorded in the lock file, or undefined when it is absent,
-   * unparseable or outside the range `process.kill` accepts. An impossible pid
-   * is effectively pid-less: it makes the lock reclaimable after 60 s instead
-   * of wedging every future write. A negative pid is also rejected here —
-   * `process.kill` would interpret it as a process group.
-   */
-  private readLockPid(): number | undefined {
-    try {
-      const parsed: unknown = JSON.parse(readFileSync(this.lockFile, 'utf8'))
-      if (parsed === null || typeof parsed !== 'object') return undefined
-      const pid = (parsed as { pid?: unknown }).pid
-      return typeof pid === 'number' && Number.isInteger(pid) && pid > 0 && pid <= MAX_PID
-        ? pid
-        : undefined
     } catch {
       return undefined
     }
+    let text: string
+    try {
+      text = readFileSync(this.lockFile, 'utf8')
+    } catch {
+      return { text: '', mtimeMs }
+    }
+    let parsed: unknown
+    try {
+      parsed = JSON.parse(text)
+    } catch {
+      return { text, mtimeMs }
+    }
+    const record = typeof parsed === 'object' && parsed !== null ? (parsed as Record<string, unknown>) : {}
+    const pid = record.pid
+    const startedAt = record.startedAt
+    return {
+      text,
+      mtimeMs,
+      ...(typeof pid === 'number' && Number.isInteger(pid) && pid > 0 && pid <= MAX_PID ? { pid } : {}),
+      ...(typeof startedAt === 'number' && Number.isFinite(startedAt) && startedAt > 0 && startedAt <= this.now()
+        ? { startedAt }
+        : {}),
+    }
+  }
+
+  /** Age from `startedAt` when it is usable, otherwise from the file's mtime. */
+  private ageOf(lock: { mtimeMs: number; startedAt?: number } | undefined): number {
+    if (lock === undefined) return 0
+    return Math.max(0, this.now() - (lock.startedAt ?? lock.mtimeMs))
+  }
+
+  /** Whether the lock is reclaimable, and whether that decision needs a warning. */
+  private classifyLock(
+    lock: { mtimeMs: number; pid?: number; startedAt?: number } | undefined,
+  ): 'held' | 'dead' | 'takeover' | 'missing' {
+    if (lock === undefined) return 'missing'
+    const age = this.ageOf(lock)
+    if (age <= this.lockStaleMs) return 'held'
+    if (age >= this.lockTakeoverMs) return 'takeover'
+    return lock.pid === undefined || !isProcessAlive(lock.pid) ? 'dead' : 'held'
   }
 
   /**

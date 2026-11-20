@@ -289,3 +289,49 @@ test('flush 把失败期间缓冲的收据补写落盘，且不抛错', async ()
   // 空 store 的 flush 同样是 no-op，不抛错
   await new ReceiptStore(await freshRoot()).flush()
 })
+
+// ---------------------------------------------------------------------------
+// I7: per-session state and the failure buffer must be bounded/disposable.
+// ---------------------------------------------------------------------------
+
+test('I7: disposeSession evicts the shard state and drops later receipts', async () => {
+  const root = await freshRoot()
+  const s = new ReceiptStore(root)
+  await s.append(rec('a'))
+  assert.equal(await s.count('a'), 1)
+
+  s.disposeSession('a')
+  // The cached shard counters are gone, not retained for a dead session.
+  assert.equal((s as unknown as { states: Map<string, unknown> }).states.size, 0)
+
+  await s.append(rec('a', { turn: 2 }))
+  assert.equal(await s.count('a'), 1, 'a late hook must record nothing for a disposed session')
+
+  // A live session is unaffected by another session's disposal.
+  await s.append(rec('b'))
+  assert.equal(await s.count('b'), 1)
+})
+
+test('I7: the disposed-id set is bounded, so a long process cannot grow it forever', async () => {
+  const root = await freshRoot()
+  const s = new ReceiptStore(root)
+  for (let i = 0; i < 300; i++) s.disposeSession(`s${i}`)
+  const disposed = (s as unknown as { disposed: Set<string> }).disposed
+  assert.ok(disposed.size <= 256, `disposed set grew to ${disposed.size}`)
+  // The newest id is remembered and the oldest evicted.
+  assert.equal(disposed.has('s299'), true)
+  assert.equal(disposed.has('s0'), false)
+})
+
+test('I7: once stopped() the pending buffer is dropped instead of growing unbounded', async () => {
+  const root = await freshRoot()
+  const blocker = join(root, 'receipts')
+  await writeFile(blocker, 'not a directory')
+  const s = new ReceiptStore(root)
+  for (let i = 0; i < 25; i++) await s.append(rec('a', { turn: i }))
+
+  assert.equal(s.stopped(), true)
+  const pending = (s as unknown as { pending: unknown[] }).pending
+  assert.deepEqual(pending, [])
+  assert.equal(s.failures(), 25)
+})

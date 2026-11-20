@@ -4,9 +4,9 @@
  * The plugin is a plain function plugin: cordis reads `name` and `inject` from
  * the module and calls `apply(ctx, config)`. Only the production assembly lives
  * here — configuration resolution, the two stores the hooks and the control
- * tool share, the four hook mounts, the two session events that drive the
- * clock/visibility and the session-end cleanup, and the `boost` tool, all
- * wired once per plugin instance.
+ * tool share, the hook mounts, the lifecycle events that warm visibility,
+ * drive the clock, flush receipts at turn end and clean up on session
+ * disposal, and the `boost` tool, all wired once per plugin instance.
  *
  * Wiring failures are contained: a host that lacks the services a mount point
  * lives on must load the plugin with a warning, not die loading it. The data
@@ -16,19 +16,27 @@
  */
 import type { ToolDefinition } from '@deepseek-ai/dsh-tools'
 import { measureBoostFixedOverhead } from './tools/boost.js'
+import { RuntimeStepHorizon, StepBudget } from './admission/ledger.js'
 import { RetrievalLedger } from './admission/retrieval.js'
+import { UsageLedger } from './admission/usage.js'
 import { resolveConfig } from './config.js'
 import { AnchorStore } from './gate/invalidate.js'
 import type { Plan } from './gate/plan.js'
 import { resolveBoostRoot } from './host/root.js'
 import { clearSession, SessionRuntime } from './hooks/llm-stream.js'
+import { TurnClock } from './hooks/clock.js'
 import { PendingQueue } from './hooks/pending.js'
 import { registerHooks } from './hooks/post-execute.js'
 import type { HookDeps, SelectorRoute } from './hooks/post-execute.js'
 import type { SpillBackend } from './projection/apply.js'
 import { ProjectionCounters } from './projection/counters.js'
+import { PROTOCOL_NAME, PROTOCOL_TEXT } from './prompt/protocol.js'
 import { ReceiptStore } from './receipts/store.js'
-import { resolveVisible, supportsStepWhen, workspaceIdOf } from './scope/resolve.js'
+import {
+  ERR_HOST_NO_WORKSPACE_REGISTRY,
+  resolveWorkspace,
+  supportsStepWhen,
+} from './scope/resolve.js'
 import type { WorkspaceRegistry } from './scope/resolve.js'
 import { ScopeStore } from './scope/store.js'
 import { boostTool } from './tools/boost.js'
@@ -79,6 +87,25 @@ function serviceOf<T>(ctx: PluginContext, name: string): T | undefined {
 }
 
 /**
+ * A memoising, retrying service getter.
+ *
+ * `ctx.get(name, strict=true)` answers `undefined` until the provider fiber is
+ * ACTIVE, and cordis starts sibling plugin entries concurrently, so a service
+ * read once in `apply` may simply not exist yet. A success is memoised; an
+ * absence is never cached, because the provider may become active one tick
+ * later. Every call site reads the getter, so the plugin recovers on the next
+ * request instead of staying inert for the process lifetime.
+ */
+function lazyService<T>(ctx: PluginContext, name: string): () => T | undefined {
+  let resolved: T | undefined
+  return () => {
+    if (resolved !== undefined) return resolved
+    resolved = serviceOf<T>(ctx, name)
+    return resolved
+  }
+}
+
+/**
  * The session id behind an agent or a `Session`.
  *
  * An agent exposes `session.header.id`; the `session/disposed` payload is the
@@ -101,43 +128,101 @@ function sessionIdOf(value: unknown): string | undefined {
 }
 
 /**
- * The host token meter's synchronous message estimator, when the service is
- * reachable.
+ * The host token meter's synchronous message estimator, resolved lazily.
  *
  * `ctx.tokenMeter` is a cordis service with a synchronous `estimateMessage`
- * method, so `ctx.get('tokenMeter')` is a real synchronous seam; the pure
- * `estimateContent` export remains a dynamic-import-only peer. Pricing the
- * text as one user message adds the meter's constant block/role overhead
- * (+8), which cancels in every before/after projection receipt. The caller
- * labels receipts `host` so the number is not mistaken for a provider
- * measurement.
+ * method, so `ctx.get('tokenMeter')` is a real synchronous seam. Like every
+ * soft service it may become active after this plugin's `apply`, so the
+ * estimator is probed on first use and re-probed while absent; a success is
+ * memoised. Presence is not capability: a service that throws or returns a
+ * non-finite number is a broken meter, not a meter, and substitution is
+ * refused exactly as when no service exists (review R5). A broken meter is not
+ * memoised either, so a provider that finishes wiring its meter later can
+ * still recover.
+ *
+ * The receipt label is `host` so the number is never mistaken for a provider
+ * measurement; the only other label would be a fabricated `chars/4` fallback,
+ * which this assembly deliberately does not implement.
  */
-function hostEstimatorOf(ctx: PluginContext): ((text: string) => number) | undefined {
-  const meter = serviceOf<{ estimateMessage?: (message: unknown) => number }>(ctx, 'tokenMeter')
-  if (meter === undefined || typeof meter.estimateMessage !== 'function') return undefined
-  const estimate = meter.estimateMessage.bind(meter)
+function meterSeamOf(ctx: PluginContext): {
+  estimate(): ((text: string) => number) | undefined
+  kind(): 'host' | 'unknown'
+} {
+  let estimator: ((text: string) => number) | undefined
+  const resolve = (): ((text: string) => number) | undefined => {
+    if (estimator !== undefined) return estimator
+    const meter = serviceOf<{ estimateMessage?: (message: unknown) => number }>(ctx, 'tokenMeter')
+    if (meter === undefined || typeof meter.estimateMessage !== 'function') return undefined
+    const estimate = meter.estimateMessage.bind(meter)
+    try {
+      const probe = estimate({
+        role: 'user',
+        content: [{ type: 'text', text: 'dsh-boost meter probe' }],
+      })
+      if (typeof probe !== 'number' || !Number.isFinite(probe)) return undefined
+    } catch {
+      return undefined
+    }
+    estimator = (text: string): number => {
+      try {
+        const value = estimate({ role: 'user', content: [{ type: 'text', text }] })
+        return typeof value === 'number' && Number.isFinite(value) ? value : Number.NaN
+      } catch {
+        return Number.NaN
+      }
+    }
+    return estimator
+  }
+  return {
+    estimate: resolve,
+    kind: () => (resolve() === undefined ? 'unknown' : 'host'),
+  }
+}
 
-  // Presence is not capability. A service that throws or returns a non-finite
-  // number on its first message is a broken meter, not a meter: substitution
-  // must be refused exactly as when no service exists (review R5). The probe
-  // runs once at plugin load, never on a request path.
-  try {
-    const probe = estimate({
-      role: 'user',
-      content: [{ type: 'text', text: 'dsh-boost meter probe' }],
-    })
-    if (typeof probe !== 'number' || !Number.isFinite(probe)) return undefined
-  } catch {
-    return undefined
+/** How many disposed session ids the runtime facade remembers (FIFO). */
+const MAX_DISPOSED_RUNTIME_SESSIONS = 256
+
+/**
+ * `SessionRuntime` that refuses to recreate state for a disposed session.
+ *
+ * `clearSession` drops a session's runtime entry, but a `post-execute` that was
+ * already in flight (a selector call can take 20 s) lands after disposal and
+ * calls `clockFor`/`budgetFor`/`usageFor` again; the base class would create a
+ * fresh entry nothing ever clears. The facade returns throwaway primitives for
+ * disposed ids instead: the late hook records nothing, and the map cannot grow
+ * after session end. The id set is FIFO-bounded so a long process cannot grow
+ * it without limit.
+ */
+class DisposalAwareSessionRuntime extends SessionRuntime {
+  private readonly disposed = new Set<string>()
+  private readonly disposedOrder: string[] = []
+
+  /** Mark a session disposed and drop whatever the base class still holds. */
+  markDisposed(sessionId: string): void {
+    this.clear(sessionId)
+    if (this.disposed.has(sessionId)) return
+    this.disposed.add(sessionId)
+    this.disposedOrder.push(sessionId)
+    while (this.disposedOrder.length > MAX_DISPOSED_RUNTIME_SESSIONS) {
+      const oldest = this.disposedOrder.shift()
+      if (oldest !== undefined) this.disposed.delete(oldest)
+    }
   }
 
-  return (text: string): number => {
-    try {
-      const value = estimate({ role: 'user', content: [{ type: 'text', text }] })
-      return typeof value === 'number' && Number.isFinite(value) ? value : Number.NaN
-    } catch {
-      return Number.NaN
-    }
+  override clockFor(sessionId: string): TurnClock {
+    return this.disposed.has(sessionId) ? new TurnClock() : super.clockFor(sessionId)
+  }
+
+  override budgetFor(sessionId: string): StepBudget {
+    return this.disposed.has(sessionId) ? new StepBudget(0) : super.budgetFor(sessionId)
+  }
+
+  override usageFor(sessionId: string): UsageLedger {
+    return this.disposed.has(sessionId) ? new UsageLedger() : super.usageFor(sessionId)
+  }
+
+  override onModelRequest(sessionId: string, turn: number, step?: number): void {
+    if (!this.disposed.has(sessionId)) super.onModelRequest(sessionId, turn, step)
   }
 }
 
@@ -149,35 +234,33 @@ type RequestPayload = {
 }
 
 /**
- * Warm the synchronous visibility cache from the request that precedes
- * `llm/stream`.
+ * Warm the synchronous visibility cache and remember the canonical workspace.
  *
- * `resolveVisible` is the async answer and also writes `scope.judgement(key)`;
- * the workspace id is kept even when the answer is "invisible", so the resolver
- * must consult the live judgement rather than treating the map as the answer.
- * A workspace disabled after a commit therefore stops resolving before the
- * next synthesized turn.
+ * `resolveWorkspace` is the async answer and also writes `scope.judgement(key)`;
+ * it prefers the registry's `resolveByPath`, so a symlinked or trailing-slash
+ * cwd resolves to the same id the judgement used. The workspace id is kept even
+ * when the answer is "invisible", so the resolver must consult the live
+ * judgement rather than treating the map as the answer. A workspace disabled
+ * after a commit therefore stops resolving before the next synthesized turn.
  */
 async function warmVisibility(
   scope: ScopeStore,
-  registry: WorkspaceRegistry | undefined,
+  registry: () => WorkspaceRegistry | undefined,
   agent: unknown,
   sessionId: string,
   workspaces: Map<string, string>,
-): Promise<void> {
+): Promise<boolean> {
   try {
-    await resolveVisible(scope, agent, registry)
-    const workspaceId = workspaceIdOf(
-      agent as { session?: { header?: { cwd?: string } } } | undefined,
-      registry,
-    )
+    const result = await resolveWorkspace(scope, agent, registry())
     // The map carries identity, `scope.judgement` carries visibility: cache the
     // id even when the answer is "invisible", and let the resolver combine the
     // two. A stale id therefore cannot outlive a visibility change.
-    if (typeof workspaceId === 'string') workspaces.set(sessionId, workspaceId)
+    if (typeof result.workspaceId === 'string') workspaces.set(sessionId, result.workspaceId)
     else workspaces.delete(sessionId)
+    return result.visible
   } catch {
-    // `resolveVisible` is total; this contains a foreign registry.
+    // `resolveWorkspace` is total; this contains a foreign registry.
+    return false
   }
 }
 
@@ -197,33 +280,115 @@ function rememberRoute(
   routes.set(sessionId, route)
 }
 
+/** Replace the protocol section's already-resolved text with the fresh answer. */
+function patchProtocolSection(assembly: unknown, visible: boolean): unknown {
+  const value = assembly as { sections?: unknown } | undefined
+  if (value === undefined || value === null || !Array.isArray(value.sections)) return assembly
+  const sections = value.sections.map((section) => {
+    const entry = section as { name?: unknown } | null
+    return entry?.name === PROTOCOL_NAME
+      ? { ...(entry as Record<string, unknown>), text: visible ? PROTOCOL_TEXT : '' }
+      : section
+  })
+  return { ...(value as Record<string, unknown>), sections }
+}
+
 /**
  * Mount the host events the assembly owns.
  *
- * `agent/request` is the event the host actually emits immediately before
- * `llm/stream` (`dsh-agent-loop.buildRequest` follows `prepareRequest`), and it
- * carries the host `turn`/`step`: the clock is copied from there, never counted
- * here. The listener awaits the visibility warm so the first `post-execute`
- * after it sees the current judgement; it then captures the resolved route for
- * the selector.
+ * ## Why `system-prompt/assemble` owns the warm
  *
- * `session/disposed` is the host's session-end signal. `clearSession` drops the
- * queue, anchors, plans, receipt state and per-session runtime together; the
- * two caches this module owns are dropped next to it.
+ * The host's preStep is `tools.resolve` -> `systemPrompt.assemble` ->
+ * `agent/pre-step`; section text resolves inside `assemble`, and
+ * `agent/request` fires only later in `step()`. A warm driven from
+ * `agent/request` therefore misses request 1 (the gate can never act on step
+ * 1) and then flips the system prompt on request 2, invalidating the whole
+ * cached prefix (design D4). This listener runs inside the awaited assemble
+ * waterfall, after sections resolve, with `context.scope` being the agent: it
+ * warms the judgement and then rewrites our section's text from that fresh
+ * answer. Request 1 is correct and request 2 reproduces the same bytes.
+ *
+ * The tool-level `when` was the alternative early seam; it is worse here
+ * because it never runs when `tools.resolve` is unavailable or the boost tool
+ * is filtered out, and it cannot await `resolveByPath` without making a
+ * synchronous visibility predicate asynchronous. The assemble listener also
+ * costs nothing on tool-listing paths.
+ *
+ * `agent/pre-step` is the non-deprecated clock seam (`agent/request` is
+ * marked `@deprecated`); it fires once per proposed step with the host
+ * `turn`/`step`. `agent/request` is kept for the selector route, which only
+ * its resolved config carries, and as a clock/visibility fallback. A model
+ * request that reaches `llm/stream` without any observed `agent/request` is
+ * reported once with `ERR_HOST_NO_AGENT_REQUEST` instead of silently losing
+ * the route.
+ *
+ * `session/event` (`turn/end`), `session/flush` and `session/disposed` call
+ * `ReceiptStore.flush()` so the turn-end durability the design promises is
+ * real. `session/disposed` also drops every per-session map the assembly owns
+ * and tells the stores to evict their state.
  */
 function wireSessionEvents(
   ctx: PluginContext,
   deps: HookDeps,
   scope: ScopeStore,
-  registry: WorkspaceRegistry | undefined,
-  sessions: SessionRuntime,
+  registry: () => WorkspaceRegistry | undefined,
+  sessions: DisposalAwareSessionRuntime,
+  horizon: RuntimeStepHorizon,
   workspaces: Map<string, string>,
   routes: Map<string, SelectorRoute>,
 ): void {
+  /** Session ids seen at `agent/pre-step`; a `llm/stream` without a request is drift. */
+  const preStepSeen = new Set<string>()
+  /** Session ids observed on `agent/request`. */
+  const requestSeen = new Set<string>()
+  let warnedMissingRequest = false
+
+  ctx.on('system-prompt/assemble', async (assembly: unknown, context: unknown, next: () => unknown) => {
+    const resolved = await next()
+    try {
+      const carrier = (context ?? {}) as { agent?: unknown; scope?: unknown }
+      const agent = carrier.agent ?? carrier.scope
+      const sessionId = sessionIdOf(agent)
+      if (sessionId === undefined) return resolved
+      const visible = await warmVisibility(scope, registry, agent, sessionId, workspaces)
+      return patchProtocolSection(resolved, visible)
+    } catch {
+      return resolved
+    }
+  })
+
+  ctx.on('agent/pre-step', async (payload: unknown, next: () => unknown) => {
+    const request = (payload ?? {}) as RequestPayload
+    const sessionId = sessionIdOf(request.agent)
+    if (sessionId !== undefined) {
+      preStepSeen.add(sessionId)
+      try {
+        sessions.onModelRequest(
+          sessionId,
+          typeof request.turn === 'number' ? request.turn : Number(request.turn),
+          typeof request.step === 'number' ? request.step : undefined,
+        )
+      } catch {
+        // A clock that cannot be driven must not break the step.
+      }
+      try {
+        horizon.observe(
+          sessionId,
+          typeof request.turn === 'number' ? request.turn : Number(request.turn),
+          typeof request.step === 'number' ? request.step : Number(request.step),
+        )
+      } catch {
+        // History is an estimate; a bad observation is not a step failure.
+      }
+    }
+    return next()
+  })
+
   ctx.on('agent/request', async (payload: unknown, next: () => unknown) => {
     const request = (payload ?? {}) as RequestPayload
     const sessionId = sessionIdOf(request.agent)
     if (sessionId !== undefined) {
+      requestSeen.add(sessionId)
       try {
         sessions.onModelRequest(
           sessionId,
@@ -233,6 +398,15 @@ function wireSessionEvents(
       } catch {
         // A clock that cannot be driven must not break the model request.
       }
+      try {
+        horizon.observe(
+          sessionId,
+          typeof request.turn === 'number' ? request.turn : Number(request.turn),
+          typeof request.step === 'number' ? request.step : Number(request.step),
+        )
+      } catch {
+        // Same as the pre-step observation: history is an estimate.
+      }
       await warmVisibility(scope, registry, request.agent, sessionId, workspaces)
     }
     const config = await next()
@@ -240,7 +414,42 @@ function wireSessionEvents(
     return config
   })
 
-  ctx.on('session/disposed', (session: unknown) => {
+  // The deprecated event's disappearance would otherwise disable the selector
+  // route silently. A session that reached `llm/stream` after a pre-step but
+  // never saw `agent/request` is proof enough; the model request itself is
+  // passed through untouched.
+  ctx.on('llm/stream', (options: unknown, next: () => unknown) => {
+    try {
+      const sessionId = (options as { sessionId?: unknown } | undefined)?.sessionId
+      if (
+        !warnedMissingRequest &&
+        typeof sessionId === 'string' &&
+        preStepSeen.has(sessionId) &&
+        !requestSeen.has(sessionId)
+      ) {
+        warnedMissingRequest = true
+        ctx.logger?.warn?.(
+          'ERR_HOST_NO_AGENT_REQUEST: agent/request was not observed before llm/stream; the selector route cannot be captured (the event is deprecated and may have been removed)',
+        )
+      }
+    } catch {
+      // Detection must never break the model request.
+    }
+    return next()
+  })
+
+  ctx.on('session/event', (session: unknown, event: unknown) => {
+    const type = (event as { type?: unknown } | undefined)?.type
+    if (type === 'turn/end') {
+      // Fire-and-forget on the real host; `flush()` never rejects.
+      return deps.receipts.flush()
+    }
+    return undefined
+  })
+
+  ctx.on('session/flush', () => deps.receipts.flush())
+
+  ctx.on('session/disposed', async (session: unknown) => {
     const sessionId = sessionIdOf(session)
     if (sessionId === undefined) return
     try {
@@ -248,8 +457,21 @@ function wireSessionEvents(
     } catch {
       // Session end owns no tool result; a failed clear must not throw here.
     }
+    sessions.markDisposed(sessionId)
     workspaces.delete(sessionId)
     routes.delete(sessionId)
+    requestSeen.delete(sessionId)
+    preStepSeen.delete(sessionId)
+    horizon.clear(sessionId)
+    scope.forget(sessionId)
+    // Flush this session's buffered lines before evicting its state, then make
+    // every later hook for the id a no-op.
+    try {
+      await deps.receipts.flush()
+    } catch {
+      // Flush is total; a foreign store must not break session end.
+    }
+    deps.receipts.disposeSession(sessionId)
   })
 }
 
@@ -266,7 +488,11 @@ function wireSessionEvents(
  * Without step-level `when` a conditional registration would silently become
  * unconditional, so the whole family is skipped and the stable code is logged.
  */
-function registerBoostTool(ctx: PluginContext, deps: BoostDeps): void {
+function registerBoostTool(
+  ctx: PluginContext,
+  deps: BoostDeps,
+  registry: () => WorkspaceRegistry | undefined,
+): void {
   if (!supportsStepWhen(ctx.tools)) {
     ctx.logger?.warn?.('ERR_HOST_NO_STEP_WHEN')
     return
@@ -274,14 +500,59 @@ function registerBoostTool(ctx: PluginContext, deps: BoostDeps): void {
   // Annotating with the host's ToolDefinition makes a host-side tightening a
   // build error instead of a runtime registration failure.
   const definition: ToolDefinition = boostTool(deps)
+  const execute = definition.execute as (args: unknown, exec: unknown) => Promise<unknown>
+
+  /**
+   * Decorate `status` with the one host fact the control tool cannot probe.
+   *
+   * `BoostHostFacts` covers the meter and the spill backend because those are
+   * also read by the decision path; the workspace registry is owned here, and a
+   * missing one makes every session invisible. The stable code is appended to
+   * `degraded` so the failure mode is diagnosable from inside the product
+   * instead of showing up only as "nothing ever happens". A future move of the
+   * field into `BoostHostFacts` would live in the control tool; this wrapper
+   * keeps the fix inside the assembly without changing another module.
+   */
+  definition.execute = async (args: unknown, exec: unknown) => {
+    const result = await execute(args, exec)
+    try {
+      if ((args as { cmd?: unknown } | undefined)?.cmd !== 'status') return result
+      const envelope = result as { ok?: unknown; data?: unknown } | null | undefined
+      if (envelope?.ok !== true || envelope.data === null || typeof envelope.data !== 'object') {
+        return result
+      }
+      const data = envelope.data as Record<string, unknown>
+      const available = registry() !== undefined
+      data.hasWorkspaceRegistry = available
+      if (!available) {
+        const degraded = Array.isArray(data.degraded) ? [...(data.degraded as unknown[])] : []
+        if (!degraded.includes(ERR_HOST_NO_WORKSPACE_REGISTRY)) {
+          degraded.push(ERR_HOST_NO_WORKSPACE_REGISTRY)
+        }
+        data.degraded = degraded
+      }
+    } catch {
+      // Status is diagnostics; decoration must never turn it into a failure.
+    }
+    return result
+  }
   ctx.tools.register(definition, { when: () => true })
 }
 
 export function apply(ctx: PluginContext, config: unknown): void {
-  const cfg = resolveConfig(config)
+  const repairs: string[] = []
+  const cfg = resolveConfig(config, message => {
+    repairs.push(message)
+    ctx.logger?.warn?.(message)
+  })
+  // One line with the effective values (not only the keys this module happens
+  // to use): an operator can see every clamp and fallback instead of guessing.
   ctx.logger?.info?.(
-    `dsh-boost loaded (stepsPerTurn=${cfg.stepsPerTurn}, horizonSteps=${cfg.horizonSteps})`,
+    `dsh-boost loaded (stepsPerTurn=${cfg.stepsPerTurn}, horizonSteps=${cfg.horizonSteps}); effective config=${JSON.stringify(cfg)}`,
   )
+  if (repairs.length > 0) {
+    ctx.logger?.info?.(`dsh-boost: ${repairs.length} configuration value(s) repaired`)
+  }
 
   if (!canRegister(ctx)) {
     ctx.logger?.warn?.('dsh-boost: host hook services unavailable; registration skipped')
@@ -293,37 +564,41 @@ export function apply(ctx: PluginContext, config: unknown): void {
     // One root rule for both stores (design §10); `resolveBoostRoot` is the
     // only implementation, so `apply` and the hook stores cannot diverge.
     const root = resolveBoostRoot()
-    const scope = new ScopeStore(root)
+    const scope = new ScopeStore(root, { warn: (message: string) => ctx.logger?.warn?.(message) })
     const receipts = new ReceiptStore(root)
     const anchors = new AnchorStore()
     const queue = new PendingQueue()
     const plans = new Map<string, Plan>()
-    const sessions = new SessionRuntime(cfg.stepsPerTurn)
+    const sessions = new DisposalAwareSessionRuntime(cfg.stepsPerTurn)
+    const horizon = new RuntimeStepHorizon(cfg.horizonSteps, cfg.historyTurns)
     const retrievals = new RetrievalLedger()
     /** Session id → workspace id, populated by the visibility warm. */
     const workspaces = new Map<string, string>()
     /** Session id → the route the selector call inherits. */
     const routes = new Map<string, SelectorRoute>()
 
-    // Soft host services. The workspace registry is the synchronous `list()`
-    // seam `workspaceIdOf` reads; the spill store is the projection backend.
-    const registry = serviceOf<WorkspaceRegistry>(ctx, 'workspaceRegistry')
-    const spill = serviceOf<SpillBackend>(ctx, 'spillStore')
-    const hostEstimate = hostEstimatorOf(ctx)
-    // No meter means no meter: projection still clips, but its receipts carry
-    // `unknown` and substitution is refused (design §9). Never a chars/4
-    // look-alike that would be indistinguishable from a real measurement.
-    const estimateText = hostEstimate
-    const estimateKind = hostEstimate !== undefined ? 'host' : 'unknown'
+    // Soft host services. Cordis activates sibling providers concurrently, so
+    // these getters retry until the provider fiber is ACTIVE; an absence is
+    // never memoised. The workspace registry is the `resolveByPath`/`list()`
+    // seam; the spill store is the projection backend; the token meter prices
+    // projections and admission.
+    const registry = lazyService<WorkspaceRegistry>(ctx, 'workspaceRegistry')
+    const spill = lazyService<SpillBackend>(ctx, 'spillStore')
+    const meter = meterSeamOf(ctx)
     const projectionCounters = new ProjectionCounters()
 
-    // Host capabilities, measured once. `status` renders these as stable codes;
-    // they are facts about this host, never inferred from usage. The fixed-cost
-    // probe starts here (startup time) and is awaited only by `status` — it is
-    // deliberately not on any request path.
+    // Host capabilities `status` renders as stable codes. Getters keep them
+    // facts about the host *now*: a service that appears after `apply` must not
+    // leave a permanent `ERR_HOST_NO_*`. The fixed-cost probe starts here
+    // (startup time) and is awaited only by `status` — it is deliberately not
+    // on any request path.
     const hostFacts: BoostHostFacts = {
-      hasTokenMeter: hostEstimate !== undefined,
-      hasSpill: spill !== undefined,
+      get hasTokenMeter() {
+        return meter.kind() === 'host'
+      },
+      get hasSpill() {
+        return spill() !== undefined
+      },
       supportsStepWhen: supportsStepWhen(ctx.tools),
     }
     const fixedOverhead = measureBoostFixedOverhead()
@@ -352,10 +627,18 @@ export function apply(ctx: PluginContext, config: unknown): void {
       queue,
       plans,
       sessions,
-      spill,
+      // Getters, not snapshots: the hook reads them per decision, so a service
+      // that becomes active after `apply` is picked up on the next call.
+      get spill() {
+        return spill()
+      },
       retrievals,
-      estimateText,
-      estimateKind,
+      get estimateText() {
+        return meter.estimate()
+      },
+      get estimateKind() {
+        return meter.kind()
+      },
       projectionCounters,
       llm: ctx.llm,
       selectorRoute: (sessionId) => routes.get(sessionId),
@@ -366,7 +649,7 @@ export function apply(ctx: PluginContext, config: unknown): void {
     // The clock/visibility warm and the session-end cleanup. Wired separately
     // so a host that cannot accept these events still gets the tool below.
     try {
-      wireSessionEvents(ctx, deps, scope, registry, sessions, workspaces, routes)
+      wireSessionEvents(ctx, deps, scope, registry, sessions, horizon, workspaces, routes)
     } catch (error) {
       ctx.logger?.warn?.(`dsh-boost: session wiring failed: ${messageOf(error)}`)
     }
@@ -374,17 +657,28 @@ export function apply(ctx: PluginContext, config: unknown): void {
     // After the hooks: `registerHooks` mounts the prompt section first and
     // throws on a duplicate, so a second `apply` aborts above before it can
     // register the tool twice.
-    registerBoostTool(ctx, {
-      scope,
-      receipts,
-      host: hostFacts,
-      fixedOverhead: () => fixedOverhead,
-      estimateKind,
-      horizonSteps: cfg.horizonSteps,
-      locatorEvictions: () => retrievals.evictions(),
-      unknownFamilies: () => projectionCounters.unknownFamilies(),
-      unknownTools: () => projectionCounters.unknownToolCounts(),
-    })
+    registerBoostTool(
+      ctx,
+      {
+        scope,
+        receipts,
+        host: hostFacts,
+        fixedOverhead: () => fixedOverhead,
+        get estimateKind() {
+          return meter.kind()
+        },
+        // Design §5.3's runtime horizon: min(config horizon, mean of the last
+        // `historyTurns` completed turns) over live sessions. `runBoost` spreads
+        // the deps when it is called, so this getter is read at status time.
+        get horizonSteps() {
+          return horizon.remaining()
+        },
+        locatorEvictions: () => retrievals.evictions(),
+        unknownFamilies: () => projectionCounters.unknownFamilies(),
+        unknownTools: () => projectionCounters.unknownToolCounts(),
+      },
+      registry,
+    )
   } catch (error) {
     // A second apply fails on the duplicate prompt section first (registerHooks
     // mounts it first), which means the plugin is already wired — not that

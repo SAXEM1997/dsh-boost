@@ -4,7 +4,6 @@ import {
   AnchorStore,
   PRUNE_MARKER,
   alreadySpilled,
-  invalidate,
   looksPruned,
 } from '../src/gate/invalidate.ts'
 import { registerHooks } from '../src/hooks/post-execute.ts'
@@ -25,30 +24,6 @@ test('已含 spill 页脚的回执不再二次投影', () => {
   assert.equal(alreadySpilled('x', () => false), false)
 })
 
-test('marker 出现即判 pruned-reset（锚点仍相等，pruner 保留锚点）', () => {
-  const t = `head${PRUNE_MARKER}tail`
-  const pending = { stepId: 'A', anchors: { A: t } } as any
-  assert.equal(invalidate(pending, t), 'pruned-reset')
-})
-
-test('锚点不符且无 marker 判 compaction-reset', () => {
-  const pending = { stepId: 'A', anchors: { A: 'original text' } } as any
-  assert.equal(invalidate(pending, 'completely different'), 'compaction-reset')
-})
-
-test('锚点相等且无 marker 不触发', () => {
-  const pending = { stepId: 'A', anchors: { A: 'same' } } as any
-  assert.equal(invalidate(pending, 'same'), undefined)
-})
-
-test('无 pending 不触发', () => {
-  assert.equal(invalidate(undefined, 'x'), undefined)
-})
-
-// ---------------------------------------------------------------------------
-// 规则 2：marker 只按完整子串识别，位置无关，近失配必须为 false
-// ---------------------------------------------------------------------------
-
 test('marker 在文本最前、最后或整段时也识别', () => {
   assert.equal(looksPruned(`${PRUNE_MARKER}tail`), true)
   assert.equal(looksPruned(`head${PRUNE_MARKER}`), true)
@@ -62,70 +37,6 @@ test('近似 marker（改一个字符）不识别，方向安全', () => {
 })
 
 // ---------------------------------------------------------------------------
-// 规则 4：marker 优先于锚点比对；anchor 缺失 / 相等都不触发
-// ---------------------------------------------------------------------------
-
-test('marker 与锚点同时不符：marker 优先判 pruned-reset', () => {
-  const pending = { stepId: 'A', anchors: { A: 'original text' } } as any
-  const t = `head${PRUNE_MARKER}tail`
-  assert.equal(invalidate(pending, t), 'pruned-reset')
-})
-
-test('回执恰好就是 marker：判 pruned-reset', () => {
-  const pending = { stepId: 'A', anchors: { A: PRUNE_MARKER } } as any
-  assert.equal(invalidate(pending, PRUNE_MARKER), 'pruned-reset')
-})
-
-test('anchor 缺失且无 marker 不触发', () => {
-  const pending = { stepId: 'A', anchors: {} } as any
-  assert.equal(invalidate(pending, 'anything'), undefined)
-})
-
-test('空串 anchor 与空串回执相等：不触发（不是"缺失"）', () => {
-  const pending = { stepId: 'A', anchors: { A: '' } } as any
-  assert.equal(invalidate(pending, ''), undefined)
-})
-
-test('已含 spill 页脚但无 marker：alreadySpilled 拦截且 invalidate 沉默', () => {
-  const footer = 'head\n\n(Omitted 12 bytes. Full formatted result stored at: /spill/x.txt. Use read.)'
-  assert.equal(alreadySpilled(footer, (t) => t === footer), true)
-  const pending = { stepId: 'A', anchors: { A: footer } } as any
-  assert.equal(invalidate(pending, footer), undefined)
-})
-
-test('marker 出现多次仍只判一次 pruned-reset', () => {
-  const twice = `${PRUNE_MARKER}body${PRUNE_MARKER}`
-  assert.equal(looksPruned(twice), true)
-  const pending = { stepId: 'A', anchors: { A: 'original' } } as any
-  assert.equal(invalidate(pending, twice), 'pruned-reset')
-})
-
-test('malformed anchor 记录是"无锚点"：缺 anchors / null / 非对象', () => {
-  assert.equal(invalidate({ stepId: 'A' } as any, 'anything'), undefined)
-  assert.equal(invalidate({ stepId: 'A', anchors: null } as any, 'anything'), undefined)
-  assert.equal(invalidate({ stepId: 'A', anchors: 'nope' } as any, 'anything'), undefined)
-  assert.equal(invalidate({ stepId: 'A', anchors: [] } as any, 'anything'), undefined)
-  assert.equal(invalidate({ stepId: 42, anchors: { A: 'x' } } as any, 'x'), undefined)
-  assert.equal(invalidate({ stepId: 'A', anchors: { A: 42 } } as any, '42'), undefined)
-})
-
-test('marker 优先于 malformed anchor 记录', () => {
-  const t = `head${PRUNE_MARKER}tail`
-  assert.equal(invalidate({ stepId: 'A' } as any, t), 'pruned-reset')
-  assert.equal(invalidate({ stepId: 'A', anchors: null } as any, t), 'pruned-reset')
-})
-
-test('step id 走原型链不算锚点（__proto__ / constructor / toString）', () => {
-  const plain = {} as any
-  for (const stepId of ['__proto__', 'constructor', 'toString', 'hasOwnProperty']) {
-    assert.equal(invalidate({ stepId, anchors: plain } as any, 'anything'), undefined)
-  }
-  // 自有的 __proto__ 数据属性仍然可以当锚点（computed key 不触发原型 setter）。
-  const own = { ['__proto__']: 'anything' } as any
-  assert.equal(invalidate({ stepId: '__proto__', anchors: own } as any, 'anything'), undefined) // 相等
-  assert.equal(invalidate({ stepId: '__proto__', anchors: own } as any, 'other'), 'compaction-reset')
-})
-
 // ---------------------------------------------------------------------------
 // 规则 6：AnchorStore 是纯会话键映射
 // ---------------------------------------------------------------------------
@@ -503,4 +414,14 @@ test('非对象 anchors 且无 marker：hook 不写收据、不抛', async () =>
 
   assert.equal(res.kind, 'accept')
   assert.equal(receipts.length, 0)
+})
+
+// ---------------------------------------------------------------------------
+// I9: `invalidate` had no production caller; the model-request path owns the
+// identity check with `looksPruned`/`carriesAnchor` instead.
+// ---------------------------------------------------------------------------
+
+test('I9: the uncalled invalidate() arm is gone from the production module', async () => {
+  const module = await import('../src/gate/invalidate.ts')
+  assert.equal('invalidate' in module, false)
 })

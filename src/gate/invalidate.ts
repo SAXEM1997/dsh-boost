@@ -27,9 +27,9 @@
  * 39-byte literal (for example, a `read` of a session log). That is a safe
  * conservative outcome, not pruner detection. The caller that can observe a
  * pruned or compacted receipt is the **model-request path** (`llm/stream`,
- * `options.messages`); Task 23c owns that check. `invalidate` is shaped for
- * that caller, and nothing here claims the post-execute call site detects the
- * host pruner or compaction.
+ * `options.messages`); the stream hook owns that identity check with its own
+ * anchor probes plus `looksPruned` below. Nothing here claims the
+ * post-execute call site detects the host pruner or compaction.
  *
  * The second guard is independent and simpler: a receipt that already carries
  * the host spill footer has been retained once already, so projecting it again
@@ -129,54 +129,3 @@ export function alreadySpilled(text: string, hasNotice: (t: string) => boolean):
   return hasNotice(text)
 }
 
-/**
- * Why a caller-supplied receipt text can no longer be trusted, if it cannot.
- *
- * `receiptText` must be the **current body of the anchored receipt**. This
- * function cannot establish that identity — it only compares strings. The
- * model-request path (`llm/stream` with `options.messages`) is the caller that
- * can supply it. `post-execute` deliberately does **not** call this function:
- * the text it holds is the current call's result, not the anchored receipt's
- * body, so an anchor comparison there would fire a false reset after every
- * substitution and clear the anchors a real detection needs. That path calls
- * `looksPruned` only.
- *
- * The function is total on malformed input: a null/undefined pending, a
- * missing or non-object `anchors`, a non-string `stepId`, or a non-string
- * anchor all mean "no anchor" and return `undefined`. The lookup is an
- * own-property read, so a step id such as `__proto__`, `constructor` or
- * `toString` cannot walk the prototype chain into a non-string value.
- *
- * Fixed order, because the two external sources are not mutually exclusive:
- *
- * 1. no pending anchors -> `undefined` (nothing to invalidate);
- * 2. the text carries the prune marker -> `'pruned-reset'` **regardless of
- *    whether the anchors still match**, since the pruner preserves anchors and
- *    that is the common path;
- * 3. otherwise the anchor for `pending.stepId` is looked up by own property:
- *    present, a string, and not equal to the receipt text -> `'compaction-reset'`;
- * 4. anchor missing, malformed, or equal -> `undefined`.
- *
- * Only the text the caller supplies is compared. The history's current body is
- * never read (design §5.2-7): after a prune the log holds head + marker + tail,
- * so re-reading it would either confirm the stale anchor or make the check
- * depend on a rewrite this module exists to detect.
- */
-export function invalidate(
-  pending: ReceiptAnchors | undefined,
-  receiptText: string,
-): 'pruned-reset' | 'compaction-reset' | undefined {
-  if (pending == null) return undefined
-  if (looksPruned(receiptText)) return 'pruned-reset'
-
-  const anchors: unknown = pending.anchors
-  if (typeof anchors !== 'object' || anchors === null) return undefined
-
-  const stepId: unknown = pending.stepId
-  if (typeof stepId !== 'string' || !Object.hasOwn(anchors, stepId)) return undefined
-
-  const anchor = (anchors as Record<string, unknown>)[stepId]
-  if (typeof anchor !== 'string') return undefined
-  if (anchor !== receiptText) return 'compaction-reset'
-  return undefined
-}

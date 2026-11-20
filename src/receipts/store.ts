@@ -17,10 +17,15 @@
  *
  * A receipt is serialised and appended in one `appendFile` call, rotated before
  * the write when the current shard reached `maxBytes`/`maxLines`, and fsynced
- * only every `fsyncEveryLines` lines (or on `flush()` — the caller flushes at
- * turn end). A write failure never rejects: the line is buffered in memory in
+ * only every `fsyncEveryLines` lines (or on `flush()` — the assembly flushes at
+ * turn end, at the host's session/flush checkpoint and before session-end
+ * eviction). A write failure never rejects: the line is buffered in memory in
  * order, `failures()` counts the *consecutive* failures, and a later successful
- * append replays the buffer and resets the count.
+ * append replays the buffer and resets the count. The buffer is bounded, and
+ * once the fail-closed `stopped()` threshold is reached it is dropped instead
+ * of growing for the duration of the outage. `disposeSession` evicts a dead
+ * session's shard state and records the id in a bounded set, so a hook that
+ * lands after `session/disposed` records nothing.
  *
  * ## Read path
  *
@@ -113,6 +118,17 @@ const DEFAULT_MAX_BYTES = 8 * 1024 * 1024
 const DEFAULT_MAX_LINES = 20_000
 /** Fail-closed threshold: after this many *consecutive* write failures, stop substituting. */
 const STOPPED_AFTER_FAILURES = 3
+/** Hard cap on the in-memory replay buffer (see `recordFailure`). */
+const MAX_PENDING_LINES = 100
+/**
+ * How many disposed session ids the store remembers.
+ *
+ * A late `post-execute` can land seconds after `session/disposed` (a selector
+ * call may take 20 s) and must not write a receipt into a closed session. The
+ * set is FIFO-bounded so a long-lived process cannot grow it without limit; a
+ * session id is unique, so evicting the oldest is safe.
+ */
+const MAX_DISPOSED_SESSIONS = 256
 const NEWLINE = 0x0a
 
 /**
@@ -335,6 +351,8 @@ export class ReceiptStore {
   private readonly pending: PendingLine[] = []
   private readonly states = new Map<string, ShardState>()
   private readonly dirty = new Set<string>()
+  private readonly disposed = new Set<string>()
+  private readonly disposedOrder: string[] = []
   private dirReady = false
   /** Writes run one at a time so rotation and buffer replay cannot interleave. */
   private chain: Promise<void> = Promise.resolve()
@@ -402,6 +420,29 @@ export class ReceiptStore {
     }
   }
 
+  /**
+   * Forget one session's shard state and silence later receipts for it.
+   *
+   * Called from the plugin's `session/disposed` handler after `flush()`. It
+   * evicts the cached counters, drops any buffered lines for that session and
+   * remembers the id (bounded FIFO) so a hook that lands after disposal records
+   * nothing instead of recreating state nothing will ever clear.
+   */
+  disposeSession(sessionId: string): void {
+    this.states.delete(sessionId)
+    this.dirty.delete(sessionId)
+    for (let i = this.pending.length - 1; i >= 0; i -= 1) {
+      if (this.pending[i]?.sessionId === sessionId) this.pending.splice(i, 1)
+    }
+    if (this.disposed.has(sessionId)) return
+    this.disposed.add(sessionId)
+    this.disposedOrder.push(sessionId)
+    while (this.disposedOrder.length > MAX_DISPOSED_SESSIONS) {
+      const oldest = this.disposedOrder.shift()
+      if (oldest !== undefined) this.disposed.delete(oldest)
+    }
+  }
+
   /** Consecutive write failures; a successful append resets it to zero. */
   failures(): number {
     return this.failureCount
@@ -413,11 +454,15 @@ export class ReceiptStore {
   }
 
   private async appendNow(receipt: ReceiptInput): Promise<void> {
+    // A late hook on a disposed session is expected to run; it must record
+    // nothing, not buffer a line nothing will ever write.
+    if (this.disposed.has(receipt.sessionId)) return
+
     let entry: PendingLine
     try {
       entry = { sessionId: receipt.sessionId, line: serialiseReceipt(receipt) }
     } catch {
-      this.failureCount += 1
+      this.recordFailure()
       return
     }
 
@@ -430,8 +475,8 @@ export class ReceiptStore {
       // Re-checking the directory lets the store recover if it disappeared.
       this.states.delete(entry.sessionId)
       this.dirReady = false
-      this.pending.push(entry)
-      this.failureCount += 1
+      if (!this.stopped() && this.pending.length < MAX_PENDING_LINES) this.pending.push(entry)
+      this.recordFailure()
       return
     }
 
@@ -451,8 +496,21 @@ export class ReceiptStore {
       await this.drainPending()
       await this.syncDirty()
     } catch {
-      this.failureCount += 1
+      this.recordFailure()
     }
+  }
+
+  /**
+   * Count one write failure and enforce the buffer bound.
+   *
+   * Once the store is `stopped()` (three consecutive failures) it is
+   * fail-closed: appends are still attempted so a recovered disk can reset the
+   * count, but the replay buffer is dropped instead of growing for as long as
+   * the outage lasts. Before that point `MAX_PENDING_LINES` is the hard cap.
+   */
+  private recordFailure(): void {
+    this.failureCount += 1
+    if (this.stopped()) this.pending.length = 0
   }
 
   /** Replay buffered lines in order; the head stays queued until its write succeeds. */

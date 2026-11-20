@@ -3,7 +3,7 @@ import assert from 'node:assert/strict'
 import { mkdtemp } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { workspaceIdOf, resolveVisible, supportsStepWhen } from '../src/scope/resolve.ts'
+import { workspaceIdOf, resolveVisible, resolveWorkspace, supportsStepWhen } from '../src/scope/resolve.ts'
 import { ScopeStore } from '../src/scope/store.ts'
 import { fakeHost } from './fakes/host.ts'
 
@@ -335,4 +335,70 @@ test('fakeHost().spillStore.saveText 记录 owner/source 并返回真实字节�
   assert.deepEqual(host.spillStore.saved, [input])
   assert.equal(ref.bytes, Buffer.byteLength('héllo', 'utf8'))
   assert.match(ref.locator, /\/spill\/read\.txt$/)
+})
+
+// ---------------------------------------------------------------------------
+// I5: the cwd is only guaranteed absolute; the workspace path is canonical.
+// ---------------------------------------------------------------------------
+
+test('I5: resolveByPath canonicalises a symlinked or trailing-slash cwd', async () => {
+  const dir = await scopeDir()
+  const s = new ScopeStore(dir)
+  await s.write(d => ({ ...d, mode: 'global' }), 0)
+  const calls: string[] = []
+  const canonical = {
+    list: () => [{ id: 'ws-uuid-1', path: '/real/w/a' }],
+    resolveByPath: async (path: string) => {
+      calls.push(path)
+      return path.replace(/\/+$/, '') === '/w/link' ? { id: 'ws-uuid-1' } : undefined
+    },
+  }
+  const agent = { session: { header: { id: 's1', cwd: '/w/link/' } } }
+
+  assert.equal(await resolveVisible(s, agent, canonical), true)
+  assert.deepEqual(calls, ['/w/link/'])
+  assert.equal(s.judgement('s1'), true)
+})
+
+test('I5: resolveWorkspace reports the resolved id next to visibility', async () => {
+  const dir = await scopeDir()
+  const s = new ScopeStore(dir)
+  await s.write(d => ({ ...d, mode: 'selected', workspaceIds: ['ws-uuid-1'] }), 0)
+  const canonical = {
+    list: () => [{ id: 'ws-uuid-1', path: '/real/w/a' }],
+    resolveByPath: async () => ({ id: 'ws-uuid-1' }),
+  }
+  const agent = { session: { header: { id: 's1', cwd: '/w/link' } } }
+
+  assert.deepEqual(await resolveWorkspace(s, agent, canonical), {
+    visible: true,
+    workspaceId: 'ws-uuid-1',
+  })
+})
+
+test('I5: a throwing resolveByPath fails closed instead of crashing or falling back', async () => {
+  const dir = await scopeDir()
+  const s = new ScopeStore(dir)
+  await s.write(d => ({ ...d, mode: 'global' }), 0)
+  const broken = {
+    list: () => [{ id: 'ws-uuid-1', path: '/w/a' }],
+    resolveByPath: async () => {
+      throw new Error('canonicalise failed')
+    },
+  }
+  const agent = { session: { header: { id: 's1', cwd: '/w/a' } } }
+
+  assert.equal(await resolveVisible(s, agent, broken), false)
+  assert.equal(s.judgement('s1', true), false)
+})
+
+test('I5: a registry without resolveByPath keeps the exact-match fallback', async () => {
+  const dir = await scopeDir()
+  const s = new ScopeStore(dir)
+  await s.write(d => ({ ...d, mode: 'global' }), 0)
+  const exactOnly = { list: () => [{ id: 'ws-uuid-1', path: '/w/a' }] }
+  assert.equal(
+    await resolveVisible(s, { session: { header: { id: 's1', cwd: '/w/a' } } }, exactOnly),
+    true,
+  )
 })

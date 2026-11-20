@@ -4,9 +4,12 @@
  *
  * `scope.json` lists workspace **ids**, while a session header carries a
  * **cwd path**, so visibility is a registry lookup, never a path comparison.
- * `workspaceIdOf` is synchronous because the `systemPrompt` assembly path is
- * synchronous; the host's asynchronous `resolveByPath` is deliberately not
- * used here (it exists for a later pre-warm path only).
+ * The production resolver (`resolveWorkspace` / `workspaceIdFor`) is
+ * asynchronous and prefers the registry's canonical `resolveByPath`, because
+ * `Workspace.path` is a realpath while `Session.header.cwd` is only absolute.
+ * `workspaceIdOf` remains the synchronous exact-match fallback for a registry
+ * that offers only `list()`, and the section provider stays synchronous by
+ * reading the cached judgement.
  *
  * Everything is fail-closed. No agent, no session, no cwd, no registry, no
  * matching entry, a throwing `list()`, or a malformed list all mean "no
@@ -62,11 +65,15 @@ function agentKeyOf(agent: unknown): string | undefined {
  * Resolve the host workspace UUID for an agent's cwd.
  *
  * The cwd is matched against `registry.list()` by exact `path` equality, so
- * `/w/a` does not match a workspace at `/w/ab` (or at `/w/a/`). Any missing or
- * malformed link in the chain — no agent, no session, a non-string cwd, no
- * registry, a `list()` that is not an array, throws, or contains non-object
- * entries — yields `undefined`, which `isVisible` treats as invisible. This
- * function never throws, even when called outside `resolveVisible`.
+ * `/w/a` does not match a workspace at `/w/ab` (or at `/w/a/`). This is the
+ * **synchronous fallback** for a registry without `resolveByPath`; the async
+ * {@link workspaceIdFor} is the production path because `Workspace.path` is a
+ * canonical realpath while `Session.header.cwd` is only guaranteed absolute.
+ * Any missing or malformed link in the chain — no agent, no session, a
+ * non-string cwd, no registry, a `list()` that is not an array, throws, or
+ * contains non-object entries — yields `undefined`, which `isVisible` treats as
+ * invisible. This function never throws, even when called outside
+ * `resolveVisible`.
  */
 export function workspaceIdOf(
   agent: AgentWithCwd | undefined,
@@ -80,6 +87,70 @@ export function workspaceIdOf(
     return workspaces.find(workspace => workspace?.path === cwd)?.id
   } catch {
     return undefined
+  }
+}
+
+/**
+ * Resolve the workspace UUID, preferring the host's canonical lookup.
+ *
+ * `Workspace.path` is the canonical realpath (`dsh-workspace/src/types.ts`),
+ * while `Session.header.cwd` is only guaranteed absolute
+ * (`dsh-session/src/index.ts`), so a symlinked cwd or one with a trailing
+ * slash never matches byte-for-byte. `resolveByPath` is the registry's
+ * canonical resolver and is used whenever it exists; its `undefined` answer is
+ * authoritative (the workspace is not registered), while a registry without it
+ * falls back to the synchronous exact match. A throwing resolver is a
+ * resolution failure and fails closed (`undefined` -> invisible), never a
+ * crash and never a silent exact-match second guess.
+ *
+ * Never throws.
+ */
+export async function workspaceIdFor(
+  agent: AgentWithCwd | undefined,
+  registry: WorkspaceRegistry | undefined,
+): Promise<string | undefined> {
+  const cwd = agent?.session?.header?.cwd
+  if (typeof cwd !== 'string') return undefined
+  const resolveByPath = registry?.resolveByPath
+  if (typeof resolveByPath === 'function') {
+    try {
+      const workspace = await resolveByPath.call(registry, cwd)
+      return typeof workspace?.id === 'string' ? workspace.id : undefined
+    } catch {
+      return undefined
+    }
+  }
+  return workspaceIdOf(agent, registry)
+}
+
+/**
+ * Visibility plus the workspace id the judgement was made against.
+ *
+ * `resolveVisible` is the boolean projection of this result. `apply` also needs
+ * the id: the stream hook's `resolveSession` map must carry the same canonical
+ * workspace id the judgement used, or a symlinked cwd would be judged visible
+ * and then refused by the substitution path.
+ */
+export async function resolveWorkspace(
+  store: ScopeStore,
+  agent: unknown,
+  registry: WorkspaceRegistry | undefined,
+): Promise<{ visible: boolean; workspaceId?: string }> {
+  try {
+    const key = agentKeyOf(agent)
+    let workspaceId: string | undefined
+    let visible = false
+    try {
+      workspaceId = await workspaceIdFor(agent as AgentWithCwd | undefined, registry)
+      const { doc } = await store.read()
+      visible = isVisible(doc, workspaceId)
+    } catch {
+      visible = false
+    }
+    if (key !== undefined) store.remember(key, visible)
+    return { visible, ...(workspaceId === undefined ? {} : { workspaceId }) }
+  } catch {
+    return { visible: false }
   }
 }
 
@@ -103,21 +174,7 @@ export async function resolveVisible(
   agent: unknown,
   registry: WorkspaceRegistry | undefined,
 ): Promise<boolean> {
-  try {
-    const key = agentKeyOf(agent)
-    let visible = false
-    try {
-      const { doc } = await store.read()
-      const workspaceId = workspaceIdOf(agent as AgentWithCwd | undefined, registry)
-      visible = isVisible(doc, workspaceId)
-    } catch {
-      visible = false
-    }
-    if (key !== undefined) store.remember(key, visible)
-    return visible
-  } catch {
-    return false
-  }
+  return (await resolveWorkspace(store, agent, registry)).visible
 }
 
 /**
@@ -129,3 +186,13 @@ export async function resolveVisible(
 export function supportsStepWhen(tools: { resolve?: unknown } | undefined | null): boolean {
   return typeof tools?.resolve === 'function'
 }
+
+/**
+ * Stable code `boost status` reports when no workspace registry is reachable.
+ *
+ * Without the registry no cwd can map to a workspace id, so every session is
+ * invisible and the plugin is silently inert. The assembly decorates `status`
+ * with this code because the status formatter lives in the control tool, not in
+ * the host-fact probe.
+ */
+export const ERR_HOST_NO_WORKSPACE_REGISTRY = 'ERR_HOST_NO_WORKSPACE_REGISTRY'

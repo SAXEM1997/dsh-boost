@@ -444,3 +444,57 @@ test('scope.json 不可读（是目录）时 read 降级、write 抛 ERR_SCOPE_R
   )
   assert.equal(existsSync(join(dir, 'scope.lock')), false)
 })
+
+// ---------------------------------------------------------------------------
+// I7: the per-agent judgement cache must be evictable on session disposal.
+// ---------------------------------------------------------------------------
+
+test('I7: forget evicts one session judgement and leaves the others', () => {
+  const s = new ScopeStore('/tmp/never-used-scope-store')
+  s.remember('s1', true)
+  s.remember('s2', true)
+  s.forget('s1')
+  assert.equal(s.judgement('s1', false), false)
+  assert.equal(s.judgement('s2'), true)
+  assert.equal(s.judgement('never-seen', true), true)
+})
+
+// ---------------------------------------------------------------------------
+// I8: a stale lock whose pid was reused by a live process is reclaimable.
+// ---------------------------------------------------------------------------
+
+test('I8: startedAt triggers a bounded takeover even when the recorded pid is alive', async () => {
+  const dir = await tempDir()
+  const lock = join(dir, 'scope.lock')
+  // Fresh mtime on purpose: the old code only looked at mtime + liveness.
+  await writeFile(lock, JSON.stringify({ pid: process.pid, startedAt: Date.now() - 121_000 }))
+  const warnings: string[] = []
+  const s = new ScopeStore(dir, {
+    lockTakeoverMs: 120_000,
+    warn: (message: string) => warnings.push(message),
+  })
+
+  const written = await s.write(d => ({ ...d, mode: 'global' }), 0)
+  assert.equal(written.revision, 1)
+  assert.equal(existsSync(lock), false)
+  assert.equal(warnings.length, 1)
+  assert.match(warnings[0], /ERR_SCOPE_LOCK_TAKEOVER/)
+})
+
+test('I8: a live lock inside the takeover window is never evicted', async () => {
+  const dir = await tempDir()
+  const lock = join(dir, 'scope.lock')
+  await writeFile(lock, JSON.stringify({ pid: process.pid, startedAt: Date.now() }))
+  const s = new ScopeStore(dir, { lockTakeoverMs: 120_000, warn: () => {} })
+  await assert.rejects(() => s.write(d => d, 0), /ERR_SCOPE_LOCKED/)
+  assert.equal(existsSync(lock), true)
+})
+
+test('I8: an old lock with a dead pid is still reclaimed before the takeover window', async () => {
+  const dir = await tempDir()
+  const lock = join(dir, 'scope.lock')
+  await writeFile(lock, JSON.stringify({ pid: 999999, startedAt: Date.now() - 61_000 }))
+  await utimes(lock, STALE_LOCK_AT, STALE_LOCK_AT)
+  const s = new ScopeStore(dir, { lockTakeoverMs: 120_000 })
+  assert.equal((await s.write(d => d, 0)).revision, 1)
+})

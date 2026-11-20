@@ -4,8 +4,11 @@
  *
  * Both are pure arithmetic. This module performs no I/O, reads no config and
  * keeps no time window; callers pass the resolved `BoostConfig` values in
- * (design §5.3). The only mutable state is `StepBudget`, whose lifetime is the
- * plugin's — hence `reset()` at every turn start is mandatory.
+ * (design §5.3). The mutable state is `StepBudget` (per session/turn, hence
+ * `reset()` at every turn start) and `RuntimeStepHorizon` (per-session turn
+ * history, cleared on session disposal). The assembly feeds the latter from
+ * the host's `agent/pre-step` and reads it at status time, which is what makes
+ * `historyTurns` a production input rather than an unused config key.
  *
  * @module dsh-boost/admission/ledger
  */
@@ -46,6 +49,88 @@ export function remainingSteps(input: {
   const window = stepsSoFar.slice(-turns)
   const mean = window.reduce((sum, n) => sum + n, 0) / window.length
   return Number.isFinite(mean) ? Math.min(horizon, Math.round(mean)) : horizon
+}
+
+/**
+ * Per-session history of completed-turn step counts.
+ *
+ * Design §5.3 asks runtime admission to bound the remaining steps by
+ * `min(horizonSteps, mean of the last historyTurns turns)` instead of trusting
+ * the fixed horizon, so the plugin never overstates a projection's replay
+ * saving. The host reports `(turn, step)` on every model request; this class
+ * folds a turn's highest host step into history when the next turn starts. A
+ * retried step cannot inflate the count (the maximum is kept), a backwards
+ * turn is ignored, and malformed observations create no entry.
+ *
+ * The state is per session and cleared on `session/disposed` by the assembly;
+ * `remaining()` is the conservative aggregate status reports: the minimum over
+ * every live session, or the configured horizon when no session has enough
+ * completed turns yet.
+ */
+export class RuntimeStepHorizon {
+  private readonly horizonSteps: number
+  private readonly historyTurns: number
+  private readonly bySession = new Map<
+    string,
+    { turn: number; maxStep: number; completed: number[] }
+  >()
+
+  constructor(horizonSteps: number, historyTurns: number) {
+    this.horizonSteps = Number.isFinite(horizonSteps) && horizonSteps >= 0 ? Math.floor(horizonSteps) : 0
+    this.historyTurns = Number.isFinite(historyTurns) && historyTurns >= 1 ? Math.floor(historyTurns) : 1
+  }
+
+  /** Record one proposed model request for `sessionId` at host `(turn, step)`. */
+  observe(sessionId: string, turn: number, step: number): void {
+    if (typeof sessionId !== 'string' || sessionId.length === 0) return
+    if (!Number.isFinite(turn) || !Number.isFinite(step)) return
+    const hostTurn = Math.floor(turn)
+    const hostStep = Math.floor(step)
+    if (hostTurn < 1 || hostStep < 1) return
+
+    const existing = this.bySession.get(sessionId)
+    if (existing === undefined) {
+      this.bySession.set(sessionId, { turn: hostTurn, maxStep: hostStep, completed: [] })
+      return
+    }
+    if (hostTurn < existing.turn) return
+    if (hostTurn === existing.turn) {
+      if (hostStep > existing.maxStep) existing.maxStep = hostStep
+      return
+    }
+    // A new turn proves the previous one is complete.
+    existing.completed.push(existing.maxStep)
+    if (existing.completed.length > this.historyTurns) existing.completed.shift()
+    existing.turn = hostTurn
+    existing.maxStep = hostStep
+  }
+
+  /** This session's conservative remaining-step estimate. */
+  remainingFor(sessionId: string): number {
+    const entry = this.bySession.get(sessionId)
+    return remainingSteps({
+      stepsSoFar: entry?.completed ?? [],
+      horizonSteps: this.horizonSteps,
+      historyTurns: this.historyTurns,
+    })
+  }
+
+  /** The conservative minimum across live sessions, or the horizon when none has history. */
+  remaining(): number {
+    let value = this.horizonSteps
+    for (const sessionId of this.bySession.keys()) value = Math.min(value, this.remainingFor(sessionId))
+    return value
+  }
+
+  /** Drop one session's history on disposal. */
+  clear(sessionId: string): void {
+    this.bySession.delete(sessionId)
+  }
+
+  /** Number of sessions with retained history (diagnostics/tests). */
+  size(): number {
+    return this.bySession.size
+  }
 }
 
 /**

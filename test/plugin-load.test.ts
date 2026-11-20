@@ -44,7 +44,7 @@ test('apply 用假 ctx 调用不抛错，并记录解析后的步数预算（T1 
   )
 })
 
-test('apply 从 $DSH_HOME 装配四个挂载点与两条会话事件（R4）', () => {
+test('apply 从 $DSH_HOME 装配挂载点与会话事件（R4 + G3）', () => {
   const saved = process.env.DSH_HOME
   process.env.DSH_HOME = join(tmpdir(), 'dsh-boost-apply')
   try {
@@ -56,9 +56,13 @@ test('apply 从 $DSH_HOME 装配四个挂载点与两条会话事件（R4）', (
 
     assert.doesNotThrow(() => plugin.apply(host as unknown as PluginContext, {}))
     assert.deepEqual(host.hooked().sort(), [
+      'agent/pre-step',
       'agent/request',
       'llm/stream',
       'session/disposed',
+      'session/event',
+      'session/flush',
+      'system-prompt/assemble',
       'systemPrompt',
       'tools/execute',
       'tools/post-execute',
@@ -74,7 +78,9 @@ test('apply 重复调用不重复挂载（重复 section 视为已装配）', ()
   plugin.apply(host as unknown as PluginContext, {})
   plugin.apply(host as unknown as PluginContext, {})
   assert.equal(host.hookCount('tools/post-execute'), 1)
-  assert.equal(host.hookCount('llm/stream'), 1)
+  // Two llm/stream listeners: the frozen stream hook plus the deprecated-event
+  // drift detector, which only watches and passes through.
+  assert.equal(host.hookCount('llm/stream'), 2)
   assert.equal(host.hookCount('tools/execute'), 1)
   assert.equal(host.section('dsh-boost')?.name, 'dsh-boost')
   assert.equal(host.tools.definitions.length, 1)
