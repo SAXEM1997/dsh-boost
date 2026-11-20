@@ -1,9 +1,13 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { truncate, shouldTruncate, renderHeadLine } from '../src/projection/truncate.ts'
+import { projectApply } from '../src/projection/apply.ts'
+import { DEFAULT_CONFIG } from '../src/config.ts'
 import type { ProjectionParams } from '../src/types.ts'
 
 const READ = { triggerChars: 3000, headChars: 2000, tailChars: 500 }
+const BASH = { triggerChars: 4000, headChars: 2000, tailChars: 500 }
+const SSH = { triggerChars: 2000, headChars: 1200, tailChars: 300 }
 
 test('低于触发阈值不裁', () => {
   assert.equal(shouldTruncate('x'.repeat(2999), READ), false)
@@ -45,11 +49,40 @@ test('页脚头行逐字格式', () => {
   assert.equal(renderHeadLine(t), '[output 18,432 chars; showing first 2,000 and last 500]')
 })
 
-test('不变量：触发阈值 ≥ 窗口 + 页脚 + 1', () => {
-  const footerBytes = 110
-  for (const p of [READ, { triggerChars: 700, headChars: 400, tailChars: 100 }]) {
-    assert.ok(p.triggerChars >= p.headChars + p.tailChars + footerBytes + 1)
-  }
+test('不变量与死区：触发阈值 ≥ 头行 + 窗口 + 页脚 + 3；grep/glob 是明知例外', async () => {
+  // 真实页脚由宿主 formatSpillNotice 生成，实测 182–204 字符（不是旧稿按 110 估的值）；
+  // 头行 [output N chars; showing first A and last B] 约 47–52 字符，按 50 计，另加 3 个换行。
+  // 净收益 > 0 的最小长度 = head + tail + 头行 + 页脚 + 3；触发阈值低于它就存在死区。
+  const HEADLINE = 50
+  const FOOTER = 192
+  const minNetPositive = (p: ProjectionParams) => p.headChars + p.tailChars + HEADLINE + FOOTER + 3
+  const GREP = { triggerChars: 700, headChars: 400, tailChars: 100 }
+
+  // read / bash / ssh 满足：3,000 ≥ 2,745、4,000 ≥ 2,745、2,000 ≥ 1,745。
+  assert.ok(READ.triggerChars >= minNetPositive(READ))
+  assert.ok(BASH.triggerChars >= minNetPositive(BASH))
+  assert.ok(SSH.triggerChars >= minNetPositive(SSH))
+
+  // grep/glob 默认**不**满足：400 + 100 + 50 + 192 + 3 = 745 > 700。死区是明知保留的取舍，
+  // 不是缺陷：把 triggerChars 提到 800 是配置改动，不在本测试的授权内。死区里绝不增加
+  // token——truncate 会裁（它自己的 after 不含页脚），projectApply 组装后不短于原文即
+  // 返回原文；浪费的只是一次裁剪与一次无人引用的落盘。
+  assert.ok(minNetPositive(GREP) > GREP.triggerChars) // 745 > 700
+  const text = 'a'.repeat(701)
+  const t = truncate(text, GREP)!
+  assert.ok(t.after.length < text.length) // truncate will cut：after = 头行 50 + 窗口 501 + 换行 = 552 < 701
+  let spills = 0
+  const capture = { saveText: async () => { spills++; return { locator: '/spill/dead.txt', retrievalHint: 'h' } } }
+  // 即使按实测最小的 182 字符页脚组装，701 仍在死区（组装 735 > 701）。
+  const minFooter = () => 'f'.repeat(182)
+  const r = await projectApply({
+    text, isError: false, family: 'grep',
+    cfg: { ...DEFAULT_CONFIG, projection: { ...DEFAULT_CONFIG.projection, grep: GREP } },
+    sessionId: 's1', toolName: 'grep', spill: capture, formatFooter: minFooter,
+  })
+  assert.equal(r.content, text) // projectApply returns the original
+  assert.deepEqual(r.outcome, { kind: 'skipped', reason: 'not-worth-it' })
+  assert.equal(spills, 1) // 落盘先于长度复核：页脚 locator 只有写后才可知
 })
 
 // ---- additional coverage for the binding controller rules -------------------

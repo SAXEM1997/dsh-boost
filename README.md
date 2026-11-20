@@ -19,7 +19,9 @@ DSH 每次模型请求都会回放全部历史。本机 300 个最长会话的�
    直接提交，不再向模型要一次决策；多候选时用一个只允许返回单个标签的选择器。
 
 v1 的预期收益区间是 **3.5%（保底）– 10.0%（上界）**，按 raw `totalTokens` 计。
-这是设计阶段的区间，不是保证；影子周用实测收窄它。
+这是设计阶段对一个 300 会话语料做**离线估算**得到的区间：不是保证，也不是从交付的
+`session-snapshot.json` 能复算出来的数字（快照只存聚合计数，没有估算用的分项）；
+影子周用实测收窄并最终取代它。
 
 ## 前置条件
 
@@ -96,7 +98,9 @@ bundle，patch 的 `insert` 行落在 profile root 上。**装完必须重启 DS
 - `data.shadow` 为 `true`，`data.projection` 为 `"shadow"`——正是影子周的状态。
 - `data.degraded` 为空（POSIX、宿主有 token meter 与 spill 后端时）；`estimate_kind` 为
   `"host"`，`fixedOverheadTokens` 是一个数字，不是 `"unknown"`。
-- `data.counts` 一开始为空，正常工具调用后会累积，例如出现 `projection-shadow` 条目。
+- `data.counts` 一开始通常为空——但**控制调用自己也计数**：可见工作区为空时，`boost`
+  自己的调用同样要过 post-execute 的 scope 门（那里没有 boost 豁免，豁免只在工具注册层），
+  每条记一次 `skip:no-scope`。正常工具调用后会累积，例如出现 `projection-shadow` 条目。
 
 节选（数值示意；账目字段有省略）：
 
@@ -110,13 +114,20 @@ bundle，patch 的 `insert` 行落在 profile root 上。**装完必须重启 DS
     "degraded": [],
     "fixedOverheadTokens": 772,
     "estimate_kind": "host",
-    "counts": {}
+    "counts": { "skip:no-scope": 2 }
   }
 }
 ```
 
-`fixedOverheadTokens` 是启动时实测的每请求固定开销（协议段 + `boost` 工具 schema；本 checkout
-为 772）。它不是从使用量里推断的。
+示例里的 `counts` 不是空对象：启用流程中前两次控制调用（`status`、`scope-set`）发起时还没有
+可见工作区，每次各记了一条 `skip:no-scope`（post-execute 的 scope 门不豁免 `boost` 自身）。
+
+`fixedOverheadTokens` 是启动时实测的固定开销**合计**：协议段 379 + `boost` 工具 schema 393 =
+772（本 checkout）。它不是从使用量里推断的。**哪个数字适用于当前请求取决于 scope**：`boost`
+工具 schema（393）只要插件装配就常驻——`boost` 是唯一的 scope 豁免，始终留在工具声明里；
+协议段（379）只在有可见工作区时注入，`selected + []` 下该段文本为空，**每请求固定开销实际是
+393**。`status` 汇报的始终是合计 772，不随 scope 翻转；上面示例里工作区已选中，772 就是当时的
+真实每请求开销。
 
 ## 影子周
 
@@ -137,7 +148,8 @@ bundle，patch 的 `insert` 行落在 profile root 上。**装完必须重启 DS
 2. **读报告**：在仓库 checkout 里跑
    `node scripts/shadow-report.mjs --dir "${DSH_HOME:-$HOME/.dsh}/boost/receipts"`。
    这个脚本是 dev-only，不在 npm tarball 里。它输出四个标签：
-   `saveableRatio`（只读白名单真正能兑现的替换比例）、`byFamily`（按候选工具族的命中率）、
+   `saveableRatio`（白名单能兑现的替换占比 = `whitelisted` 影子提交 / **全部**替换决策——分母
+   是每一次替换决策，不只是白名单调用；影子期全族记账，bash/ssh 的潜力看 `byFamily`）、`byFamily`（按候选工具族的命中率）、
    `candidateRecall`（候选集召回）、`retrievalUpperBound`（取回率上界；影子期没有真正投影，
    结构上恒为 `0`）。
 3. **打开投影**：报告支持的话，保持 `shadow: true`，把 `projection` 改成 `'on'`：

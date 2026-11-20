@@ -24,8 +24,10 @@ The plugin does two things:
    deterministic evidence satisfying its guard, commit it without asking the model for another
    decision. With several candidates, a selector that may only return a single label picks one.
 
-The expected v1 range is **3.5% (floor) to 10.0% (ceiling)** of raw `totalTokens`. That is a
-design range, not a guarantee; the shadow week narrows it with measurements.
+The expected v1 range is **3.5% (floor) to 10.0% (ceiling)** of raw `totalTokens`. It was
+**estimated offline** against a 300-session corpus during design: not a guarantee, and not a figure
+the shipped `session-snapshot.json` can recompute (the snapshot stores aggregate counts only, not
+the components of the estimate). The shadow week narrows and then replaces it with measurements.
 
 ## Requirements
 
@@ -76,7 +78,8 @@ ask the agent to call it, for example:
 > Call the boost tool with `{"cmd":"status"}` and show me the JSON.
 
 The first `status` should answer `ok: true`, with `data.scope.workspaceIds` empty, `revision` `0`,
-`shadow` `true`, `projection` `"shadow"`, and `counts` empty. `degraded` containing
+`shadow` `true`, `projection` `"shadow"`, and `counts` empty (in a fresh session — any earlier tool
+call from an out-of-scope session has already recorded `skip:no-scope`). `degraded` containing
 `ERR_SCOPE_READ_FAILED` is expected: `scope.json` does not exist yet, so the plugin is on its
 fail-closed default. The first successful `scope-set` creates the file.
 
@@ -111,8 +114,10 @@ After the write, call `status` again. A healthy result looks like this:
 - `data.shadow` is `true` and `data.projection` is `"shadow"` — exactly the shadow-week state.
 - `data.degraded` is empty on POSIX with a host token meter and spill backend; `estimate_kind` is
   `"host"` and `fixedOverheadTokens` is a number, not `"unknown"`.
-- `data.counts` starts empty and grows after normal tool calls, for example with
-  `projection-shadow` entries.
+- `data.counts` usually starts empty — but **control calls count too**: while no workspace is
+  visible, `boost`'s own calls pass the same post-execute scope gate (there is no boost exemption
+  there; the exemption lives at tool registration), each recording one `skip:no-scope`. It grows
+  after normal tool calls, for example with `projection-shadow` entries.
 
 Excerpt (illustrative values; ledger fields omitted):
 
@@ -126,13 +131,23 @@ Excerpt (illustrative values; ledger fields omitted):
     "degraded": [],
     "fixedOverheadTokens": 772,
     "estimate_kind": "host",
-    "counts": {}
+    "counts": { "skip:no-scope": 2 }
   }
 }
 ```
 
-`fixedOverheadTokens` is measured once at startup: the protocol section plus the `boost` tool
-schema (772 in this checkout). It is never inferred from usage.
+The `counts` in the excerpt is not empty: the two earlier control calls (`status` and `scope-set`)
+ran while no workspace was visible yet, and each recorded one `skip:no-scope` (the post-execute
+scope gate does not exempt `boost` itself).
+
+`fixedOverheadTokens` is measured once at startup and is the **sum** of both components: protocol
+section 379 + `boost` tool schema 393 = 772 (in this checkout). It is never inferred from usage.
+**Which number applies to a request depends on scope**: the `boost` tool schema (393) is present
+whenever the plugin is assembled — `boost` is the one scope exemption and always stays in the tool
+declaration — while the protocol section (379) is injected only when a workspace is visible. Under
+`selected + []` the section's text is empty, so the real per-request fixed cost is **393**. `status`
+always reports the combined 772 regardless of scope; in the excerpt above a workspace is selected,
+so 772 is the true per-request cost there.
 
 ## Shadow week
 
@@ -154,10 +169,12 @@ The recommended sequence:
 2. **Read the report**: from a repository checkout, run
    `node scripts/shadow-report.mjs --dir "${DSH_HOME:-$HOME/.dsh}/boost/receipts"`. The script is
    dev-only and is not in the npm tarball. It prints four labels:
-   `saveableRatio` (the share of whitelisted read-only calls substitution could actually deliver),
-   `byFamily` (hit rate per candidate family), `candidateRecall` (recall of the candidate set), and
-   `retrievalUpperBound` (retrieval upper bound; structurally `0` during the shadow week because
-   nothing is projected for real).
+   `saveableRatio` (the share of substitution the v1 whitelist could actually deliver: whitelisted
+   shadow commits over **all** substitution decisions — the denominator is every substitution
+   decision, not just the whitelisted calls; shadow mode records every family, so bash/ssh
+   potential shows up in `byFamily`), `byFamily` (hit rate per candidate family), `candidateRecall`
+   (recall of the candidate set), and `retrievalUpperBound` (retrieval upper bound; structurally
+   `0` during the shadow week because nothing is projected for real).
 3. **Turn on projection**: if the report supports it, keep `shadow: true` and set `projection` to
    `'on'`:
 

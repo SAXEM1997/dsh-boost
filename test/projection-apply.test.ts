@@ -169,6 +169,56 @@ test('页脚把回执撑得比原文更长时回退原文（规则 2）', async 
   assert.equal(spilledContent, text)
 })
 
+test('恰好等长：assembled.length === text.length 时返回原文，不产出零节省的投影（apply 侧 >= 边界）', async () => {
+  // 构造等长：trigger 100 / head 10 / tail 5，text 150 字符。组装 = 头行 + 1 + 10 +
+  // 1 + 页脚 + 1 + 5；150 的头行是 47 字符，页脚取 85 字符时组装恰为 150。判据若是
+  // > 而非 >=，这里会发出一条同长度的“投影”与一份节省为 0 的 applied 收据，页脚
+  // 还指向一份没人需要的 spill 原件——等于白付一次落盘。
+  const P = { triggerChars: 100, headChars: 10, tailChars: 5 }
+  const text = 'a'.repeat(150)
+  const t = truncate(text, P)!
+  const footerLen = text.length - (renderHeadLine(t).length + 1 + P.headChars + 1 + 1 + P.tailChars)
+  const exactFooter = () => 'F'.repeat(footerLen)
+  // 等长自检：本用例确实站在 >= 与 > 的分岔点上。
+  const assembled = `${renderHeadLine(t)}\n${t.head}\n${exactFooter()}\n${t.tail}`
+  assert.equal(assembled.length, text.length)
+  let spills = 0
+  const capture = { saveText: async () => { spills++; return { locator: '/spill/eq.txt', retrievalHint: 'h' } } }
+  const r = await projectApply({
+    text, isError: false, family: 'read',
+    cfg: { ...DEFAULT_CONFIG, projection: { ...DEFAULT_CONFIG.projection, read: P } },
+    sessionId: 's1', toolName: 'read', spill: capture, formatFooter: exactFooter,
+  })
+  assert.equal(r.content, text) // 原文逐字节返回，不产出同长度 receipt
+  assert.deepEqual(r.outcome, { kind: 'skipped', reason: 'not-worth-it' }) // 无零节省的 applied 收据
+  // 注意：这一侧的 saveText 已经发生——页脚的 locator 只有落盘后才知道，组装长度只能
+  // 事后复核（apply.ts: "the footer is only known after the write"）。若要求“等长不落盘”，
+  // 那是代码改动（把长度预判挪到写盘前），不是测试改动；与上一条“更长”用例同一取舍。
+  assert.equal(spills, 1)
+})
+
+test('等长在 truncate 一侧被拦下：after.length === text.length 时 precheck 即返回，spill 从未发生', async () => {
+  // 另一条 >= 边界在 truncate 自己的净收益护栏上：trigger 100 / head 80 / tail 40，
+  // text 170 时头行 [output 170 chars; showing first 80 and last 40] 是 48 字符，
+  // after = 48 + 1 + 80 + 1 + 40 = 170，恰好等长，truncate 返回 null，projectApply
+  // 在 precheck（落盘之前）就放弃。
+  const P = { triggerChars: 100, headChars: 80, tailChars: 40 }
+  const text = 'a'.repeat(170)
+  // 构造自检：头行长度 + 两个换行 + 窗口 === 原文长度，等长确实成立。
+  assert.equal(`[output 170 chars; showing first 80 and last 40]`.length + 1 + P.headChars + 1 + P.tailChars, text.length)
+  assert.equal(truncate(text, P), null)
+  let spills = 0
+  const capture = { saveText: async () => { spills++; return { locator: '/spill/eq2.txt', retrievalHint: 'h' } } }
+  const r = await projectApply({
+    text, isError: false, family: 'read',
+    cfg: { ...DEFAULT_CONFIG, projection: { ...DEFAULT_CONFIG.projection, read: P } },
+    sessionId: 's1', toolName: 'read', spill: capture, formatFooter: footer,
+  })
+  assert.equal(r.content, text)
+  assert.deepEqual(r.outcome, { kind: 'skipped', reason: 'not-worth-it' })
+  assert.equal(spills, 0) // 这条边界在写盘之前就被拦下
+})
+
 test('入口顺序：error-receipt > no-spill > no-owner > no-footer', async () => {
   const text = 'a'.repeat(18432)
   const base = { text, isError: false, family: 'read' as const, cfg: DEFAULT_CONFIG, toolName: 'read' }
