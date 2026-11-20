@@ -403,10 +403,12 @@ to load. `llm` is soft (only the selector uses it); when absent the selector fal
 longer probes it and registers unconditionally.
 
 Several registration codes are log-only and never enter `status.degraded`: a non-duplicate throw
-while registering the protocol section logs `ERR_BOOST_SECTION_REGISTER_FAILED` and the remaining
-mounts (including the `boost` tool) still assemble; the host's genuine duplicate-section error logs
-`ERR_BOOST_ALREADY_MOUNTED` and skips the mount; a failure to register the `boost` tool itself
-logs `ERR_BOOST_TOOL_REGISTER_FAILED`.
+while registering the protocol section logs `ERR_BOOST_SECTION_REGISTER_FAILED`; `registerHooks`
+stops at the first mount, so the substitution, projection, and execute hooks are never registered
+and the request path is effectively inert, while the `boost` tool and session events are still
+attempted. The host's genuine duplicate-section error logs `ERR_BOOST_ALREADY_MOUNTED` and skips
+this mount; a failure to register the `boost` tool itself logs
+`ERR_BOOST_TOOL_REGISTER_FAILED`.
 
 `ERR_HOST_NO_TOKENMETER` and `ERR_HOST_NO_ESTIMATOR` are **two different things**; do not merge
 them. The first is the host service (`ctx.get('tokenMeter')`) being absent, which refuses
