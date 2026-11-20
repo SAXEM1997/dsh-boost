@@ -40,7 +40,7 @@ import { resolveBoostRoot } from './host/root.js'
 import { clearSession, SessionRuntime } from './hooks/llm-stream.js'
 import { TurnClock } from './hooks/clock.js'
 import { PendingQueue } from './hooks/pending.js'
-import { registerHooks } from './hooks/post-execute.js'
+import { clearAcceptedDispatch, registerHooks } from './hooks/post-execute.js'
 import type { HookDeps, SelectorRoute } from './hooks/post-execute.js'
 import type { SpillBackend } from './projection/apply.js'
 import { ProjectionCounters } from './projection/counters.js'
@@ -1051,6 +1051,10 @@ export function apply(ctx: PluginContext, config: unknown): void {
       // decision was made under instead of whatever the cross-session minimum
       // happens to be when an operator runs `boost status` (design §5.3).
       horizonFor: (sessionId) => horizon.remainingFor(sessionId),
+      // The dispatch mirror lives in the post-execute module and `clearSession`
+      // lives in the stream module; this is the seam that lets a disposal drop
+      // the mirror instead of leaking one entry per disposed session.
+      clearAcceptedDispatch: (sessionId) => clearAcceptedDispatch(deps, sessionId),
       get llm() {
         return llm()
       },

@@ -310,6 +310,14 @@ export interface HookDeps {
    */
   horizonFor?: (sessionId: string) => number
   /**
+   * Drop the per-session dispatch mirror on disposal.
+   *
+   * `clearSession` lives in the stream hook and the mirror lives here, so the
+   * teardown reaches it through this seam rather than exporting the map. Wired
+   * by `apply`; absent in tests, which is why it is optional and guarded.
+   */
+  clearAcceptedDispatch?: (sessionId: string) => void
+  /**
    * The host logger, for the few conditions that have no other surface.
    *
    * `registerHooks` fills it from `ctx.logger` when absent, so production never
@@ -1115,7 +1123,7 @@ function takeAcceptedDispatch(
 }
 
 /** Drop the mirrored dispatch; no pending mark is waiting to settle it. */
-function clearAcceptedDispatch(deps: HookDeps, sessionId: string): void {
+export function clearAcceptedDispatch(deps: HookDeps, sessionId: string): void {
   ACCEPTED_DISPATCH.get(deps)?.delete(sessionId)
 }
 

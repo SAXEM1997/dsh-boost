@@ -299,7 +299,7 @@ deprecation 元数据，不改 `latest`、不影响 `^0.1.0` 的解析；本文�
 | `ERR_HOST_PLATFORM_UNSUPPORTED` | `status.degraded` | win32 上替换拒绝，投影不受影响 | 平台限制，无需处置 |
 | `ERR_HOST_COMPLETE_SECTION` | `status.degraded` | 宿主的 `complete: true` 提示段在装配瀑布之后替换了整个系统提示，协议段没有到达出站请求；受影响请求上替换与投影 fail-closed（会话被判不可见），工作区明明可见插件却不动作 | 找出宿主提示配置里覆盖瀑布装配的 complete 段（通常属于另一个插件）；移除它，或接受这些请求上替换/投影不可用 |
 | `ERR_RECEIPTS_TRUNCATED` | `status.degraded` | 收据分片超过 256 个；`status` 只聚合按名排序的前 256 个，`counts` 与两账因此都是**下界**，不是漏算就是少算——方向安全但数字偏小 | 归档或清理旧分片，重跑 `status`；要全量就分批统计 |
-| `ERR_RECEIPTS_UNREADABLE` | `status.degraded` | 至少一个收据分片读不出来（EACCES、名为 `x.jsonl` 的目录等）；`status` 仍是**全量聚合**——健康分片照常计数——并带该码，数字因此可能不完整 | 检查 `$DSH_HOME/boost/receipts/` 的权限与异常条目，修复后重跑 `status`，对比修复前后计数 |
+| `ERR_RECEIPTS_UNREADABLE` | `status.degraded` | 至少一个收据分片读不出来（EACCES、名为 `x.jsonl` 的目录等）；`status` 仍是**全量聚合**——健康分片照常计数——并带该码，数字因此可能不完整 | 检查 `<dshHome>/boost/receipts/`（设了 `config.dshHome` 时以它为准，否则 `$DSH_HOME`）的权限与异常条目，修复后重跑 `status`，对比修复前后计数 |
 | `ERR_SCOPE_UNKNOWN_VERSION` | `status.degraded` + `scope-get` 失败 `code`；`shadow` 也拒绝 | scope 文件版本不是 2（含 v1）；读按 fail-closed 默认，写不盲改 | 跑一次 `scope-set` 走显式升级；或按 v2 手写 |
 | `ERR_SCOPE_FUTURE_VERSION` | `status.degraded` + `scope-get` 失败 `code` | scope 文件版本比本插件认识的新；只读 | 升级插件；不要用旧版本覆盖 |
 | `ERR_SCOPE_PARSE_FAILED` | `status.degraded` + `scope-get` 失败 `code` | scope 文件不是合法 scope 文档；读按默认、写拒绝 | 修文件或删除后重设；保留现场再处理 |
@@ -314,7 +314,8 @@ deprecation 元数据，不改 `latest`、不影响 `^0.1.0` 的解析；本文�
 | `ERR_HOST_VERSION_MISMATCH` | 加载日志警告 | 解析到的宿主版本不是验证线 `0.2.2-rc.4`；插件**仍然加载**，改名 API 仍可能让它失效 | 核对 `engines.dsh` 与宿主版本；换回验证线或接受风险 |
 | `ERR_HOST_NO_AGENT_REQUEST` | 加载日志警告（一次） | `llm/stream` 前没观察到 `agent/request`；selector 路由捕获不到，多候选替换会 fail-closed | 宿主事件已废弃/移除；升级宿主，或只用单候选替换 |
 | `ERR_BOOST_ALREADY_MOUNTED` | 加载日志警告 | 重复 `apply` 命中已有装配；本次注册跳过 | 确保只装配一次；移除重复的 bundle 行/重复加载 |
-| `ERR_BOOST_SECTION_REGISTER_FAILED` | 加载日志警告 | 协议段注册失败；`registerHooks` 在第一个挂载处中止，后续替换/投影/execute 钩子都不会注册（`boost` 工具与会话事件仍会尝试挂载），请求路径实际 inert | 查宿主提示段冲突（另一个插件占了同名段）；修好后重启 |
+| `ERR_BOOST_SECTION_REGISTER_FAILED` | 加载日志警告 | 协议段注册失败；三个事件钩子随后**逐个独立挂载**，失败者记名（见下一行） | 查宿主提示段冲突（另一个插件占了同名段）；修好后重启 |
+| `ERR_BOOST_PARTIAL_MOUNT` | `status.degraded` | 至少一个事件钩子（`tools/post-execute` / `llm/stream` / `tools/execute`）没挂上；插件装配不全，对应能力（投影/替换）实际不可用 | 看同一次加载日志里的记名失败项；多数是 `apply` 与 dispose/HMR 竞争，重启即可 |
 | `ERR_BOOST_TOOL_REGISTER_FAILED` | 加载日志警告 | `boost` 工具注册失败；用户失去控制面 | 查宿主 `tools` 服务与日志；修好后重启 |
 | `ERR_SCOPE_LOCK_TAKEOVER` | 日志警告（**不是**工具失败 `code`） | 锁龄超过 10 分钟，插件按接管处理（即使 pid 仍活）；只记录，不影响本次写入结果 | 无需处置；作为崩溃写者/pid 复用的证据保留 |
 
@@ -403,7 +404,7 @@ pi-ai `transformMessages` 会丢掉 thinking 块。
 > 照本节字面写 `$DSH_HOME/...` 会读到一个空目录并拿到四项零值（不是「没有收据」的证据）。
 
 ```bash
-node scripts/shadow-report.mjs --dir "$DSH_HOME/boost/receipts"
+node scripts/shadow-report.mjs --dir "${BOOST_ROOT:-$DSH_HOME}/boost/receipts"
 ```
 
 输出四个标签（空目录输出四项零值，不抛错）：

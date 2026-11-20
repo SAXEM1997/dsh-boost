@@ -1262,3 +1262,26 @@ test('M27 上游在 usage 前抛错时仍结算标记并报 unknown，重放不�
   )
   assert.equal(ledger.last()?.input, 100_000, 'the replay was observed as an ordinary request')
 })
+
+test('qr3#3: 会话销毁会清掉派发镜像，不随进程存活', async () => {
+  // The mirror exists so a late tool result can settle a substitution that ran.
+  // A disposed session has no late result coming, so leaving the entry behind
+  // is a per-session leak for the plugin's lifetime.
+  const seen: string[] = []
+  const deps: Any = {
+    config: DEFAULT_CONFIG,
+    sessionState: new ReceiptSessionState(),
+    clearAcceptedDispatch: (sessionId: string) => seen.push(sessionId),
+  }
+  const { clearSession } = await import('../src/hooks/llm-stream.ts')
+
+  clearSession(deps, SESSION)
+
+  assert.deepEqual(seen, [SESSION], 'disposal must reach the dispatch mirror')
+})
+
+test('qr3#3: 没有接缝时销毁不抛错（测试与 embedder 的常见形态）', async () => {
+  const deps: Any = { config: DEFAULT_CONFIG, sessionState: new ReceiptSessionState() }
+  const { clearSession } = await import('../src/hooks/llm-stream.ts')
+  assert.doesNotThrow(() => clearSession(deps, SESSION))
+})

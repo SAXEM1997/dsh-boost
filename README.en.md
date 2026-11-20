@@ -439,13 +439,13 @@ to load. `llm` is soft (only the selector uses it); when absent the selector fal
 `ToolRegistrationOptions` since the oldest host line this package declares, so the plugin no
 longer probes it and registers unconditionally.
 
-Several registration codes are log-only and never enter `status.degraded`: a non-duplicate throw
-while registering the protocol section logs `ERR_BOOST_SECTION_REGISTER_FAILED`; `registerHooks`
-stops at the first mount, so the substitution, projection, and execute hooks are never registered
-and the request path is effectively inert, while the `boost` tool and session events are still
-attempted. The host's genuine duplicate-section error logs `ERR_BOOST_ALREADY_MOUNTED` and skips
-this mount; a failure to register the `boost` tool itself logs
-`ERR_BOOST_TOOL_REGISTER_FAILED`.
+Registration codes come in two kinds. A non-duplicate throw while registering the protocol
+section logs `ERR_BOOST_SECTION_REGISTER_FAILED` (log only). The three event hooks
+(`tools/post-execute`, `llm/stream`, `tools/execute`) are then mounted **independently**: a
+failure in any of them is named and reported through **`ERR_BOOST_PARTIAL_MOUNT`** in
+`status.degraded`, so a partially assembled plugin no longer looks healthy. The host's genuine
+duplicate-section error logs `ERR_BOOST_ALREADY_MOUNTED` and skips this mount; a failure to
+register the `boost` tool itself logs `ERR_BOOST_TOOL_REGISTER_FAILED` (log only).
 
 `ERR_HOST_NO_TOKENMETER` and `ERR_HOST_NO_ESTIMATOR` are **two different things**; do not merge
 them. The first is the host service (`ctx.get('tokenMeter')`) being absent, which refuses

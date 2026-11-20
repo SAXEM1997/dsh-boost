@@ -374,11 +374,11 @@ horizon 重放，并计入 `projection_horizon_reestimated`；`projection_horizo
 `ERR_HOST_NO_STEP_WHEN` 已不存在：步骤级 `when` 从本包声明的最老宿主线起就在
 `ToolRegistrationOptions` 里，插件不再探测、无条件注册。
 
-注册阶段还有几个只进日志、不进 `status.degraded` 的码：协议段注册抛出**非重复**错误时记
-`ERR_BOOST_SECTION_REGISTER_FAILED`；`registerHooks` 在第一个挂载处中止，后续替换/投影/
-execute 钩子都不会注册，请求路径实际 inert，只有 `boost` 工具与会话事件仍会尝试挂载。宿主
-真正的重复注册错误记 `ERR_BOOST_ALREADY_MOUNTED` 并跳过本次挂载；`boost` 工具自身注册失败
-记 `ERR_BOOST_TOOL_REGISTER_FAILED`。
+注册阶段的码分两类。协议段注册抛出**非重复**错误时记 `ERR_BOOST_SECTION_REGISTER_FAILED`
+（只进日志）；此后三个事件钩子（`tools/post-execute`、`llm/stream`、`tools/execute`）**逐个
+独立挂载**，任何一个失败都会被记名并通过 **`ERR_BOOST_PARTIAL_MOUNT`** 进 `status.degraded`
+——装配不全的插件不会再看起来健康。宿主真正的重复注册错误记 `ERR_BOOST_ALREADY_MOUNTED` 并
+跳过本次挂载；`boost` 工具自身注册失败记 `ERR_BOOST_TOOL_REGISTER_FAILED`（只进日志）。
 
 `ERR_HOST_NO_TOKENMETER` 与 `ERR_HOST_NO_ESTIMATOR` 是**两件不同的事**，不要合并：
 前者是宿主服务（`ctx.get('tokenMeter')`）不存在，替换被拒绝；后者是纯估算包

@@ -1359,4 +1359,13 @@ export function clearSession(deps: HookDeps, sessionId: string): void {
     // Same.
   }
   releaseSharedLoans(deps, sessionId)
+  // The rollover path mirrors an accepted dispatch so a late tool result can
+  // still settle a substitution that ran. A disposed session has no late
+  // result coming, so the mirror would otherwise sit in the per-deps map for
+  // the plugin's lifetime — one entry per disposed session.
+  try {
+    deps.clearAcceptedDispatch?.(sessionId)
+  } catch {
+    // A disposal hook that throws must not abort the rest of the teardown.
+  }
 }

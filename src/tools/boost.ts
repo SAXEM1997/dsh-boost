@@ -35,7 +35,8 @@
  *   `ERR_SCOPE_*`; the one wiring code is `ERR_BOOST_PARTIAL_MOUNT`). The scope
  *   store's internal `scope-degraded` label and the
  *   receipt stream's `projection-skipped:*` are inputs, not output: a receipt
- *   code is mapped to `ERR_HOST_NO_SPILL` (no spill backend) or
+ *   code is mapped to `ERR_HOST_NO_SPILL` (no spill backend),
+ *   `ERR_HOST_SPILL_FAILING` (backend present, every write rejected) or
  *   `ERR_HOST_NO_SPILL_NOTICE` (backend present, notice module cannot render
  *   the footer), and a degraded scope read passes its `ERR_SCOPE_*` code
  *   through. The two estimator absences are separate codes:
