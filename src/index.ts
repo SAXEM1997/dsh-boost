@@ -116,6 +116,21 @@ function hostEstimatorOf(ctx: PluginContext): ((text: string) => number) | undef
   const meter = serviceOf<{ estimateMessage?: (message: unknown) => number }>(ctx, 'tokenMeter')
   if (meter === undefined || typeof meter.estimateMessage !== 'function') return undefined
   const estimate = meter.estimateMessage.bind(meter)
+
+  // Presence is not capability. A service that throws or returns a non-finite
+  // number on its first message is a broken meter, not a meter: substitution
+  // must be refused exactly as when no service exists (review R5). The probe
+  // runs once at plugin load, never on a request path.
+  try {
+    const probe = estimate({
+      role: 'user',
+      content: [{ type: 'text', text: 'dsh-boost meter probe' }],
+    })
+    if (typeof probe !== 'number' || !Number.isFinite(probe)) return undefined
+  } catch {
+    return undefined
+  }
+
   return (text: string): number => {
     try {
       const value = estimate({ role: 'user', content: [{ type: 'text', text }] })

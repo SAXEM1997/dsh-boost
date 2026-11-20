@@ -345,16 +345,21 @@ test('real apply counts a spilled receipt re-read and reports the net projection
   assert.equal(status.data.saved.retrievals, 1)
   assert.equal(status.data.estimate_kind, 'host')
 
-  // One-time and replay figures are reported separately. The net applies the
-  // same (1 + horizon) factor to both sides: the saved figure is what each
-  // receipt removed once, and the retrieval figure is what the read cost once.
+  // Gross is one-time on the design-spelled top-level field, replay-aware on
+  // the legacy `saved` object. The net replays the saved side and the retrieval
+  // content, but charges the retrieval call block exactly once.
   const horizon = 20
-  const expectedNet = (gross - retrieval.retrieval_tokens) * (1 + horizon)
+  const expectedNet =
+    (gross - retrieval.retrieval_content_tokens) * (1 + horizon) -
+    retrieval.retrieval_call_tokens
   assert.equal(status.data.projection_horizon_steps, horizon)
   assert.equal(status.data.projection_gross_tokens, gross)
   assert.equal(status.data.projection_retrieval_tokens, retrieval.retrieval_tokens)
+  assert.equal(status.data.projection_retrieval_content_tokens, retrieval.retrieval_content_tokens)
+  assert.equal(status.data.projection_retrieval_call_tokens, retrieval.retrieval_call_tokens)
   assert.equal(status.data.projection_net_tokens, expectedNet)
   assert.equal(status.data.saved.projectionNet, expectedNet)
+  assert.equal(status.data.saved.projectionGross, gross * (1 + horizon))
   assert.ok(status.data.projection_net_tokens > 0, 'a partial reread cannot flip the saving negative')
   const overhead = await measureBoostFixedOverhead()
   assert.notEqual(overhead, 'unknown')
@@ -388,7 +393,8 @@ test('a projected retrieval is priced on the visible content, not the raw result
   const receipts = await a.receipts()
   const projections = receipts.filter((receipt) => receipt.kind === 'projection' && receipt.code === 'projected')
   assert.equal(projections.length, 2, 'both the original and the retrieval are projected')
-  const gross = projections.reduce((sum, receipt) => sum + receipt.saved_projection_tokens, 0)
+  assert.notEqual(projections[0]?.call_was_retrieval, true)
+
   const retrieval = receipts.find((receipt) => receipt.code === 'projection-retrieval')
   assert.ok(retrieval)
   assert.equal(
@@ -402,14 +408,61 @@ test('a projected retrieval is priced on the visible content, not the raw result
   )
 
   const status = await a.status()
+  const horizon = status.data.projection_horizon_steps
+  const grossNonRetrieval = projections[0].saved_projection_tokens
+  const expectedNet =
+    (grossNonRetrieval - retrieval.retrieval_content_tokens) * (1 + horizon) -
+    retrieval.retrieval_call_tokens
+
   assert.equal(status.data.projection_retrievals, 1)
-  assert.equal(status.data.projection_gross_tokens, gross)
-  assert.equal(status.data.projection_retrieval_tokens, retrieval.retrieval_tokens)
   assert.equal(
-    status.data.projection_net_tokens,
-    (gross - retrieval.retrieval_tokens) * (1 + status.data.projection_horizon_steps),
+    status.data.projection_gross_tokens,
+    grossNonRetrieval,
+    'the retrieval\'s own projection is not credited to gross',
   )
-  assert.ok(status.data.projection_net_tokens > 0, 'the double-projection case must keep the sign positive')
+  assert.equal(status.data.projection_retrieval_content_tokens, retrieval.retrieval_content_tokens)
+  assert.equal(status.data.projection_retrieval_call_tokens, retrieval.retrieval_call_tokens)
+  assert.equal(status.data.projection_net_tokens, expectedNet)
+  assert.equal(status.data.saved.projectionNet, expectedNet)
+  assert.equal(status.data.saved.projectionGross, grossNonRetrieval * (1 + horizon))
+})
+
+test('the ordinary same-size re-read is a net loss, not a positive saving', async (t) => {
+  const spill = recordingSpill()
+  const a = await createAssembly({ spill, tokenMeter })
+  t.after(() => a.dispose())
+
+  await agentRequest(a.host)
+  const text = 'a'.repeat(4_203)
+  const first = await postExecute(a.host, { text, arguments: { path: '/ordinary' } })
+  assert.ok(Array.isArray(first.content))
+
+  const reread = await postExecute(a.host, {
+    text,
+    arguments: { path: LOCATOR },
+    callId: 'same-size-reread',
+  })
+  assert.ok(Array.isArray(reread.content), 'the re-read is projected too')
+
+  const receipts = await a.receipts()
+  const originalProjection = receipts.find(
+    (receipt) => receipt.kind === 'projection' && receipt.code === 'projected' && receipt.call_was_retrieval !== true,
+  )
+  const retrieval = receipts.find((receipt) => receipt.code === 'projection-retrieval')
+  assert.ok(originalProjection)
+  assert.ok(retrieval)
+  assert.equal(retrieval.retrieval_content_tokens, Math.ceil(reread.content[0].text.length / 4) + 8)
+
+  const status = await a.status()
+  const expected =
+    (originalProjection.saved_projection_tokens - retrieval.retrieval_content_tokens) *
+      (1 + status.data.projection_horizon_steps) -
+    retrieval.retrieval_call_tokens
+  assert.equal(status.data.projection_net_tokens, expected)
+  assert.ok(
+    status.data.projection_net_tokens < 0,
+    `the ordinary same-size re-read must be a loss: ${status.data.projection_net_tokens}`,
+  )
 })
 
 test('an ordinary read that does not name the locator is not a retrieval', async (t) => {
@@ -559,8 +612,84 @@ test('no token meter: substitution is refused, projection still applies with unk
 
   const status = await a.status()
   assert.equal(status.data.saved.substitution, 0)
-  assert.equal(status.data.projection_gross_tokens, 0)
+  assert.equal(status.data.projection_gross_tokens, 'unknown', 'meterless projections cannot be priced')
+  assert.equal(status.data.projection_net_tokens, 'unknown')
   assert.equal(status.data.estimate_kind, 'unknown')
+  assert.equal(status.data.projection_retrievals, 0)
+  assert.equal(status.data.projection_unpriced_projections, 1)
+})
+
+test('a throwing or non-finite meter is not a meter: substitution is refused', async (t) => {
+  for (const broken of [
+    { estimateMessage: () => { throw new Error('meter exploded') } },
+    { estimateMessage: () => Number.NaN },
+  ]) {
+    const a = await createAssembly({ spill: recordingSpill(), tokenMeter: broken })
+    t.after(() => a.dispose())
+    await agentRequest(a.host)
+
+    const before = await a.status()
+    assert.equal(before.data.estimate_kind, 'unknown', 'a broken meter must not be labelled host')
+    assert.ok(
+      before.data.degraded.includes('ERR_HOST_NO_TOKENMETER'),
+      `a broken meter must be reported as absent: ${JSON.stringify(before.data.degraded)}`,
+    )
+
+    const plan = {
+      goal: 'g',
+      steps: [
+        { id: 'A', tool: 'read', args: { file_path: '/a' }, guards: [{ text_contains: 'ROOT-RECEIPT' }] },
+      ],
+    }
+    a.setChunks([{ type: 'text-delta', index: 0, text: `<CHISEL_PLAN>${JSON.stringify(plan)}</CHISEL_PLAN>` }])
+    await collect(a.host.stream(SESSION, {}))
+
+    await postExecute(a.host, { text: 'ROOT-RECEIPT', arguments: { path: '/a' } })
+    const receipts = await a.receipts()
+    assert.equal(
+      receipts.some(
+        (receipt) => receipt.kind === 'substitute' || receipt.kind === 'substitute-settled',
+      ),
+      false,
+      'a broken meter must not commit a deterministic candidate',
+    )
+    assert.ok(receipts.some((receipt) => receipt.code === 'ERR_HOST_NO_TOKENMETER'))
+  }
+})
+
+test('a meter that breaks after the startup probe is refused at the decision', async (t) => {
+  let calls = 0
+  const a = await createAssembly({
+    spill: recordingSpill(),
+    tokenMeter: {
+      estimateMessage: () => {
+        calls += 1
+        return calls === 1 ? 10 : Number.NaN
+      },
+    },
+  })
+  t.after(() => a.dispose())
+  await agentRequest(a.host)
+
+  const before = await a.status()
+  assert.equal(before.data.estimate_kind, 'host', 'the startup probe saw a working meter')
+
+  const plan = {
+    goal: 'g',
+    steps: [
+      { id: 'A', tool: 'read', args: { file_path: '/a' }, guards: [{ text_contains: 'ROOT-RECEIPT' }] },
+    ],
+  }
+  a.setChunks([{ type: 'text-delta', index: 0, text: `<CHISEL_PLAN>${JSON.stringify(plan)}</CHISEL_PLAN>` }])
+  await collect(a.host.stream(SESSION, {}))
+
+  await postExecute(a.host, { text: 'ROOT-RECEIPT', arguments: { path: '/a' } })
+  const receipts = await a.receipts()
+  assert.ok(receipts.some((receipt) => receipt.code === 'ERR_HOST_NO_TOKENMETER'))
+  assert.equal(
+    receipts.some((receipt) => receipt.kind === 'substitute' || receipt.kind === 'substitute-settled'),
+    false,
+  )
 })
 
 // ---------------------------------------------------------------------------
@@ -592,6 +721,9 @@ test('status reports fixedOverheadTokens and the snake_case projection ledger', 
   assert.equal(data.projection_retrievals, data.saved.retrievals)
   assert.equal(data.projection_net_tokens, data.saved.projectionNet)
   assert.equal(data.projection_locator_evictions, 0)
+  assert.equal(data.projection_unpriced_projections, 0)
+  assert.equal(data.projection_unpriced_retrievals, 0)
+  assert.equal(data.projection_legacy_retrievals, 0)
   assert.deepEqual(data.projection_unknown_tools, {})
 })
 

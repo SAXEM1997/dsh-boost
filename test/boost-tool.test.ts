@@ -435,7 +435,7 @@ test('status 同一替换两行都带数字时只计 settle 一行', async () =>
   assert.equal(status.saved.substitution, 500, 'one substitution must be counted once')
 })
 
-test('status 净额对毛额与取回量使用同一个 (1 + horizon) 回放因子', async () => {
+test('status 净额 = 非取回毛额回放 − 取回内容回放 − 取回调用一次', async () => {
   const d = await deps()
   await d.receipts.append({
     version: 1,
@@ -443,9 +443,19 @@ test('status 净额对毛额与取回量使用同一个 (1 + horizon) 回放因�
     sessionId: 's1',
     turn: 1,
     kind: 'projection',
-    code: 'projection',
+    code: 'projected',
     saved_projection_tokens: 100,
+  })
+  await d.receipts.append({
+    version: 1,
+    ts: new Date().toISOString(),
+    sessionId: 's1',
+    turn: 1,
+    kind: 'projection',
+    code: 'projection-retrieval',
     retrieved: true,
+    retrieval_call_tokens: 10,
+    retrieval_content_tokens: 20,
     retrieval_tokens: 30,
   })
   await d.receipts.flush()
@@ -453,19 +463,22 @@ test('status 净额对毛额与取回量使用同一个 (1 + horizon) 回放因�
   const status = await getStatus(d)
   assert.deepEqual(status.saved, {
     substitution: 0,
-    projectionGross: 100,
-    // (100 - 30) * (1 + 20): both sides are per-receipt figures and the
-    // configured horizon is the replay multiplier on both.
-    projectionNet: 1_470,
+    // saved is replay-aware on both fields: 100 * (1 + 20).
+    projectionGross: 100 * 21,
+    // (100 - 20) * 21 - 10.
+    projectionNet: (100 - 20) * 21 - 10,
     retrievals: 1,
   })
   assert.equal(status.projection_gross_tokens, 100)
+  assert.equal(status.projection_gross_replay_tokens, 2_100)
   assert.equal(status.projection_retrieval_tokens, 30)
-  assert.equal(status.projection_net_tokens, 1_470)
+  assert.equal(status.projection_retrieval_content_tokens, 20)
+  assert.equal(status.projection_retrieval_call_tokens, 10)
+  assert.equal(status.projection_net_tokens, 1_670)
   assert.equal(status.projection_horizon_steps, 20)
 })
 
-test('status 取回量未知时只对毛额计回放，不伪造取回成本', async () => {
+test('unpriced retrieval makes the net unknown instead of free', async () => {
   const d = await deps()
   await d.receipts.append({
     version: 1,
@@ -473,17 +486,59 @@ test('status 取回量未知时只对毛额计回放，不伪造取回成本', a
     sessionId: 's1',
     turn: 1,
     kind: 'projection',
-    code: 'projection',
+    code: 'projected',
     saved_projection_tokens: 100,
+  })
+  await d.receipts.append({
+    version: 1,
+    ts: new Date().toISOString(),
+    sessionId: 's1',
+    turn: 1,
+    kind: 'projection',
+    code: 'projection-retrieval',
     retrieved: true,
   })
   await d.receipts.flush()
 
   const status = await getStatus(d)
-  assert.equal(status.saved.projectionGross, 100)
+  assert.equal(status.saved.projectionGross, 100 * 21)
   assert.equal(status.saved.retrievals, 1)
   assert.equal(status.projection_retrieval_tokens, 0)
-  assert.equal(status.saved.projectionNet, 100 * 21)
+  assert.equal(status.projection_unpriced_retrievals, 1)
+  assert.equal(status.saved.projectionNet, 'unknown')
+  assert.equal(status.projection_net_tokens, 'unknown')
+})
+
+test('pre-schema retrievalCost is subtracted once, never read as free', async () => {
+  const d = await deps()
+  await d.receipts.append({
+    version: 1,
+    ts: new Date().toISOString(),
+    sessionId: 's1',
+    turn: 1,
+    kind: 'projection',
+    code: 'projected',
+    saved_projection_tokens: 100,
+  })
+  await d.receipts.append({
+    version: 1,
+    ts: new Date().toISOString(),
+    sessionId: 's1',
+    turn: 1,
+    kind: 'projection',
+    code: 'projection-retrieval',
+    retrieved: true,
+    retrievalCost: 30,
+  })
+  await d.receipts.flush()
+
+  const status = await getStatus(d)
+  assert.equal(status.saved.projectionGross, 100 * 21)
+  assert.equal(status.projection_legacy_retrievals, 1)
+  assert.equal(status.projection_unpriced_retrievals, 0)
+  // The legacy field was already a replay-aware total; subtract it directly.
+  assert.equal(status.saved.projectionNet, 100 * 21 - 30)
+  assert.equal(status.projection_net_tokens, 100 * 21 - 30)
 })
 
 test('status 投影毛额保留 saved 旧拼写作为后备', async () => {
@@ -500,7 +555,8 @@ test('status 投影毛额保留 saved 旧拼写作为后备', async () => {
   await d.receipts.flush()
 
   const status = await getStatus(d)
-  assert.equal(status.saved.projectionGross, 100)
+  assert.equal(status.saved.projectionGross, 100 * 21)
+  assert.equal(status.projection_gross_tokens, 100)
 })
 
 test('status 投影毛额优先取 saved_projection_tokens 而不是 saved', async () => {
@@ -518,7 +574,8 @@ test('status 投影毛额优先取 saved_projection_tokens 而不是 saved', asy
   await d.receipts.flush()
 
   const status = await getStatus(d)
-  assert.equal(status.saved.projectionGross, 120)
+  assert.equal(status.saved.projectionGross, 120 * 21)
+  assert.equal(status.projection_gross_tokens, 120)
 })
 
 test('status 忽略字符串型 saved，不把文本拼进账目', async () => {
@@ -535,7 +592,8 @@ test('status 忽略字符串型 saved，不把文本拼进账目', async () => {
   await d.receipts.flush()
 
   const status = await getStatus(d)
-  assert.equal(status.saved.projectionGross, 0)
+  assert.equal(status.saved.projectionGross, 'unknown', 'a malformed saving is not zero')
+  assert.equal(status.projection_unpriced_projections, 1)
 })
 
 test('status 不把没有 unit:raw 的 projection 收据算进毛额', async () => {

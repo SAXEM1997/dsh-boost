@@ -22,13 +22,15 @@
  *   field is rejected **before** the mutation runs. The store persists whatever
  *   `mutate` returns, so this rejection is what stops a v1-shaped document.
  * - Both ledger sides come from the receipts. This module never estimates a
- *   retrieval cost; if no producer has recorded one, the net equals the gross
- *   and `retrievals` shows how many retrieved receipts were counted. The
- *   projection saving is read from `saved_projection_tokens` (the design §5.3
- *   name T23b/T26 write), falling back to `saved`; a producer must write one of
- *   them or the headline saving reads as zero. The substitution saving is read
- *   only from the settled line, because the synth-time line predates any
- *   measurement.
+ *   retrieval cost: an unpriced retrieval makes the net `'unknown'` rather
+ *   than free, and `projection_unpriced_retrievals` says how many there were.
+ *   A retrieval's own projection is excluded from gross because its visible
+ *   window is already charged as retrieval content. The projection saving is
+ *   read from `saved_projection_tokens` (the design §5.3 name T23b/T26 write),
+ *   falling back to `saved`; a producer must write one of them, while a
+ *   meterless projection has neither and makes gross/net `'unknown'`. The
+ *   substitution saving is read only from the settled line, because the
+ *   synth-time line predates any measurement.
  * - `status.degraded` is a list of **stable codes only** (`ERR_HOST_*` /
  *   `ERR_SCOPE_*`). The scope store's internal `scope-degraded` label and the
  *   receipt stream's `projection-skipped:*` are inputs, not output: a receipt
@@ -192,18 +194,21 @@ export interface BoostStatus {
      */
     substitution: number
     /**
-     * Σ `saved_projection_tokens` (T23b/T26's authoritative name, with `saved`
-     * as the legacy fallback) over `kind:'projection'` receipts carrying
-     * `unit:'raw'`.
-     */
-    projectionGross: number
-    /**
-     * `(projectionGross − Σ retrieval_tokens) × (1 + horizon)`.
+     * Σ `saved_projection_tokens` over non-retrieval projections, **replayed**
+     * by `(1 + horizonSteps)`.
      *
-     * One replay factor on both per-receipt sides; see
-     * {@link BoostStatus.projection_net_tokens}.
+     * Replay-aware so this legacy object no longer mixes a one-time gross with
+     * a replay net (review R2). The one-time figure is the top-level
+     * `projection_gross_tokens`.
      */
-    projectionNet: number
+    projectionGross: number | 'unknown'
+    /**
+     * `(gross_non_retrieval − retrieval_content) × (1 + horizon) − retrieval_calls`.
+     *
+     * `'unknown'` when any retrieval in the ledger is unpriced: an unmeasured
+     * cost must never silently become zero (review R3).
+     */
+    projectionNet: number | 'unknown'
     /** Number of `kind:'projection'` receipts marked `retrieved: true`. */
     retrievals: number
   }
@@ -231,10 +236,29 @@ export interface BoostStatus {
   estimate_kind: 'host' | 'chars/4' | 'unknown'
   /** The `(1 + horizon)` replay factor the net formula applies to both sides. */
   projection_horizon_steps: number
-  /** Σ one-time `saved_projection_tokens` over applied projections. */
-  projection_gross_tokens: number
-  /** Σ one-time `retrieval_tokens` over counted retrievals. */
+  /**
+   * Σ one-time `saved_projection_tokens` over applied projections whose call
+   * was **not** itself a retrieval.
+   *
+   * A retrieval's own projection is excluded: crediting it here while also
+   * charging its visible window as retrieval cost would count the same tokens
+   * from both sides (review I3).
+   */
+  projection_gross_tokens: number | 'unknown'
+  /** {@link projection_gross_tokens} after `(1 + horizon)` replay. */
+  projection_gross_replay_tokens: number | 'unknown'
+  /** Σ one-time retrieval totals (call + content); `0` for unpriced receipts. */
   projection_retrieval_tokens: number
+  /** Σ one-time retrieval content, the side that replays with the gross. */
+  projection_retrieval_content_tokens: number
+  /** Σ one-time retrieval call blocks; replay does not apply to these. */
+  projection_retrieval_call_tokens: number
+  /** Projections with no measured saving; the gross/net become `'unknown'`. */
+  projection_unpriced_projections: number
+  /** Retrievals with no usable token fields; their cost makes the net unknown. */
+  projection_unpriced_retrievals: number
+  /** Pre-schema retrievals priced through the old `retrievalCost` field. */
+  projection_legacy_retrievals: number
   /**
    * The design's receipt-field spelling of `saved.retrievals`.
    *
@@ -245,13 +269,14 @@ export interface BoostStatus {
    */
   projection_retrievals: number
   /**
-   * `(gross − retrieval) × (1 + horizon)`.
+   * `(gross_non_retrieval − retrieval_content) × (1 + horizon) − retrieval_calls`.
    *
-   * The saving and the cost are both per-receipt figures, so the same replay
-   * factor is applied to both; applying it to only one side flips the sign and
-   * makes a cheap partial re-read look like a loss.
+   * The retrieval's own projection is not in the gross, the content it made
+   * visible replays, and its call block is charged once. `'unknown'` when a
+   * retrieval is unpriced or a meterless projection was clipped: a lower bound
+   * cannot be computed from a missing measurement.
    */
-  projection_net_tokens: number
+  projection_net_tokens: number | 'unknown'
   /** Locators dropped by the per-session cap; a lossy ledger is visible. */
   projection_locator_evictions: number
   /** Calls skipped because no projection family matched. */
@@ -277,15 +302,29 @@ async function aggregate(receipts: ReceiptStore): Promise<{
   counts: Record<string, number>
   substitution: number
   projectionGross: number
-  projectionRetrievalTokens: number
+  projectionEvents: number
+  unpricedProjections: number
+  retrievalTokens: number
+  retrievalContentTokens: number
+  retrievalCallTokens: number
   retrievals: number
+  unpricedRetrievals: number
+  legacyRetrievals: number
+  legacyRetrievalCost: number
   degraded: string[]
 }> {
   const counts: Record<string, number> = Object.create(null)
   let substitution = 0
   let projectionGross = 0
+  let projectionEvents = 0
+  let unpricedProjections = 0
+  let retrievalTokens = 0
+  let retrievalContentTokens = 0
+  let retrievalCallTokens = 0
   let retrievals = 0
-  let projectionRetrievalTokens = 0
+  let unpricedRetrievals = 0
+  let legacyRetrievals = 0
+  let legacyRetrievalCost = 0
 
   for await (const receipt of receipts.scan()) {
     // A receipt is untrusted text from a file: `counts` has no prototype so a
@@ -303,20 +342,61 @@ async function aggregate(receipts: ReceiptStore): Promise<{
     }
 
     if (receipt.kind !== 'projection') continue
-    if (receipt.unit === 'raw') {
+    projectionEvents += 1
+
+    if (receipt.unit === 'raw' && receipt.call_was_retrieval !== true && receipt.retrieved !== true) {
       // T23b/T26 write `saved_projection_tokens`; `saved` is the pre-T23b
       // spelling this consumer accepted first. Never estimate a value here.
+      // A retrieval's own projection is excluded from gross: its visible
+      // window is charged as retrieval content instead (review I3).
       const saved = receipt.saved_projection_tokens ?? receipt.saved
       if (typeof saved === 'number' && Number.isFinite(saved)) projectionGross += saved
+      // A meterless projection carries `estimate:'unknown'` and no saved
+      // figure. Reporting the remaining numeric sum as the gross would present
+      // an unmeasured effect as zero (review R4).
+      else unpricedProjections += 1
     }
-    if (receipt.retrieved === true) {
-      retrievals += 1
-      // The receipt field is the **one-time** retrieval cost: the call block
-      // plus the content the model actually saw. The replay multiplier is
-      // applied once in `status`, to both sides of the net formula.
-      const tokens = receipt.retrieval_tokens
-      if (typeof tokens === 'number' && Number.isFinite(tokens)) projectionRetrievalTokens += tokens
+
+    if (receipt.retrieved !== true) continue
+    retrievals += 1
+
+    const total = receipt.retrieval_tokens
+    const call = receipt.retrieval_call_tokens
+    const content = receipt.retrieval_content_tokens
+    if (
+      typeof total === 'number' &&
+      Number.isFinite(total) &&
+      total >= 0 &&
+      typeof call === 'number' &&
+      Number.isFinite(call) &&
+      call >= 0 &&
+      typeof content === 'number' &&
+      Number.isFinite(content) &&
+      content >= 0 &&
+      total === call + content
+    ) {
+      retrievalTokens += total
+      retrievalCallTokens += call
+      retrievalContentTokens += content
+      continue
     }
+
+    // Pre-schema receipts (written before the split) carry only the old
+    // already-replayed `retrievalCost` total. Subtracting it directly from the
+    // replayed net avoids counting it as free (review R6). Its own projection,
+    // if any, predates the `call_was_retrieval` marker and cannot be identified
+    // from the file; that is documented in the report.
+    const legacy = receipt.retrievalCost
+    if (typeof legacy === 'number' && Number.isFinite(legacy) && legacy >= 0) {
+      legacyRetrievals += 1
+      legacyRetrievalCost += legacy
+      retrievalTokens += legacy
+      continue
+    }
+
+    // Neither schema: the cost is unknown, not zero. The net is reported as
+    // `'unknown'` rather than silently treating the retrieval as free.
+    unpricedRetrievals += 1
   }
 
   const degraded = RECEIPT_DEGRADATION.filter(entry => counts[entry.code] !== undefined).map(
@@ -326,8 +406,15 @@ async function aggregate(receipts: ReceiptStore): Promise<{
     counts,
     substitution,
     projectionGross,
-    projectionRetrievalTokens,
+    projectionEvents,
+    unpricedProjections,
+    retrievalTokens,
+    retrievalContentTokens,
+    retrievalCallTokens,
     retrievals,
+    unpricedRetrievals,
+    legacyRetrievals,
+    legacyRetrievalCost,
     degraded,
   }
 }
@@ -455,13 +542,31 @@ async function statusCommand(deps: BoostDeps): Promise<BoostResult> {
   const fixedOverhead = await fixedOverheadOf(deps)
   const degraded = degradationCodes(totals.degraded, read, deps.host, fixedOverhead)
   const horizon = horizonOf(deps)
-  // Both sides are per-receipt figures; the same replay factor applies to the
-  // net. A partial re-read therefore cannot flip the sign (review C1).
+  const estimateKind = estimateKindOf(deps)
+  const factor = 1 + horizon
+
+  // Meterless projections have `estimate:'unknown'` receipts with no saved
+  // figure. Reporting the numeric sum of the rest as 0/0 would be
+  // indistinguishable from "projection had no effect" (review R4).
+  const meterlessEvidence = totals.unpricedProjections > 0
+  const grossOneTime = meterlessEvidence ? 'unknown' : totals.projectionGross
+  const grossReplay = grossOneTime === 'unknown' ? 'unknown' : grossOneTime * factor
+
+  // A retrieval's own projection is excluded from gross; its content replays
+  // with the gross, its call block is charged once, and a legacy cost was
+  // already replay-aware (review I3/R6). An unpriced retrieval makes the whole
+  // net unknown rather than free (review R3).
+  const netUnknown = meterlessEvidence || totals.unpricedRetrievals > 0
   const projectionNet =
-    (totals.projectionGross - totals.projectionRetrievalTokens) * (1 + horizon)
+    netUnknown
+      ? 'unknown'
+      : (totals.projectionGross - totals.retrievalContentTokens) * factor -
+        totals.retrievalCallTokens -
+        totals.legacyRetrievalCost
+
   const saved: BoostStatus['saved'] = {
     substitution: totals.substitution,
-    projectionGross: totals.projectionGross,
+    projectionGross: grossReplay,
     projectionNet,
     retrievals: totals.retrievals,
   }
@@ -478,10 +583,16 @@ async function statusCommand(deps: BoostDeps): Promise<BoostResult> {
     degraded,
     fixedOverheadTokens: fixedOverhead === 'unknown' ? 'unknown' : fixedOverhead.totalTokens,
     fixedOverhead,
-    estimate_kind: estimateKindOf(deps),
+    estimate_kind: estimateKind,
     projection_horizon_steps: horizon,
-    projection_gross_tokens: totals.projectionGross,
-    projection_retrieval_tokens: totals.projectionRetrievalTokens,
+    projection_gross_tokens: grossOneTime,
+    projection_gross_replay_tokens: grossReplay,
+    projection_retrieval_tokens: totals.retrievalTokens,
+    projection_retrieval_content_tokens: totals.retrievalContentTokens,
+    projection_retrieval_call_tokens: totals.retrievalCallTokens,
+    projection_unpriced_projections: totals.unpricedProjections,
+    projection_unpriced_retrievals: totals.unpricedRetrievals,
+    projection_legacy_retrievals: totals.legacyRetrievals,
     projection_retrievals: totals.retrievals,
     projection_net_tokens: projectionNet,
     projection_locator_evictions: counterOf(deps.locatorEvictions),

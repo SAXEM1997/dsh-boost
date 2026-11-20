@@ -307,6 +307,8 @@ type DecisionContext = {
   result: PostExecuteResult | undefined
   state: ReceiptSessionState
   turn: number
+  /** The tool call itself names one of this session's spill locators. */
+  retrievalCall?: boolean
 }
 
 /** Skip reasons that mean the projection machinery degraded, not "nothing to cut". */
@@ -1159,7 +1161,11 @@ async function decideSubstitution(
   // spend real money on a fabricated estimate. Refuse before `decide`, before
   // the selector and before admission; shadow mode is record-only and may
   // still run. Projection is not gated (it needs no token numbers to clip).
-  if (!ctx.doc.shadow && estimatorOf(deps) === undefined) {
+  const estimator = estimatorOf(deps)
+  if (
+    !ctx.doc.shadow &&
+    (estimator === undefined || safeEstimate(estimator, 'dsh-boost meter probe') === undefined)
+  ) {
     await appendReceipt(
       deps,
       ledgerEntry(ctx, 'skip', 'ERR_HOST_NO_TOKENMETER', {
@@ -1483,6 +1489,7 @@ async function projectDecision(
           ledgerEntry(ctx, 'shadow', 'projection-shadow', {
             decision: 'projection',
             unit: 'raw',
+            ...(ctx.retrievalCall === true ? { call_was_retrieval: true } : {}),
             ...(priced
               ? {
                   before: outcome.before,
@@ -1526,6 +1533,7 @@ async function projectDecision(
           deps,
           ledgerEntry(ctx, 'projection', 'projected', {
             unit: 'raw',
+            ...(ctx.retrievalCall === true ? { call_was_retrieval: true } : {}),
             before,
             after,
             saved_projection_tokens: before - after,
@@ -1537,6 +1545,7 @@ async function projectDecision(
           deps,
           ledgerEntry(ctx, 'projection', 'projected', {
             unit: 'raw',
+            ...(ctx.retrievalCall === true ? { call_was_retrieval: true } : {}),
             estimate: 'unknown',
           }),
         )
@@ -1707,6 +1716,7 @@ async function postExecute(
       result,
       state,
       turn,
+      retrievalCall: retrieval !== undefined,
     }
     const outgoing = await applyDecision(deps, decision, ctx)
     if (retrieval !== undefined) {
