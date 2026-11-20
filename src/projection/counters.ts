@@ -23,7 +23,12 @@ export class ProjectionCounters {
   private readonly unknownTools = new Map<string, number>()
 
   /**
-   * Count one call whose family is not configured.
+   * Count one **decorated** call (`mcp__*`) whose family is not configured.
+   *
+   * Only decorated names are counted. An undecorated non-family tool (`edit`,
+   * `web_fetch`, `todo_write`, or this plugin's own `boost`) is a by-design
+   * pass, not a mapper gap, and counting it would bury the gap that matters in
+   * noise the operator cannot separate out.
    *
    * `name` is optional because `exec.name` can be absent; the count still
    * increments, and only a present name is retained for the tool list.

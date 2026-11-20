@@ -100,6 +100,7 @@ const ERR_HOST_NO_TOKENMETER = 'ERR_HOST_NO_TOKENMETER'
 const ERR_HOST_NO_ESTIMATOR = 'ERR_HOST_NO_ESTIMATOR'
 const ERR_HOST_PLATFORM_UNSUPPORTED = 'ERR_HOST_PLATFORM_UNSUPPORTED'
 const ERR_HOST_NO_STEP_WHEN = 'ERR_HOST_NO_STEP_WHEN'
+const ERR_HOST_NO_WORKSPACE_REGISTRY = 'ERR_HOST_NO_WORKSPACE_REGISTRY'
 
 /**
  * Receipt codes that mean the host is degraded, mapped to the stable code
@@ -132,6 +133,15 @@ export interface BoostHostFacts {
   hasSpill?: boolean
   /** Whether `ctx.tools.resolve` exists (step-level `when` support). */
   supportsStepWhen?: boolean
+  /**
+   * Whether `ctx.get('workspaceRegistry')` ever became available.
+   *
+   * A missing registry makes every session invisible, which presents to the
+   * operator as "nothing ever happens" with no error anywhere. It is a host
+   * fact rather than an assembly detail because that failure mode has to be
+   * diagnosable from inside the product.
+   */
+  hasWorkspaceRegistry?: boolean
 }
 
 /** The two stores `runBoost` orchestrates, plus the host facts it reports. */
@@ -150,11 +160,12 @@ export interface BoostDeps {
   /**
    * Which estimator priced this assembly's figures.
    *
-   * `host` means the synchronous host meter; `chars/4` is only reachable from a
-   * test-injected fallback; `unknown` means no token meter and no fabricated
-   * numbers (design §9).
+   * `host` means the synchronous host meter; `unknown` means no token meter,
+   * so no number is fabricated (design §9). There is deliberately no
+   * `chars/4` arm: a characters-over-four guess is not a measurement, and a
+   * receipt that says `unknown` is more useful than one that is wrong.
    */
-  estimateKind?: 'host' | 'chars/4' | 'unknown'
+  estimateKind?: 'host' | 'unknown'
   /** Replay horizon used by the net formula; defaults to the design's 20. */
   horizonSteps?: number
   /** Locators evicted by the per-session cap; status-time read. */
@@ -217,6 +228,15 @@ export interface BoostStatus {
   /** Stable degradation codes actually observed. */
   degraded: string[]
   /**
+   * Whether the host ever exposed a workspace registry.
+   *
+   * Reported separately from {@link degraded} because it is the single fact
+   * that explains "the plugin is installed and nothing ever happens": with no
+   * registry, no session resolves to a workspace and every path is inert.
+   * Absent when no host was probed.
+   */
+  hasWorkspaceRegistry?: boolean
+  /**
    * The measured per-request fixed cost: protocol section + tool schema.
    *
    * `'unknown'` when the host estimator is unreachable: the measurement is
@@ -233,7 +253,7 @@ export interface BoostStatus {
    * carry `'unknown'` rather than invented numbers, and substitution is
    * refused (design §9).
    */
-  estimate_kind: 'host' | 'chars/4' | 'unknown'
+  estimate_kind: 'host' | 'unknown'
   /** The `(1 + horizon)` replay factor the net formula applies to both sides. */
   projection_horizon_steps: number
   /**
@@ -283,6 +303,14 @@ export interface BoostStatus {
   projection_unknown_families: number
   /** Retained unmapped tool names (at most 32), for mapper-gap diagnosis. */
   projection_unknown_tools: Record<string, number>
+  /**
+   * Whether the receipt store stopped accepting writes (fail-closed).
+   *
+   * Once true, substitution is refused outright (design §5.2-3) and every
+   * figure above is a stale snapshot. Reported because the alternative is an
+   * operator reading frozen numbers with no warning that they froze.
+   */
+  receipts_stopped: boolean
 }
 
 /** A validated scope patch: only the caller-writable fields survive. */
@@ -460,7 +488,23 @@ function horizonOf(deps: BoostDeps): number {
 /** The label for the assembly's estimator; unprobed is honestly `unknown`. */
 function estimateKindOf(deps: BoostDeps): BoostStatus['estimate_kind'] {
   const kind = deps.estimateKind
-  return kind === 'host' || kind === 'chars/4' || kind === 'unknown' ? kind : 'unknown'
+  return kind === 'host' || kind === 'unknown' ? kind : 'unknown'
+}
+
+/**
+ * Whether the receipt store has stopped writing, fail-closed.
+ *
+ * Mirrors `receiptsStopped` in `src/hooks/llm-stream.ts` for the control tool's
+ * own store reference: a partial store is "not stopped", and a store that
+ * throws cannot record evidence, which is what stopped means.
+ */
+function receiptsStopped(store: BoostDeps['receipts']): boolean {
+  try {
+    if (store == null || typeof store.stopped !== 'function') return false
+    return store.stopped() === true
+  } catch {
+    return true
+  }
 }
 
 /** A monotonic status counter, never a thrown status. */
@@ -531,6 +575,7 @@ function degradationCodes(
   // (design §5.4), so reporting it while projection is `shadow` would be noise.
   if (host?.hasSpill === false && read.doc.projection === 'on') codes.push(ERR_HOST_NO_SPILL)
   if (host?.supportsStepWhen === false) codes.push(ERR_HOST_NO_STEP_WHEN)
+  if (host?.hasWorkspaceRegistry === false) codes.push(ERR_HOST_NO_WORKSPACE_REGISTRY)
 
   return [...new Set(codes)]
 }
@@ -598,6 +643,8 @@ async function statusCommand(deps: BoostDeps): Promise<BoostResult> {
     projection_locator_evictions: counterOf(deps.locatorEvictions),
     projection_unknown_families: counterOf(deps.unknownFamilies),
     projection_unknown_tools: toolCountsOf(deps.unknownTools),
+    receipts_stopped: receiptsStopped(deps.receipts),
+    hasWorkspaceRegistry: deps.host?.hasWorkspaceRegistry,
   }
   return { ok: true, data }
 }

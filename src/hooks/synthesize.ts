@@ -54,8 +54,12 @@ const UNSERIALISABLE_ARGS_CODE = 'BOOST_ARGS_UNSERIALISABLE'
  * candidate so a session log shows why the turn appeared, and it never reads
  * `createdAt` or any other clock value.
  */
-function reasoningText(e: PendingEntry): string {
-  return `Deterministic substitution for ${e.name} (candidate ${e.candidateId}).`
+function reasoningText(): string {
+  // Deliberately constant: this block is replayed on every later request and
+  // rendered in the transcript, so naming the tool and candidate here would
+  // cost tokens on every turn to say something the tool-call block beside it
+  // already says.
+  return 'Deterministic substitution.'
 }
 
 /**
@@ -113,7 +117,7 @@ export async function* synthesizeTurn(e: PendingEntry): AsyncIterable<StreamChun
     throw new RangeError('PendingEntry.callId must be a non-blank string')
   }
 
-  const reasoning = reasoningText(e)
+  const reasoning = reasoningText()
   yield { type: 'block-start', index: 0, blockType: 'reasoning' }
   yield { type: 'reasoning-delta', index: 0, text: reasoning }
   yield { type: 'block-end', index: 0, block: { type: 'reasoning', text: reasoning } }

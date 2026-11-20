@@ -5,7 +5,7 @@ import { renderHeadLine, truncate } from '../src/projection/truncate.ts'
 import { DEFAULT_CONFIG } from '../src/config.ts'
 
 const spill = { saveText: async () => ({ locator: '/spill/read-1.txt', retrievalHint: 'Use read with offset/limit' }) }
-const footer = (o: { count: number }, ref: { locator: string }) =>
+const footer = (o: { kind: 'exact'; count: number }, ref: { locator: string; retrievalHint?: string }) =>
   `Omitted ${o.count} bytes. Full formatted result stored at: ${ref.locator}.`
 
 test('on 模式：原文落盘、content 变短、页脚含 locator', async () => {

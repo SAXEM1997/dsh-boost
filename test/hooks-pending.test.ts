@@ -190,7 +190,7 @@ test('callIdFor 用 JSON 数组编码：组件里的 / 无法冒充分隔符', (
 
 test('index 值固定为 reasoning 0、tool-call 1，finish 没有 index', async () => {
   const chunks = await collect(entry())
-  const indexed = chunks.flatMap(chunk => (chunk.type === 'finish' ? [] : [chunk.index]))
+  const indexed = chunks.flatMap(chunk => (chunk.type === 'finish' ? [] : [(chunk as { index: number }).index]))
   assert.deepEqual(indexed, [0, 0, 0, 1, 1, 1])
 })
 

@@ -32,11 +32,7 @@ import type { SpillBackend } from './projection/apply.js'
 import { ProjectionCounters } from './projection/counters.js'
 import { PROTOCOL_NAME, PROTOCOL_TEXT } from './prompt/protocol.js'
 import { ReceiptStore } from './receipts/store.js'
-import {
-  ERR_HOST_NO_WORKSPACE_REGISTRY,
-  resolveWorkspace,
-  supportsStepWhen,
-} from './scope/resolve.js'
+import { resolveWorkspace, supportsStepWhen } from './scope/resolve.js'
 import type { WorkspaceRegistry } from './scope/resolve.js'
 import { ScopeStore } from './scope/store.js'
 import { boostTool } from './tools/boost.js'
@@ -502,40 +498,6 @@ function registerBoostTool(
   const definition: ToolDefinition = boostTool(deps)
   const execute = definition.execute as (args: unknown, exec: unknown) => Promise<unknown>
 
-  /**
-   * Decorate `status` with the one host fact the control tool cannot probe.
-   *
-   * `BoostHostFacts` covers the meter and the spill backend because those are
-   * also read by the decision path; the workspace registry is owned here, and a
-   * missing one makes every session invisible. The stable code is appended to
-   * `degraded` so the failure mode is diagnosable from inside the product
-   * instead of showing up only as "nothing ever happens". A future move of the
-   * field into `BoostHostFacts` would live in the control tool; this wrapper
-   * keeps the fix inside the assembly without changing another module.
-   */
-  definition.execute = async (args: unknown, exec: unknown) => {
-    const result = await execute(args, exec)
-    try {
-      if ((args as { cmd?: unknown } | undefined)?.cmd !== 'status') return result
-      const envelope = result as { ok?: unknown; data?: unknown } | null | undefined
-      if (envelope?.ok !== true || envelope.data === null || typeof envelope.data !== 'object') {
-        return result
-      }
-      const data = envelope.data as Record<string, unknown>
-      const available = registry() !== undefined
-      data.hasWorkspaceRegistry = available
-      if (!available) {
-        const degraded = Array.isArray(data.degraded) ? [...(data.degraded as unknown[])] : []
-        if (!degraded.includes(ERR_HOST_NO_WORKSPACE_REGISTRY)) {
-          degraded.push(ERR_HOST_NO_WORKSPACE_REGISTRY)
-        }
-        data.degraded = degraded
-      }
-    } catch {
-      // Status is diagnostics; decoration must never turn it into a failure.
-    }
-    return result
-  }
   ctx.tools.register(definition, { when: () => true })
 }
 
@@ -600,6 +562,9 @@ export function apply(ctx: PluginContext, config: unknown): void {
         return spill() !== undefined
       },
       supportsStepWhen: supportsStepWhen(ctx.tools),
+      get hasWorkspaceRegistry() {
+        return registry() !== undefined
+      },
     }
     const fixedOverhead = measureBoostFixedOverhead()
 

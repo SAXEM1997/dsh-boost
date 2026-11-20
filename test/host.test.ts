@@ -235,10 +235,10 @@ test('measureFixedCost prices text with the host estimator', async () => {
 })
 
 test('measureFixedCost is unknown when the estimator is unreachable or lies', async () => {
-  assert.equal(await measureFixedCost('x', async () => undefined), 'unknown')
-  assert.equal(await measureFixedCost('x', async () => ({})), 'unknown')
+  assert.equal(await measureFixedCost('x', async () => undefined as never), 'unknown')
+  assert.equal(await measureFixedCost('x', async () => ({}) as never), 'unknown')
   assert.equal(
-    await measureFixedCost('x', async () => ({ estimateSystemMessage: () => Number.NaN })),
+    await measureFixedCost('x', async () => ({ estimateSystemMessage: () => Number.NaN }) as never),
     'unknown',
   )
   assert.equal(
@@ -258,14 +258,14 @@ test('measureFixedOverhead needs both components and never partially fabricates'
     estimateSystemMessage: () => 10,
     estimateToolsTokens: () => 20,
   }
-  assert.deepEqual(await measureFixedOverhead({}, 'x', async () => complete), {
+  assert.deepEqual(await measureFixedOverhead({}, 'x', (async () => complete) as never), {
     protocolTokens: 10,
     toolSchemaTokens: 20,
     totalTokens: 30,
   })
 
   assert.equal(
-    await measureFixedOverhead({}, 'x', async () => ({ estimateSystemMessage: () => 10 })),
+    await measureFixedOverhead({}, 'x', (async () => ({ estimateSystemMessage: () => 10 })) as never),
     'unknown',
     'the protocol alone is not the total',
   )
@@ -273,11 +273,11 @@ test('measureFixedOverhead needs both components and never partially fabricates'
     await measureFixedOverhead(
       {},
       'x',
-      async () => ({ estimateSystemMessage: () => 10, estimateToolsTokens: () => Number.NaN }),
+      (async () => ({ estimateSystemMessage: () => 10, estimateToolsTokens: () => Number.NaN })) as never,
     ),
     'unknown',
   )
-  assert.equal(await measureFixedOverhead({}, 'x', async () => undefined), 'unknown')
+  assert.equal(await measureFixedOverhead({}, 'x', (async () => undefined) as never), 'unknown')
 })
 
 test('recordRetrieval matches a locator string anywhere in the tool params', () => {
@@ -363,6 +363,7 @@ test('real apply counts a spilled receipt re-read and reports the net projection
   assert.ok(status.data.projection_net_tokens > 0, 'a partial reread cannot flip the saving negative')
   const overhead = await measureBoostFixedOverhead()
   assert.notEqual(overhead, 'unknown')
+  if (overhead === 'unknown') throw new Error('unreachable')
   assert.equal(status.data.fixedOverheadTokens, overhead.totalTokens)
   assert.deepEqual(status.data.fixedOverhead, overhead)
 })
@@ -709,6 +710,7 @@ test('status reports fixedOverheadTokens and the snake_case projection ledger', 
   const data = r.data as Any
   const overhead = await measureBoostFixedOverhead()
   assert.notEqual(overhead, 'unknown')
+  if (overhead === 'unknown') throw new Error('unreachable')
   assert.equal(data.fixedOverheadTokens, overhead.totalTokens)
   assert.deepEqual(data.fixedOverhead, overhead)
   assert.ok(overhead.protocolTokens > 0)

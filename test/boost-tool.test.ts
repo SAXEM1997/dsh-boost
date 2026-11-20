@@ -23,7 +23,6 @@ const dirDeps = async () => {
 /** Await a status call and narrow the success branch for the assertions below. */
 const getStatus = async (d: { scope: ScopeStore; receipts: ReceiptStore }): Promise<BoostStatus> => {
   const r = await runBoost({ args: { cmd: 'status' }, ...d })
-  assert.equal(r.ok, true)
   if (!r.ok) throw new Error(`status failed: ${r.code}`)
   return r.data as BoostStatus
 }
@@ -36,6 +35,34 @@ test('status 输出 shadow 与 projection（否则无法核实）', async () => 
     assert.equal((r.data as any).shadow, true)
     assert.equal((r.data as any).projection, 'shadow')
   }
+})
+
+test('receipts_stopped 是活的：收据停写后 status 报 true', async () => {
+  const d = await deps()
+  const before = await getStatus(d)
+  assert.equal(before.receipts_stopped, false)
+
+  // A store that has given up cannot record evidence; the operator must see the
+  // numbers are frozen rather than read them as current (design §5.2-3).
+  const stopped = new Proxy(d.receipts, {
+    get: (target, key, receiver) => (key === 'stopped' ? () => true : Reflect.get(target, key, receiver)),
+  })
+  const after = await runBoost({ args: { cmd: 'status' }, scope: d.scope, receipts: stopped })
+  assert.equal(after.ok, true)
+  if (!after.ok) return
+  assert.equal((after.data as BoostStatus).receipts_stopped, true)
+})
+
+test('estimateKind 不认 chars/4：只有实测或 unknown，不编造数字', async () => {
+  const d = await deps()
+  const r = await runBoost({
+    args: { cmd: 'status' },
+    ...d,
+    estimateKind: 'chars/4' as never,
+  } as never)
+  assert.equal(r.ok, true)
+  if (!r.ok) return
+  assert.equal((r.data as BoostStatus).estimate_kind, 'unknown')
 })
 
 test('scope-set 带 baseRevision，冲突返回稳定码', async () => {
@@ -677,8 +704,9 @@ test('status 在收据目录不可读时仍返回，空账本而不是内部失�
   const r = await runBoost({ args: { cmd: 'status' }, ...d })
   assert.equal(r.ok, true)
   if (!r.ok) return
-  assert.deepEqual({ ...r.data.counts }, {})
-  assert.equal(r.data.projection_retrievals, 0)
+  const data = r.data as { counts: Record<string, number>; projection_retrievals: number }
+  assert.deepEqual({ ...data.counts }, {})
+  assert.equal(data.projection_retrievals, 0)
 })
 
 // --- rule 6: the definition satisfies the host contract ------------------
