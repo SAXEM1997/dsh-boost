@@ -10,7 +10,19 @@
  *
  * Wiring failures are contained: a host that lacks the services a mount point
  * lives on must load the plugin with a warning, not die loading it. The data
- * root is `$DSH_HOME/boost`, falling back to `~/.dsh/boost`.
+ * root is `<dshHome>/boost` (`config.dshHome` when the row supplies it, else
+ * `$DSH_HOME`), falling back to `~/.dsh/boost`.
+ *
+ * ## Why the mount disposers are dropped
+ *
+ * `ctx.on`, `ctx.systemPrompt.section` and `ctx.tools.register` all return a
+ * disposer. Every one is deliberately discarded. A cordis plugin entry is
+ * mounted in its own context, and disposing that entry tears down everything
+ * registered through it; a retained disposer would add nothing except the
+ * chance that a stale closure removes a mount owned by a later instance. The
+ * assumption is exactly that per-entry ownership — if this plugin is ever
+ * mounted into a context it does not own (a shared host context), the
+ * disposers, or an explicit teardown, become required (review row 76).
  *
  * @module dsh-boost
  */
@@ -32,6 +44,7 @@ import type { SpillBackend } from './projection/apply.js'
 import { ProjectionCounters } from './projection/counters.js'
 import { PROTOCOL_NAME, PROTOCOL_TEXT } from './prompt/protocol.js'
 import { ReceiptStore } from './receipts/store.js'
+import { SELECTOR_PURPOSE } from './selector/jev.js'
 import { resolveWorkspace, supportsStepWhen } from './scope/resolve.js'
 import type { WorkspaceRegistry } from './scope/resolve.js'
 import { ScopeStore } from './scope/store.js'
@@ -54,15 +67,16 @@ function messageOf(error: unknown): string {
 }
 
 /**
- * The host exposes no code for a duplicate section name; its message is the
- * only discriminator (`prompt section "dsh-boost" is already registered …`).
+ * Duplicate applies observed in this process.
+ *
+ * The host exposes no stable duplicate-mount code for a prompt section, so the
+ * plugin cannot match a code. Any throw from the first mount (the section) is
+ * treated as "this plugin is already wired": the counter makes repeated applies
+ * visible in the log without changing the mounts. Matching the error text was
+ * rejected because a wording change would classify a duplicate as a generic
+ * wiring failure (review row 46).
  */
-const ALREADY_REGISTERED = /already registered/
-
-/** Whether a registration failure means this plugin's mounts already exist. */
-function alreadyMounted(error: unknown): boolean {
-  return ALREADY_REGISTERED.test(messageOf(error))
-}
+let duplicateMountAttempts = 0
 
 /**
  * Read a soft host service through `ctx.get`.
@@ -246,6 +260,8 @@ type RequestPayload = {
   agent?: unknown
   turn?: unknown
   step?: unknown
+  /** Captured step route on `agent/pre-step` (also the selector's inheritance source). */
+  modelSelection?: unknown
 }
 
 /**
@@ -308,6 +324,42 @@ function patchProtocolSection(assembly: unknown, visible: boolean): unknown {
   return { ...(value as Record<string, unknown>), sections }
 }
 
+/** The marker every protocol text carries; a system prompt without it lost the section. */
+const PROTOCOL_PROBE = '<CHISEL_PLAN>'
+
+/**
+ * The system-role text of one model request, or `undefined` when the request
+ * carries no system prompt at all.
+ *
+ * Loop-built requests put the rendered prompt in the leading system-role
+ * message (``GenerateOptions.messages``); one-shot callers use `system`. A
+ * request with neither is a diagnostic that cannot tell us whether the section
+ * landed, so it is not evidence of a complete-section swallow.
+ */
+function systemTextOf(options: unknown): string | undefined {
+  const source = options as { messages?: unknown; system?: unknown } | null | undefined
+  if (typeof source?.system === 'string' && source.system.length > 0) return source.system
+  const messages = source?.messages
+  if (!Array.isArray(messages)) return undefined
+  let seen = false
+  let text = ''
+  for (const message of messages) {
+    const entry = message as { role?: unknown; content?: unknown } | null
+    if (entry?.role !== 'system') continue
+    seen = true
+    if (typeof entry.content === 'string') {
+      text += entry.content
+      continue
+    }
+    if (!Array.isArray(entry.content)) continue
+    for (const block of entry.content) {
+      const part = block as { type?: unknown; text?: unknown } | null
+      if (part?.type === 'text' && typeof part.text === 'string') text += part.text
+    }
+  }
+  return seen ? text : undefined
+}
+
 /**
  * Mount the host events the assembly owns.
  *
@@ -358,20 +410,27 @@ function wireSessionEvents(
   /** Session ids observed on `agent/request`. */
   const requestSeen = new Set<string>()
   let warnedMissingRequest = false
+  /** Warn once per process about a prompt that swallowed the protocol section. */
+  let warnedCompleteSection = false
 
   ctx.on('system-prompt/assemble', async (assembly: unknown, context: unknown, next: () => unknown) => {
     const resolved = await next()
     try {
-      const carrier = (context ?? {}) as { agent?: unknown; scope?: unknown }
-      const agent = carrier.agent ?? carrier.scope
+      // `dsh-agent` augments `AssembleContext` with the real `Agent`; `scope`
+      // is an opaque `ScopeKey` and is never read as an Agent (review row 11).
+      // A diagnostic assembly has no agent: the documented no-scope view, so
+      // the section is suppressed and counted rather than keyed on a guess.
+      const carrier = (context ?? {}) as { agent?: unknown }
+      const agent = carrier.agent
       const sessionId = sessionIdOf(agent)
       if (sessionId === undefined) {
-        // No agent/scope is the documented no-scope view: the provider has
-        // nothing to key the judgement on and returns '', so this assembly
-        // suppresses the section. Count the decision, not the section's
-        // presence — design §5.5:378 asks for every assembly to be judged.
+        // The provider has nothing to key the judgement on and returns '';
+        // clear the section explicitly so a stale provider answer cannot leak
+        // into an assembly with no agent. Count the decision, not the
+        // section's presence — design §5.5:378 asks for every assembly to be
+        // judged.
         counters.protocolSuppressed()
-        return resolved
+        return patchProtocolSection(resolved, false)
       }
       const visible = await warmVisibility(scope, registry, agent, sessionId, workspaces)
       // Same rule for an invisible workspace: the section is suppressed for
@@ -407,6 +466,11 @@ function wireSessionEvents(
       } catch {
         // History is an estimate; a bad observation is not a step failure.
       }
+      // `agent/pre-step` already carries the captured step selection. It is
+      // the non-deprecated source for the selector route; `agent/request`'s
+      // resolved config remains a fallback for hosts that only populate it
+      // there (review row 37). A later request overwrites with the same route.
+      rememberRoute(routes, sessionId, request.modelSelection)
     }
     return next()
   })
@@ -447,7 +511,8 @@ function wireSessionEvents(
   // passed through untouched.
   ctx.on('llm/stream', (options: unknown, next: () => unknown) => {
     try {
-      const sessionId = (options as { sessionId?: unknown } | undefined)?.sessionId
+      const request = (options ?? {}) as { sessionId?: unknown; purpose?: unknown }
+      const sessionId = request.sessionId
       if (
         !warnedMissingRequest &&
         typeof sessionId === 'string' &&
@@ -458,6 +523,33 @@ function wireSessionEvents(
         ctx.logger?.warn?.(
           'ERR_HOST_NO_AGENT_REQUEST: agent/request was not observed before llm/stream; the selector route cannot be captured (the event is deprecated and may have been removed)',
         )
+      }
+
+      // A `complete: true` prompt section replaces every other section after
+      // the assembly waterfall, so the protocol text `system-prompt/assemble`
+      // patched in is gone from the request the model actually receives. The
+      // host exposes no code or flag for that restoration; the outgoing system
+      // prompt is the first place it is observable. Detect it, count it, and
+      // fail closed: without the protocol there is nothing to teach the plan
+      // grammar, so substitution (and the projection that shares the same
+      // visibility gate) must not act for this request (review row 12).
+      if (
+        typeof sessionId === 'string' &&
+        request.purpose !== SELECTOR_PURPOSE &&
+        scope.judgement(sessionId)
+      ) {
+        const systemText = systemTextOf(options)
+        if (systemText !== undefined && !systemText.includes(PROTOCOL_PROBE)) {
+          counters.protocolSuppressed()
+          counters.protocolMissing()
+          scope.remember(sessionId, false)
+          if (!warnedCompleteSection) {
+            warnedCompleteSection = true
+            ctx.logger?.warn?.(
+              'ERR_HOST_COMPLETE_SECTION: the final system prompt does not carry the dsh-boost protocol section (a complete prompt section replaced the assembly); substitution is disabled for affected requests',
+            )
+          }
+        }
       }
     } catch {
       // Detection must never break the model request.
@@ -553,7 +645,7 @@ export function apply(ctx: PluginContext, config: unknown): void {
   try {
     // One root rule for both stores (design §10); `resolveBoostRoot` is the
     // only implementation, so `apply` and the hook stores cannot diverge.
-    const root = resolveBoostRoot()
+    const root = resolveBoostRoot(config)
     const scope = new ScopeStore(root, { warn: (message: string) => ctx.logger?.warn?.(message) })
     const receipts = new ReceiptStore(root)
     const anchors = new AnchorStore()
@@ -636,8 +728,20 @@ export function apply(ctx: PluginContext, config: unknown): void {
       llm: ctx.llm,
       selectorRoute: (sessionId) => routes.get(sessionId),
     }
-    registerHooks(ctx, deps)
-    hooksMounted = true
+    // The section mount is the first thing `registerHooks` touches and the
+    // host's duplicate error carries no code: any throw here means a previous
+    // apply already owns the mounts. Count it and leave them untouched instead
+    // of risking a second hook registration.
+    try {
+      registerHooks(ctx, deps)
+      hooksMounted = true
+    } catch (error) {
+      duplicateMountAttempts += 1
+      ctx.logger?.warn?.(
+        `dsh-boost: ERR_BOOST_ALREADY_MOUNTED: duplicate apply #${duplicateMountAttempts} found an existing mount; registration skipped (${messageOf(error)})`,
+      )
+      return
+    }
 
     // The clock/visibility warm and the session-end cleanup. Wired separately
     // so a host that cannot accept these events still gets the tool below.
@@ -667,16 +771,14 @@ export function apply(ctx: PluginContext, config: unknown): void {
           return horizon.remaining()
         },
         locatorEvictions: () => retrievals.evictions(),
+        receiptReadErrors: () => receipts.readErrors(),
         unknownFamilies: () => projectionCounters.unknownFamilies(),
         unknownTools: () => projectionCounters.unknownToolCounts(),
         protocolSuppressed: () => projectionCounters.protocolSuppressions(),
+        completeSectionSuppressions: () => projectionCounters.protocolMissings(),
       },
     )
   } catch (error) {
-    // A second apply fails on the duplicate prompt section first (registerHooks
-    // mounts it first), which means the plugin is already wired — not that
-    // wiring failed. Returning here leaves the existing mounts untouched.
-    if (alreadyMounted(error)) return
     // The tool is the user's only control surface, so its failure must not be
     // reported as a hook failure (that would hide the degradation behind a
     // misleading message).

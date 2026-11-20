@@ -314,6 +314,46 @@ function recordingSpill(): Any {
   return spill
 }
 
+test('row 37: the selector route is captured from agent/pre-step modelSelection', async (t) => {
+  const a = await createAssembly()
+  t.after(() => a.dispose())
+
+  // Warm visibility through the real assembly seam (no agent/request yet).
+  const assembly = { sections: [], contexts: [], variables: {} }
+  await a.host.callHook(
+    'system-prompt/assemble',
+    [assembly, { agent, scope: agent }],
+    async () => assembly,
+  )
+  // The host's non-deprecated preStep carries the captured selection.
+  await a.host.callHook(
+    'agent/pre-step',
+    [
+      { agent, messages: [], turn: 1, step: 1, signal: new AbortController().signal, modelSelection: { ...ROUTE } },
+    ],
+    async () => ({ kind: 'enter', messages: [] }),
+  )
+
+  a.state.main = [
+    { type: 'text-delta', index: 0, text: planText([CANDIDATE_A, CANDIDATE_B]) },
+    { type: 'usage', usage: { inputTokens: 100_000, cacheReadTokens: 100_000, outputTokens: 1 } },
+    { type: 'finish', reason: { kind: 'stop' } },
+  ]
+  await collect(a.host.stream(SESSION, {}))
+  a.state.selector = [
+    { type: 'text-delta', index: 0, text: 'B' },
+    { type: 'finish', reason: { kind: 'stop' } },
+  ]
+  await a.host.callHook(
+    'tools/post-execute',
+    [{ name: 'read', callId: 'root-call', agent }, { content: [{ type: 'text', text: 'BOUND-VALUE' }] }],
+    async () => ({ kind: 'accept' }),
+  )
+  assert.equal(a.state.selectorRequests.length, 1, 'the multi-candidate plan must reach the selector')
+  assert.equal(a.state.selectorRequests[0].provider, ROUTE.provider)
+  assert.equal(a.state.selectorRequests[0].model, ROUTE.model)
+})
+
 // ---------------------------------------------------------------------------
 // Obligations 2/3/4: visibility, the clock warm, and the selector's bound args
 // ---------------------------------------------------------------------------

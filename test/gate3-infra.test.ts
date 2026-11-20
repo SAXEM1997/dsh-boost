@@ -444,3 +444,76 @@ test('status counts suppressed prompt assemblies, live, without per-assembly rec
   assert.match(sectionText(visible), /<CHISEL_PLAN>/)
   assert.equal((await status(app.host)).protocol_suppressed, 2)
 })
+
+// ---------------------------------------------------------------------------
+// Row 11: AssembleContext.scope is an opaque ScopeKey, never an Agent.
+// Row 12: a complete prompt section replaces the waterfall result; detect it
+// on the outgoing request and fail closed instead of pretending to be active.
+// ---------------------------------------------------------------------------
+
+test('row 11: an assembly without context.agent is suppressed even when scope is agent-shaped', async () => {
+  const app = await applyHost()
+  await new ScopeStore(app.root).write(doc => ({ ...doc, mode: 'global' }), 0)
+  app.services.set('workspaceRegistry', GLOBAL_REGISTRY)
+  const agent = makeAgent('s1', '/real/w/a')
+
+  // Warm the judgement cache so the only reason to suppress is the missing
+  // agent, not visibility.
+  const warm = await preStep(app.host, agent, 1, 1)
+  assert.match(sectionText(warm), /<CHISEL_PLAN>/)
+  const before = await status(app.host)
+
+  const section = app.host.section()
+  assert.ok(section)
+  const assembly = {
+    sections: [{ name: section.name, text: 'STALE-PROVIDER-TEXT' }],
+    contexts: [],
+    variables: {},
+  }
+  // `scope` happens to be the agent on the current rc; the listener must not
+  // rely on that shape. No `agent` field means the documented no-scope view.
+  const out = await app.host.callHook(
+    'system-prompt/assemble',
+    [assembly, { scope: agent }],
+    () => assembly,
+  )
+  assert.equal(sectionText(out), '')
+
+  const after = await status(app.host)
+  assert.equal(after.protocol_suppressed, before.protocol_suppressed + 1)
+})
+
+test('row 12: a complete section swallowing the protocol is detected and substitution fails closed', async () => {
+  const app = await applyHost()
+  await new ScopeStore(app.root).write(doc => ({ ...doc, mode: 'global' }), 0)
+  app.services.set('workspaceRegistry', GLOBAL_REGISTRY)
+  const agent = makeAgent('s1', '/real/w/a')
+
+  // Request 1 is correct: the warm runs before the section provider resolves.
+  const first = await preStep(app.host, agent, 1, 1)
+  assert.match(sectionText(first), /<CHISEL_PLAN>/)
+  const before = await status(app.host)
+  assert.equal(before.degraded.includes('ERR_HOST_COMPLETE_SECTION'), false)
+
+  // The host restores a `complete: true` section after the waterfall: the
+  // request the model receives carries only that section, not our patch.
+  app.host.stream('s1', {
+    messages: [{ role: 'system', content: [{ type: 'text', text: 'persona only' }] }],
+  })
+
+  const after = await status(app.host)
+  assert.ok(after.degraded.includes('ERR_HOST_COMPLETE_SECTION'), JSON.stringify(after.degraded))
+  assert.equal(after.protocol_suppressed, before.protocol_suppressed + 1)
+
+  // Fail closed: the tool result passes through untouched and the decision is
+  // auditable, because the model was never taught the plan grammar.
+  await app.host.callHook(
+    'tools/post-execute',
+    [
+      { name: 'read', callId: 'c1', agent, arguments: { file_path: '/real/w/a/f' } },
+      { content: [{ type: 'text', text: 'x' }] },
+    ],
+    () => ({ kind: 'accept' }),
+  )
+  assert.deepEqual(await receiptCodes(app.root, 's1'), ['skip:no-scope'])
+})

@@ -24,6 +24,7 @@ export class ProjectionCounters {
   private unknownFamilyCount = 0
   private readonly unknownTools = new Map<string, number>()
   private suppressedAssemblies = 0
+  private missingProtocols = 0
 
   /**
    * Count one **decorated** call (`mcp__*`) whose family is not configured.
@@ -70,5 +71,24 @@ export class ProjectionCounters {
   /** Prompt assemblies suppressed since load; read live by `boost status`. */
   protocolSuppressions(): number {
     return this.suppressedAssemblies
+  }
+
+  /**
+   * Count one model request whose final system prompt lost the protocol
+   * section to a `complete: true` section.
+   *
+   * Distinct from {@link protocolSuppressed}: that counter includes correctly
+   * invisible workspaces, while this one means the plugin judged the workspace
+   * visible and still could not teach the model the plan grammar. It is the
+   * operator's only signal that the prompt belongs to another plugin (review
+   * row 12), and it drives the stable `ERR_HOST_COMPLETE_SECTION` code.
+   */
+  protocolMissing(): void {
+    this.missingProtocols += 1
+  }
+
+  /** Model requests that lost the protocol section since load. */
+  protocolMissings(): number {
+    return this.missingProtocols
   }
 }

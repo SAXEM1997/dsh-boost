@@ -1,6 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { readFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import * as plugin from '../src/index.ts'
@@ -103,21 +103,81 @@ test('apply 在 tools.resolve 存在时注册 boost 工具，when 豁免 scope',
   )
 })
 
-test('supportsStepWhen 为假时整族不注册并告警 ERR_HOST_NO_STEP_WHEN', () => {
+test('没有 tools.register 时整族不注册并告警 ERR_HOST_NO_STEP_WHEN', () => {
   const warnings: string[] = []
   let registrations = 0
   const host = fakeHost()
   host.logger = { info: () => {}, warn: (msg: string) => warnings.push(msg) }
   host.tools = {
-    register: () => {
-      registrations += 1
-    },
-    resolve: undefined,
+    register: undefined,
+    resolve: () => [],
   }
 
   assert.doesNotThrow(() => plugin.apply(host as unknown as PluginContext, {}))
   assert.equal(registrations, 0)
   assert.ok(warnings.includes('ERR_HOST_NO_STEP_WHEN'), JSON.stringify(warnings))
+})
+
+test('有 tools.register、没有 tools.resolve 时 boost 工具仍注册（row 44）', () => {
+  const warnings: string[] = []
+  const host = fakeHost()
+  host.logger = { info: () => {}, warn: (msg: string) => warnings.push(msg) }
+  host.tools.resolve = undefined
+
+  plugin.apply(host as unknown as PluginContext, {})
+  assert.equal(host.tools.definitions.length, 1)
+  assert.equal(host.tools.definitions[0].def.name, 'boost')
+  assert.equal(warnings.includes('ERR_HOST_NO_STEP_WHEN'), false, JSON.stringify(warnings))
+})
+
+test('apply 从 config.dshHome 装配数据根（row 75）', async (t) => {
+  const dir = await mkdtemp(join(tmpdir(), 'dsh-boost-home-'))
+  const envDir = await mkdtemp(join(tmpdir(), 'dsh-boost-env-'))
+  t.after(() => Promise.all([rm(dir, { recursive: true, force: true }), rm(envDir, { recursive: true, force: true })]))
+  await mkdir(join(dir, 'boost'), { recursive: true })
+  await writeFile(
+    join(dir, 'boost', 'scope.json'),
+    JSON.stringify({ version: 2, revision: 7, mode: 'selected', workspaceIds: [], shadow: true, projection: 'shadow' }),
+  )
+
+  const saved = process.env.DSH_HOME
+  process.env.DSH_HOME = envDir
+  t.after(() => {
+    if (saved === undefined) delete process.env.DSH_HOME
+    else process.env.DSH_HOME = saved
+  })
+
+  const host = fakeHost()
+  plugin.apply(host as unknown as PluginContext, { dshHome: dir })
+  const registration = host.tools.definitions.find((entry: any) => entry.def?.name === 'boost')
+  assert.ok(registration)
+  const result = await registration.def.execute({ cmd: 'status' }, {})
+  assert.equal(result.ok, true, JSON.stringify(result))
+  assert.equal(result.data.scope.revision, 7)
+})
+
+test('重复 apply 按已挂载处理：错误措辞变化也不重复注册（row 46）', () => {
+  const host = fakeHost()
+  plugin.apply(host as unknown as PluginContext, {})
+  const sectionBefore = host.section('dsh-boost')
+  const postExecuteBefore = host.hookCount('tools/post-execute')
+
+  const warnings: string[] = []
+  host.logger = { info: () => {}, warn: (msg: string) => warnings.push(msg) }
+  // The host exposes no duplicate code; a reworded message must not turn the
+  // second apply into a fresh mount or into a generic wiring failure.
+  host.systemPrompt.section = () => {
+    throw new Error('E_DUPLICATE_MOUNT: prompt slot taken')
+  }
+
+  assert.doesNotThrow(() => plugin.apply(host as unknown as PluginContext, {}))
+  assert.equal(host.section('dsh-boost'), sectionBefore)
+  assert.equal(host.hookCount('tools/post-execute'), postExecuteBefore)
+  assert.equal(host.tools.definitions.length, 1)
+  assert.ok(
+    warnings.some(msg => msg.includes('ERR_BOOST_ALREADY_MOUNTED')),
+    JSON.stringify(warnings),
+  )
 })
 
 test('tools.register 抛错时独立告警带稳定码，不冒充 hook 注册失败', () => {
