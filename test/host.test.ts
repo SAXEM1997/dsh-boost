@@ -9,8 +9,8 @@
  * 3. `familyOf` is exercised through the real `apply`, because a unit test of
  *    the mapping alone cannot catch the production hook still carrying its own
  *    private copy (the silent-disable trap).
- * 4. `measureFixedCost` never fabricates a number: an unreachable estimator is
- *    `'unknown'`.
+ * 4. `measureFixedOverhead` never fabricates a number: an unreachable estimator
+ *    is `'unknown'`.
  * 5. `recordRetrieval` counts a later read of a spill locator, and the count
  *    reaches `boost status` through the production path (`apply` → projection
  *    → retrieval receipt → `status`), not through hand-built deps.

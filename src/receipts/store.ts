@@ -277,10 +277,11 @@ function buildReceipt(r: ReceiptInput): Receipt {
  * Bound the `args` a receipt carries.
  *
  * The model writes the arguments, so an otherwise-valid plan can carry a
- * multi-kilobyte blob into every receipt line. The hash is over the **full**
- * args (computed before this runs), so identity is unaffected by the cap; the
- * stored copy is what an operator reads, and a `truncated_json` marker with
- * `args_truncated` says so plainly rather than silently shortening a command.
+ * multi-kilobyte blob into every receipt line. The hash is computed before this
+ * cap, over the depth-bounded tree `boundArgs` produced (see `receiptHash`), so
+ * identity is unaffected by this display cap; the stored copy is what an
+ * operator reads, and a `truncated_json` marker with `args_truncated` says so
+ * plainly rather than silently shortening a command.
  */
 function capArgs(receipt: Receipt): Receipt {
   if (receipt.args === undefined) return receipt
@@ -440,11 +441,11 @@ export class ReceiptStore {
   /** *Consecutive* write failures; reset by any successful append. */
   private failureCount = 0
   /**
-   * Shard reads skipped by the most recent **whole-store** scan (EACCES,
-   * EISDIR, …). A scan that read every shard resets it to zero, so a repaired
-   * shard drops `ERR_RECEIPTS_UNREADABLE` instead of pinning it for the life of
-   * the process. Named scans neither count here nor reset it: they do not cover
-   * the shard set status reports.
+   * Shard reads skipped by whole-store scans since the last scan that read
+   * every shard (EACCES, EISDIR, …). A fully readable scan resets it to zero,
+   * so a repaired shard drops `ERR_RECEIPTS_UNREADABLE` instead of pinning it
+   * for the life of the process. Named scans neither count here nor reset it:
+   * they do not cover the shard set status reports.
    */
   private readFailureCount = 0
   /** Whether the most recent whole-store scan hit {@link MAX_SCAN_SHARDS}. */
@@ -509,11 +510,12 @@ export class ReceiptStore {
    * `ERR_BOOST_INTERNAL` for the entire ledger. Scans skip the shard and count
    * it here so status can report a stable degraded code.
    *
-   * The count describes the **last completed whole-store scan**, not the
-   * process lifetime: a scan that read every shard resets it, so repairing the
-   * shard and re-running `status` drops the code, as the README instructs. A
-   * named `scan(sessionId)`/`count(sessionId)` neither contributes to nor
-   * clears it, because it does not cover the shard set the status total claims.
+   * The count describes the skipped reads **since the last whole-store scan
+   * that read every shard**, not the process lifetime: a fully readable scan
+   * resets it, so repairing the shard and re-running `status` drops the code,
+   * as the README instructs. A named `scan(sessionId)`/`count(sessionId)`
+   * neither contributes to nor clears it, because it does not cover the shard
+   * set the status total claims.
    */
   readErrors(): number {
     return this.readFailureCount

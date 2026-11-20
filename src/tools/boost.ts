@@ -204,13 +204,14 @@ export interface BoostDeps {
   /** Locators evicted by the per-session cap; status-time read. */
   locatorEvictions?: () => number
   /**
-   * Receipt shards the last whole-store scan had to skip; status-time read.
+   * Receipt shards whole-store scans had to skip since the last scan that read
+   * every shard; status-time read.
    *
    * This is the **only** source of `ERR_RECEIPTS_UNREADABLE`: the store skips
    * an unreadable shard per shard and reports the count, so `status` has one
    * mechanism rather than a status-side scan flag that no production store can
    * raise. Absent means the store has no such counter (or none was skipped);
-   * the count clears when a later scan reads every shard.
+   * the count clears when a scan reads every shard.
    */
   receiptReadErrors?: () => number
   /**
@@ -679,8 +680,9 @@ async function statusCommand(deps: BoostDeps): Promise<BoostResult> {
   const degraded = degradationCodes(totals.degraded, read, deps.host, fixedOverhead)
   // A shard the scan could not read is evidence, not a status failure: the
   // healthy shards were counted and the operator gets a stable code saying the
-  // ledger is incomplete. `readErrors()` is the only producer; it describes the
-  // last whole-store scan, so a repaired shard clears the code.
+  // ledger is incomplete. `readErrors()` is the only producer; it counts skips
+  // since the last fully readable whole-store scan, so a repaired shard clears
+  // the code.
   if (counterOf(deps.receiptReadErrors) > 0 && !degraded.includes(ERR_RECEIPTS_UNREADABLE)) {
     degraded.push(ERR_RECEIPTS_UNREADABLE)
   }

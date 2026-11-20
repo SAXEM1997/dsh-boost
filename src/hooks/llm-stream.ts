@@ -90,8 +90,11 @@
  * The split is intentional: `agent/pre-step` is the seam the host documents for
  * turn/step, while the selector's effective route is only available from the
  * request waterfall's resolved config. Both listeners copy the clock so a host
- * that drops the deprecated event still advances turns; only `agent/request`
- * warms the scope judgement and records the route today.
+ * that drops the deprecated event still advances turns. Both record the route:
+ * `agent/pre-step` from the captured `modelSelection` (the primary source since
+ * row 37), and `agent/request` from the resolved config as the fallback for
+ * hosts that only populate it there; only `agent/request` warms the scope
+ * judgement.
  *
  * `onModelRequest` copies the host turn/step (never a plugin count) and resets
  * that session's budget only when its turn changes. `notePlanTurn` is the

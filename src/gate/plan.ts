@@ -148,9 +148,10 @@ function container(value: unknown): value is Record<string, unknown> | unknown[]
  * Two families are rejected anywhere in the tree: `$`-prefixed directives
  * (except `$public`, whose contents are otherwise left to binding) and the
  * prototype-affecting names `__proto__`, `constructor`, `prototype`. The
- * latter are dropped by `receiptHash`'s `sortKeys` (which assigns
- * `sorted[key]`) even though the stored receipt keeps them, so accepting them
- * would be a hash collision in an audit field.
+ * latter are never legitimate tool-argument names. `receiptHash`'s `sortKeys`
+ * now builds through `Object.create(null)`, so an own `__proto__` key is hashed
+ * rather than swallowed (row 33); rejecting these names here is
+ * defence-in-depth, not a workaround for that hash bug.
  *
  * Only containers are stacked, so a large array of scalars costs one pass.
  * The walk is iterative because `JSON.parse` accepts nesting far deeper than a
