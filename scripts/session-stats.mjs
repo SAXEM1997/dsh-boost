@@ -21,7 +21,8 @@
  *
  * The script is delivered to operators (design §11) and therefore imports only
  * `node:` builtins; it must not import `src/` or require the package's build.
- * It runs under plain `node` (>= 22.18 for `zlib.zstdDecompressSync`).
+ * It runs under plain `node` (the package's `engines.node` floor, >= 24.9; `zlib.zstdDecompressSync`
+ * is available well below that, but the floor is what a maintainer can rely on).
  *
  * ## The §2.1 definitions implemented here
  *

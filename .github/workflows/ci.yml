@@ -2,15 +2,21 @@
 #
 # The repository's live remote is the internal GitLab mirror; this workflow is
 # staged for the public GitHub mirror (see the repository field in
-# package.json). It runs the same single command a maintainer runs locally:
-# `npm publish --dry-run` executes prepublishOnly -> `npm run ci` (typecheck,
-# tests, clean build) -> `npm run verify:package` (exact tarball allowlist,
-# dist/index.js guard, exports targets, install with --ignore-scripts + probe +
-# TypeScript consumer, then a second install with lifecycle scripts enabled).
+# package.json). It runs prepublishOnly's two commands explicitly, in order:
+# `npm run ci` (typecheck, tests, clean build) then `npm run verify:package`
+# (exact tarball allowlist, dist/index.js guard, exports targets, install with
+# --ignore-scripts + probe + TypeScript consumer, then a second install with
+# lifecycle scripts enabled).
 #
-# It never publishes: the only npm publish invocation carries --dry-run, there
-# is no registry token, and a `v*` tag does not upload anything. See
-# docs/RELEASE.md §6.
+# This used to be `npm publish --dry-run`, on the theory that the dry-run was
+# the same gate a maintainer runs. It is not: npm runs prepublishOnly first and
+# only then checks the registry, so once 0.1.0 exists every run ends in
+# `You cannot publish over the previously published versions: 0.1.0` (exit 1)
+# after several minutes of green work. The two commands below are exactly what
+# prepublishOnly runs; no --force, and nothing is uploaded.
+#
+# It never publishes: there is no npm publish invocation, no registry token,
+# and a `v*` tag does not upload anything. See docs/RELEASE.md §6.
 #
 # The committed lockfile resolves every tarball to registry.npmmirror.com.
 # `--registry` does not override those URLs, so rewrite the runner's copy to
@@ -47,4 +53,7 @@ jobs:
           fi
           grep -q 'registry.npmjs.org' package-lock.json
       - run: npm ci --registry=https://registry.npmjs.org/
-      - run: npm publish --dry-run
+      # The same two commands `prepublishOnly` runs. `npm publish --dry-run`
+      # cannot stand in for them: npm rejects the already-published version
+      # after prepublishOnly has done all the work (row 17, round 3 review).
+      - run: npm run ci && npm run verify:package

@@ -10,11 +10,6 @@ Design rationale lives in `docs/superpowers/specs/`; the release-acceptance proc
 
 ## [Unreleased]
 
-### 修复 Fixed
-
-- `boost status` 的分片扫描超过 256 个时报告 `ERR_RECEIPTS_TRUNCATED`，不再把截断后的计数当作完整总数。
-  `boost status` reports `ERR_RECEIPTS_TRUNCATED` when the shard scan exceeds 256, instead of presenting the truncated counts as complete totals.
-
 ## [0.1.0] - 2026-11-20
 
 <!-- 版本链接暂缺：还没有 v0.1.0 标签，任何 releases/tag 或 compare 链接今天都会 404。
@@ -90,6 +85,11 @@ of 399 tokens per request.
   `require`/`default` (Node >= 24.9 require(esm) works); `src/` is no longer shipped and the
   `dist` source maps inline the sources. 0.1.0 is the first release: the
   registry `latest` tag is 0.1.0, so `dsh-boost@^0.1.0` is simply correct.
+
+### 修复 Fixed
+
+- `boost status` 的分片扫描超过 256 个时报告 `ERR_RECEIPTS_TRUNCATED`，不再把截断后的计数当作完整总数。
+  `boost status` reports `ERR_RECEIPTS_TRUNCATED` when the shard scan exceeds 256, instead of presenting the truncated counts as complete totals.
 
 ### 已知限制 Known limitations
 

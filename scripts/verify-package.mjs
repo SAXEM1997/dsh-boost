@@ -4,7 +4,8 @@
  *
  * `npm publish` used to accept a package whose `files` array omitted `dist`
  * (the working tree still had it, so the local checks passed). This script
- * packs exactly what `npm publish` would upload and then proves the artifact:
+ * builds the package explicitly, then packs exactly what `npm publish` would
+ * upload and proves the artifact:
  *
  *   1. the tarball is an exact allowlist: every entry is accounted for by a
  *      source file (`dist/`), a declared locale, a fixed root file, or the
@@ -24,12 +25,18 @@
  *      install is probed too. This is the only check that catches a
  *      `postinstall` that breaks every real user.
  *
+ * The default path runs `npm run build` and then `npm pack --ignore-scripts`,
+ * so the artifact is the tree that build produced: packing with lifecycle
+ * scripts enabled would let `prepare` rebuild (and thereby repair) the tree
+ * inside the pack step, after which the dist assertions no longer describe the
+ * tree under test.
+ *
  * The receipt (`ok: true`) is JSON on stdout and names the install each
  * assertion used. On failure the temp directory is kept and its path is
  * printed so the packed artifact can be inspected.
  *
  * Usage:
- *   node scripts/verify-package.mjs                 # pack the working tree
+ *   node scripts/verify-package.mjs                 # build, then pack (no scripts)
  *   node scripts/verify-package.mjs --tarball <tgz> # verify an existing tarball
  *
  * `--tarball` is the guard for a hand-built artifact: a tarball without
@@ -187,8 +194,20 @@ function expectedTarballEntries() {
  * Reject the first entry that is not accounted for, then name every missing
  * entry. This is deliberately an exact allowlist, not a forbidden-prefix list:
  * `package/dist/ghost.js` is unexpected even though its prefix is allowed.
+ *
+ * The declared patch is checked against the source tree first. If
+ * `dsh.bundle.patch` names a missing file, the still-shipped old patch is the
+ * first *unexpected* entry, so checking entries first reports the healthy file
+ * as the problem and never names the broken declaration.
  */
 function assertTarballAllowlist(listed) {
+  const declaredPatch = bundlePatchOf(pkg, 'package.json')
+  if (!existsSync(join(root, declaredPatch))) {
+    throw new Error(
+      `dsh.bundle.patch declares a file that does not exist: ${declaredPatch}\n` +
+        'fix package.json `dsh.bundle.patch`, or add the file it names',
+    )
+  }
   const expected = expectedTarballEntries()
   const present = new Set(listed)
   for (const entry of listed) {
@@ -402,8 +421,9 @@ function verify({ tarball, tarballName, packed }) {
     .map((line) => line.trim())
     .filter(Boolean)
 
-  // The hard publish guard: `prepublishOnly` calls this script, so a pack
-  // that somehow lost `dist/index.js` stops before any install.
+  // The hard publish guard: `prepublishOnly` calls this script, so a tarball
+  // that lost `dist/index.js` — a `files`/ignore filter dropped it, or the
+  // artifact came in through `--tarball` — stops before any install.
   if (!listed.includes('package/dist/index.js')) {
     throw new Error(
       'publish blocked: tarball has no package/dist/index.js ' +
@@ -412,6 +432,8 @@ function verify({ tarball, tarballName, packed }) {
   }
   checks.push({ name: 'dist-index-present', install: null })
 
+  // Exact allowlist for the artifact actually packed (default path: the tree
+  // `npm run build` just produced) or handed in with `--tarball`.
   assertTarballAllowlist(listed)
   checks.push({ name: 'tarball-allowlist', install: null })
 
@@ -456,7 +478,7 @@ function verify({ tarball, tarballName, packed }) {
       `${JSON.stringify(
         {
           ok: true,
-          source: packed ? 'npm pack' : '--tarball',
+          source: packed ? 'npm pack --ignore-scripts' : '--tarball',
           tarball: tarballName,
           bytes,
           entries: listed.length,
@@ -489,7 +511,16 @@ function main() {
   try {
     const packDir = join(work, 'pack')
     mkdirSync(packDir)
-    run(npm, ['pack', '--pack-destination', packDir, '--loglevel=error'], {
+    // Build here, explicitly. `npm pack` with lifecycle scripts enabled would
+    // run `prepare` -> clean -> tsc inside the pack step, so a tampered or
+    // stale `dist/` would be silently repaired instead of reported, and the
+    // artifact would not be the tree under test. `--ignore-scripts` below
+    // makes the packed tree exactly what this build produced.
+    process.stderr.write('verify-package: npm run build (before packing)\n')
+    // Build output goes to stderr: stdout is reserved for the JSON receipt, so
+    // `npm run --silent verify:package | jq` keeps working.
+    run(npm, ['run', 'build'], { cwd: root, stdio: ['ignore', 2, 2] })
+    run(npm, ['pack', '--ignore-scripts', '--pack-destination', packDir, '--loglevel=error'], {
       cwd: root,
       stdio: ['ignore', 'ignore', 'inherit'],
     })

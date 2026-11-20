@@ -23,12 +23,14 @@ stays convenient for humans and is intentionally noisy.
 
 ## Package verification
 
-`npm run verify:package` packs the artifact exactly as `npm publish` would,
-installs it into a throwaway project with `--ignore-scripts`, then asserts the
-tarball entries, the absence of dev-only trees and orphaned `dist/` output, the
-ESM import, the `require()` path, `name`/`inject`/`apply`, and the
-`./package.json` + `./locale/*.json` export subpaths. `prepublishOnly` runs it
-after `npm run ci`, so a release cannot skip it.
+`npm run verify:package` runs `npm run build` and then `npm pack --ignore-scripts`, so the pack
+step cannot rebuild the tree it is verifying: the artifact is exactly what that build produced.
+It installs the tarball into a throwaway project with `--ignore-scripts`, then asserts the exact
+tarball allowlist (on a hand-built artifact an extra `dist/` entry such as `dist/ghost.js` is
+named, and a missing one is listed), the ESM import, the `require()` path, `name`/`inject`/`apply`,
+the `./package.json` + `./locale/*.json` export subpaths, and a tiny TypeScript consumer.
+`--tarball <tgz>` runs the same assertions on an artifact you built yourself, without rebuilding.
+`prepublishOnly` runs it after `npm run ci`, so a release cannot skip it.
 
 ## Build
 

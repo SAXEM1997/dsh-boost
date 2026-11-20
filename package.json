@@ -1,7 +1,7 @@
 {
   "name": "dsh-boost",
   "version": "0.1.0",
-  "description": "Cut DSH token usage by projecting tool receipts and skipping deterministic read-only calls.",
+  "description": "Cut DSH token usage by projecting tool receipts and substituting deterministic read-only calls.",
   "type": "module",
   "license": "Apache-2.0",
   "repository": {
@@ -48,7 +48,7 @@
     "@deepseek-ai/dsh-tools": "0.2.2-rc.4",
     "@deepseek-ai/dsh-spill-policy": "0.2.2-rc.4",
     "@deepseek-ai/dsh-token-meter": "0.2.2-rc.4",
-    "@types/node": "^22.10.0",
+    "@types/node": "^24",
     "tsx": "^4.19.0",
     "typescript": "^5.6.0"
   },
