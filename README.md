@@ -3,6 +3,7 @@
 通过**工具回执投影**与**确定性只读替换**降低 DeepSeek Harness（DSH）的 token 消耗。
 
 > **状态：v1 已实现。** 投影、替换与控制面均已落地；`npm run build` 干净，测试套件全部通过。
+> 收益区间是设计阶段的事前估算（下界 3.5% / 理想上界 10.0%；净保底约 0.4%），交付物**无法复算**——见下。
 
 ## 它解决什么
 
@@ -18,16 +19,20 @@ DSH 每次模型请求都会回放全部历史。本机 300 个最长会话的�
    原文仍可取回，页脚给出路径。投影按固定阈值确定性执行，不产生逐次决策。
 2. **替换**——计划里重复的只读调用（`read` / `grep` / `glob`）若已有确定性证据满足守卫，
    直接提交，不再向模型要一次决策；多候选时用一个单标签选择器——一次独立的辅助请求
-   （`maxTokens` 512，另加其输入）。对替换涉及的三个工具而言，计划里的 `$public` 参数绑定
+   （`maxTokens` 512，另加其输入）。这是对原始需求 2.2 的**收窄**：原需求要 Jev 对每个工具
+   结果逐条打分、判断能否交给下一个工具，v1 只做「同一回执上的多个候选里选一个」，不做
+   逐条打分（见[澄清记录](docs/superpowers/clarifications/2026-11-18-dsh-token-efficiency.md)
+   的 2.2 与「用户裁决」第 9 条）。对替换涉及的三个工具而言，计划里的 `$public` 参数绑定
    （把上一步回执里的值直接搬进下一步参数）在实践中只对 `glob` 的单 token 输出有效；
    `read` 与 `grep` 的输出带行号或是裸路径，标识符投影匹配不到，这些调用会退回模型。
 
-v1 的预期收益区间是 **3.5%（保底）– 10.0%（上界）**，按 raw `totalTokens` 计。
-这是设计阶段对一个 300 会话语料做**离线事前估算**得到的区间：不是保证，也不是从交付的
-`session-snapshot.json` 能复算出来的数字（快照只存聚合计数，没有估算用的分项）——交付物里
-**没有任何工具能复算它**。影子周也**不能**把这个区间变成实测百分比：影子报告只输出四个
-比例（见「影子周」一节），没有总 token 分母，`boost status` 也只有绝对值；区间要被实测
-取代，得等后续版本补上分母统计。
+v1 的**事前估算**区间是 **3.5%（下界）– 10.0%（理想上界）**，按 raw `totalTokens` 计；
+**3.5% 不是保底**——它是设计阶段对一个 300 会话语料做离线估算得到的下界，其中替换账的
+2.70% 是**上限**，不能算进保底；诚实的净保底只有约 **0.4%**（投影侧毛额约 0.8% 减去每请求
+固定开销约 0.4%）。这个区间不是保证，也不是从交付的 `session-snapshot.json` 能复算出来的
+数字（快照只存聚合计数，没有估算用的分项）——交付物里**没有任何工具能复算它**。影子周也
+**不能**把这个区间变成实测百分比：影子报告只输出四个比例（见「影子周」一节），没有总 token
+分母，`boost status` 也只有绝对值；区间要被实测取代，得等后续版本补上分母统计。
 
 ## 前置条件
 
@@ -84,9 +89,12 @@ bundle，patch 的 `insert` 行落在 profile root 上。**装完必须重启 DS
 
 首次 `status` 应看到 `ok: true`；`data.scope.workspaceIds` 为空、`revision` 为 `0`，`shadow` 为
 `true`、`projection` 为 `"shadow"`，`counts` 为空（**仅限全新会话**——越界会话更早的工具调用
-已经各记过一条 `skip:no-scope`）。`degraded` 里出现 `ERR_SCOPE_READ_FAILED`
-是正常的：`scope.json` 还不存在，插件正落在 fail-closed 默认值上。第一次成功的 `scope-set`
-会创建这个文件。
+已经各记过一条 `skip:no-scope`）。首次 `status` 的 `degraded` 里**不会**因为 `scope.json`
+缺失而出现 `ERR_SCOPE_READ_FAILED`：缺失是干净的默认值（`ENOENT` 不带降级码，
+`src/scope/store.ts`）；全新根目录且宿主能力齐全时，`degraded` 就是空数组。在 `status` 的
+读取路径上，`ERR_SCOPE_READ_FAILED` 只表示文件**存在但读不出来**（权限、I/O、路径是目录
+等）——那不是正常的首次状态，要先修掉。
+第一次成功的 `scope-set` 会创建这个文件。
 
 然后列出要暴露的工作区：
 
@@ -160,7 +168,16 @@ scope**：`boost` 工具 schema（399）只要插件装配就常驻——`boost`
 设计选择**影子优先**：先用一周只记账（不合成回合、不跳过调用，投影只记账不改内容），再决定
 是否真的投影与替换。**「什么都不改」并不成立**：只要有可见工作区，协议段（379 token）就会
 注入系统提示；多候选计划仍会**真实调用一次选择器**（一次独立的辅助模型请求）。影子周按设计
-零节省，它只产出下一节的四个比例。`scope.json` 里有两个独立开关：
+零节省，它只产出下一节的四个比例。
+
+其中 `saveableRatio`、`byFamily`、`candidateRecall` 能决定的是**替换侧是否值得打开**：
+白名单能兑现多少替换决策、命中落在哪些工具族、候选集召回多高——也就是替换打开后会不会
+真的触发、主要落在哪些族。它们**不能决定发布**：发布决定在设计阶段就已写死，v1 按
+正常版本发布，不把影子期收益当发布门。它们也**不能测出节省**：报告没有总 token 分母，
+`retrievalUpperBound` 在影子期结构性为 `0`（它只统计 `projection:'on'` 的已应用投影取回），
+连投影的取回损害都约束不了；投影的放行依据是可见性契约（原文可经页脚取回）与事后检测，
+不是影子标签。
+`scope.json` 里有两个独立开关：
 
 | 开关 | 取值 | 行为 |
 |---|---|---|
@@ -174,21 +191,24 @@ scope**：`boost` 工具 schema（399）只要插件装配就常驻——`boost`
 
 1. **第一周**：按上面的 `scope-set` 使用 `shadow: true`、`projection: 'shadow'`，照常工作。
 2. **读报告**：在仓库 checkout 里跑
-   `node scripts/shadow-report.mjs --dir "${DSH_HOME:-$HOME/.dsh}/boost/receipts"`。
-   这个脚本是 dev-only，不在 npm tarball 里。它输出四个标签：
+   `node scripts/shadow-report.mjs --dir "<root>/receipts"`，其中 `<root>` 是装配日志打印的
+   `root=`（即 `<dshHome>/boost`；`dshHome` 配置优先于 `$DSH_HOME`，两者都未设时回退
+   `~/.dsh`）。这个脚本是 dev-only，不在 npm tarball 里。它输出四个标签：
    `saveableRatio`（白名单能兑现的替换占比 = `whitelisted` 影子提交 / **全部**替换决策——分母
    是每一次替换决策，不只是白名单调用；影子期全族记账，bash/ssh 的潜力看 `byFamily`）、`byFamily`（按候选工具族的命中率）、
    `candidateRecall`（候选集召回）、`retrievalUpperBound`（取回率上界；影子期没有真正投影，
    结构上恒为 `0`）。
-3. **打开投影**：报告支持的话，保持 `shadow: true`，把 `projection` 改成 `'on'`：
+3. **打开投影**：投影的放行不靠影子标签（依据是可见性契约与事后检测），确认宿主 spill
+   后端可用后，保持 `shadow: true`，把 `projection` 改成 `'on'`：
 
    ```json
    { "cmd": "scope-set", "body": { "projection": "on" }, "baseRevision": 1 }
    ```
 
    `scope-set` 只覆盖你传入的字段，其余保持不变。此时回执开始真正被替换，但替换决策仍然只记账。
-4. **再打开替换**：直接把影子关掉——**先检查再关是无效顺序**：影子期从不合成回合，
-   `content[].thinking` 的 400 在结构上不可能出现，关影子之前检查它永远只能读到「未见」。
+4. **再打开替换**：影子报告显示白名单命中与候选召回可接受时，直接把影子关掉——**先检查再关
+   是无效顺序**：影子期从不合成回合，`content[].thinking` 的 400 在结构上不可能出现，
+   关影子之前检查它永远只能读到「未见」。
    把 `shadow` 设为 `false` 之后，按 [docs/RELEASE.md](docs/RELEASE.md) §4 在**第一个真正
    被替换的回合**检查该 400，并在此后的每个替换观察窗继续记录：
 
@@ -280,16 +300,20 @@ plugin manager 才能把运行中的 entry 认成本包的行、通过 profile p
 
 ## 状态、回滚与卸载
 
-状态在 `$DSH_HOME/boost/`（`$DSH_HOME` 未设置时回退 `~/.dsh`）：
+状态在 `<dshHome>/boost/`：`dshHome` 配置**优先于** `$DSH_HOME`，两者都未设置时回退
+`~/.dsh`；装配日志打印解析后的 `root=`（就是 `<dshHome>/boost`）。
 
 - `scope.json`——暴露面的唯一事实来源（version 2，带 revision）。
 - `scope.lock`——写路径的短锁，正常写入结束后删除。
 - `receipts/<encoded-session>.jsonl`——追加式收据。每行携带元数据、回执前 256 个码点的
-  preview（不存 stdout 全文）和**绑定后的参数 `args`（模型所写，截到 2048 个码点，超长会以
-  `args_truncated` 标记的截断 JSON 落盘——`write` / `edit` 的参数可携带整段文件内容，同样
-  入账）**。**只有替换类收据**（`substitute` / `substitute-settled` / `shadow`）另外携带计划
-  goal（≤256 码点）与守卫（≤8 条，各 ≤300 码点）；投影与 skip 收据只有 preview 和 args，
-  没有 plan 证据。
+  preview（不存 stdout 全文）和**绑定后的参数 `args`（模型所写：超过 2048 个码点时以
+  `args_truncated` 标记的截断 JSON 落盘；嵌套超过 64 层时以 `args_depth_truncated` 标记，
+  并把更深的子树换成 `{ "truncated_depth": 64 }`——`write` / `edit` 的参数可携带整段文件
+  内容，同样入账）**。**只有替换类收据**另外携带计划 goal（≤256 码点）与守卫（≤8 条，各
+  ≤300 码点）：`kind:'substitute'`、`kind:'substitute-settled'`，以及 `kind:'shadow'` 且
+  `code:'ok'` 的影子提交。`kind:'shadow'` 不是替换专用——投影影子也写 `kind:'shadow'`，
+  但带 `code:'projection-shadow'`，属于投影收据，没有 plan 证据；投影与 skip 收据只有
+  preview 和 args。
 
 `boost status` 的投影账按每条收据自己的 `horizon_steps` 重放；没有该字段的旧收据按当前
 horizon 重放，并计入 `projection_horizon_reestimated`；`projection_horizon_steps` 报告当前
@@ -300,7 +324,8 @@ horizon 重放，并计入 `projection_horizon_reestimated`；`projection_horizo
 `projection-skipped:spill-failed`，页脚渲染失败记 `projection-skipped:footer-failed`；页脚
 渲染器加载不到则记 `projection-skipped:no-footer`，见「宿主依赖」）。
 
-回滚与停用（下面的 `baseRevision` 按「启用」一节的路径走完是 `3`，第一条执行完是 `4`；
+回滚与停用（下面的 `baseRevision` 按「启用」+「影子周」的推荐顺序走完是 `3`——启用结束于
+`1`，影子周的两步各加一——第一条执行完是 `4`；
 实际使用时永远取你刚从 `status` 读到的 `data.scope.revision`，不要照抄）：
 
 - **关掉两个行为**（不再投影、不再替换，但仍然可见的工作区——`selected` 下已选的、`global`
@@ -311,9 +336,10 @@ horizon 重放，并计入 `projection_horizon_reestimated`；`projection_horizo
   ```
 
 - **回到真正惰性**：把 `mode` 设回 `selected` 并清空列表。**注意 `workspaceIds` 只在
-  `selected` 模式下起作用**：`isVisible` 对 `mode:"global"` 恒为真（`src/scope/doc.ts`，
-  `global` 分支根本不读列表），所以**先处于 `global` 时只写 `workspaceIds: []` 什么都停不
-  下来**——投影与替换会照常进行，而你以为已经回滚了。在 `selected` 下移除单个工作区即可；
+  `selected` 模式下起作用**：`isVisible` 对 `mode:"global"` 下每个**已定义**的工作区为真
+  （`src/scope/doc.ts`，`global` 分支不读列表；`workspaceId` 未定义的会话仍为假），所以
+  **先处于 `global` 时只写 `workspaceIds: []` 什么都停不下来**——投影与替换会照常进行，
+  而你以为已经回滚了。在 `selected` 下移除单个工作区即可；
   在 `global` 下必须同时改 `mode`：
 
   ```json
@@ -323,7 +349,7 @@ horizon 重放，并计入 `projection_horizon_reestimated`；`projection_horizo
   `selected` + 空列表时协议段、投影、替换全部停止（只剩下 `boost` 工具 schema 的常驻开销）。
 
 - **卸载插件**：`dsh plugin --profile <name> remove dsh-boost`，然后重启 DSH。
-- 删除 `$DSH_HOME/boost` 会清掉 scope 与收据（回到默认），但不会删除宿主 spill 后端里已经
+- 删除 `<dshHome>/boost` 会清掉 scope 与收据（回到默认），但不会删除宿主 spill 后端里已经
   写出的原文文件。
 
 ## 宿主依赖
@@ -340,7 +366,7 @@ horizon 重放，并计入 `projection_horizon_reestimated`；`projection_horizo
 | `@deepseek-ai/dsh-token-meter/estimate` | 软（动态 import） | 固定开销无法测量，`fixedOverheadTokens` 为 `'unknown'`；`status.degraded` 带 `ERR_HOST_NO_ESTIMATOR` |
 | `win32` 平台 | 运行时检查 `isPosixOnly()` | 拒绝替换，投影照常；`status.degraded` 带 `ERR_HOST_PLATFORM_UNSUPPORTED` |
 | 宿主版本线 | 启动时读 `@deepseek-ai/dsh-app-boot` 的版本 | 不是 `0.2.2-rc.4` 时日志警告 `ERR_HOST_VERSION_MISMATCH`，插件照常加载（advisory，不是 `status.degraded` 码）；版本读不到时只记 info，不发码 |
-| 收据分片可读性 | `boost status` 全量扫描（非依赖） | 至少一个收据分片读不出来（EACCES、名为 `x.jsonl` 的目录等）时 `status.degraded` 带 `ERR_RECEIPTS_UNREADABLE`；`status` 仍是**全量聚合**——健康分片照常计数——所以数字可能不完整。查 `$DSH_HOME/boost/receipts/` 的权限与异常条目，修复后重跑并对比计数 |
+| 收据分片可读性 | `boost status` 全量扫描（非依赖） | 至少一个收据分片读不出来（EACCES、名为 `x.jsonl` 的目录等）时 `status.degraded` 带 `ERR_RECEIPTS_UNREADABLE`；`status` 仍是**全量聚合**——健康分片照常计数——所以数字可能不完整。查 `<dshHome>/boost/receipts/` 的权限与异常条目，修复后重跑并对比计数 |
 | 收据分片数量 | `boost status` 全量扫描（非依赖） | 分片超过 256 个时 `status` 只统计按编码名排序的前 256 个，`status.degraded` 带 `ERR_RECEIPTS_TRUNCATED`，所有计数因此是**下界**；分片永不自动删除，可归档/移走旧会话分片后重跑 `status` |
 | 提示段装配瀑布 | 出站请求探测（非依赖） | 宿主的 `complete: true` 提示段在装配瀑布之后替换了整个系统提示、协议段没有到达请求时，`status.degraded` 带 `ERR_HOST_COMPLETE_SECTION`；受影响请求上替换与投影 fail-closed（工作区明明可见插件却不动作）。找出宿主里覆盖瀑布的 complete 段（通常属于另一个插件）并移除，或接受这些请求上不动作 |
 
@@ -370,7 +396,10 @@ spill，报它只会制造噪音）；但**收据通道**不看当前模式—�
 ## v1 的边界
 
 - 只做两件事：**就地替换工具回执**，以及**替换只读调用**（`read` / `grep` / `glob`）。
-- **不批量执行工具调用**（没有 PTC / `run_code`，设计 N1）。
+- **不批量执行工具调用**（没有 PTC / `run_code`）：这不是 v1 自行划定的范围，而是原始需求
+  2.1 被**收窄**后的结果——原需求要一次调用多个工具，裁决为显式排除、二期再议（见
+  [澄清记录](docs/superpowers/clarifications/2026-11-18-dsh-token-efficiency.md) 的 2.1 与
+  「用户裁决」第 9 条；设计 N1）。
 - **不去重、不合并工具调用**（设计 N5）——这条完全没开工，且 v1 **没有任何工具能测出重复
   调用率**：设计稿里用来触发重启判定的「影子周重复率统计」没有交付，`shadow-report.mjs`
   不产出它。
@@ -378,14 +407,20 @@ spill，报它只会制造噪音）；但**收据通道**不看当前模式—�
   不是省下的 token。
 - **v1 不评判「结果更好」**：只有 token 账目与 20 任务回退门，没有任何质量指标；「替换后
   结果质量」在 v1 是不可判的。
+- **投影是截断，不是精炼**：它保留头尾、丢掉中段；账本里的 before/after token 差量的是
+  「变短」，不是「变相关」。被丢掉的中段可能正是下一步决策要用的内容——`projection: 'on'`
+  下原文可经页脚 locator 取回，但取回要花一次工具调用，且 v1 没有指标区分「精炼」与
+  「误截」。
 - **装上但未启用是小的净亏**：`boost` 工具只要插件装配就注册，schema 实测 399 token/请求
   常驻（见「启用」一节的分解），收益为零。
 - **不支持 desktop profile**（设计 D6）。
 - 不替换、也不接管 DSH 的压缩、剪枝与 spill 决策（设计 N3）；投影只改模型可见 content，
   原文仍借宿主 spill 存放。
 - 不做模型训练或权重改动（N2）；不追求论文里的 87.93%（N4）。
-- 不承诺 10%：3.5% 是保底线，10% 是全程存活的理想上界；影子周只告诉你是否继续，不能把
-  区间换成实测值（`shadow-report.mjs` 只有四个比例，没有总 token 分母）。
+- 不承诺 10%：3.5% 是事前估算的**下界**，不是保底；10% 是全程存活的理想上界。净保底约
+  0.4%（投影侧毛额约 0.8% 减去每请求固定开销约 0.4%）。影子周只回答替换侧是否值得打开
+  （候选覆盖与命中），不决定发布，也不能把区间换成实测值（`shadow-report.mjs` 只有四个
+  比例，没有总 token 分母）。
 
 ## 文档
 
