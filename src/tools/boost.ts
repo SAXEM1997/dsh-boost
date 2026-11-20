@@ -32,7 +32,8 @@
  *   substitution saving is read only from the settled line, because the
  *   synth-time line predates any measurement.
  * - `status.degraded` is a list of **stable codes only** (`ERR_HOST_*` /
- *   `ERR_SCOPE_*`). The scope store's internal `scope-degraded` label and the
+ *   `ERR_SCOPE_*`; the one wiring code is `ERR_BOOST_PARTIAL_MOUNT`). The scope
+ *   store's internal `scope-degraded` label and the
  *   receipt stream's `projection-skipped:*` are inputs, not output: a receipt
  *   code is mapped to `ERR_HOST_NO_SPILL` (no spill backend) or
  *   `ERR_HOST_NO_SPILL_NOTICE` (backend present, notice module cannot render
@@ -43,6 +44,9 @@
  *   pure fixed-cost package being unreachable. One can exist without the other,
  *   and merging them sent the operator to the wrong host.
  *   `ERR_HOST_PLATFORM_UNSUPPORTED` is `isPosixOnly()` being false.
+ *   `ERR_BOOST_PARTIAL_MOUNT` is an `apply` wiring failure: at least one of the
+ *   four host mounts (prompt section, post-execute, llm/stream, execute) is
+ *   missing, so the plugin is loaded but not fully wired.
  * - The fixed overhead is measured **once at startup**
  *   (`measureBoostFixedOverhead`: protocol section + tool schema) and awaited
  *   by `status`; it is never on a request path (design §6.1).
@@ -100,6 +104,17 @@ const SCOPE_CODES: ReadonlySet<string> = new Set([
 
 /** Stable host degradation codes (design §9; the frozen set `status` reports). */
 const ERR_HOST_NO_SPILL = 'ERR_HOST_NO_SPILL'
+/**
+ * Stable degradation code: at least one of the four host mounts is missing.
+ *
+ * `apply` mounts the prompt section, the projection hook, the synthesizer and
+ * the dispatch hook. A failure in any of them used to be logged as a section
+ * failure (or swallowed) while `status` reported `degraded: []`; a plugin
+ * missing its projection or flush hook looks healthy in every ledger but never
+ * acts. The code names that state; `partialMounts()` lists which mounts are
+ * absent (review row 2).
+ */
+const ERR_BOOST_PARTIAL_MOUNT = 'ERR_BOOST_PARTIAL_MOUNT'
 /**
  * Stable degradation code: the host spill-notice module has no footer renderer.
  *
@@ -161,10 +176,20 @@ const ERR_HOST_COMPLETE_SECTION = 'ERR_HOST_COMPLETE_SECTION'
  * footer, so `projectApply` refuses to replace anything. Mapping it to
  * `ERR_HOST_NO_SPILL_NOTICE` is what keeps the plugin's headline feature from
  * being silently off while `status` calls the spill path healthy.
+ *
+ * `projection-skipped:spill-failed` and `projection-skipped:footer-failed` are
+ * the same two degradations at the point of use: the backend exists but
+ * `saveText` rejected, or the renderer exists but threw. They share the stable
+ * codes because the operator's action is the same (repair the host spill path);
+ * the receipt code keeps the distinction in `counts`. Without these two rows a
+ * present-but-broken store skipped 100% of projections while `degraded` stayed
+ * empty (review row 31).
  */
 const RECEIPT_DEGRADATION: ReadonlyArray<{ readonly code: string; readonly degraded: string }> = [
   { code: 'projection-skipped:no-spill', degraded: ERR_HOST_NO_SPILL },
+  { code: 'projection-skipped:spill-failed', degraded: ERR_HOST_NO_SPILL },
   { code: 'projection-skipped:no-footer', degraded: ERR_HOST_NO_SPILL_NOTICE },
+  { code: 'projection-skipped:footer-failed', degraded: ERR_HOST_NO_SPILL_NOTICE },
   // The substitution refusal writes the stable code itself, so a status built
   // without host facts still reports the reason the decision path recorded.
   { code: ERR_HOST_NO_TOKENMETER, degraded: ERR_HOST_NO_TOKENMETER },
@@ -263,6 +288,14 @@ export interface BoostDeps {
   protocolSuppressed?: () => number
   /** Requests whose final prompt lost the protocol to a complete section; status-time read. */
   completeSectionSuppressions?: () => number
+  /**
+   * Integration points `apply` could not mount; status-time read.
+   *
+   * A missing projection or flush hook leaves every ledger healthy-looking
+   * while the plugin never acts, so the mounts are a fact `status` must
+   * report. Absent means no mount failed (or the caller does not track them).
+   */
+  partialMounts?: () => readonly string[]
   /**
    * Cancellation for this invocation only.
    *
@@ -732,8 +765,9 @@ function toolCountsOf(read: (() => Record<string, number>) | undefined): Record<
 /**
  * The stable degradation codes for one status call.
  *
- * Inputs are the receipt-observed codes, the scope read's stable code, and the
- * host facts. Receipt codes are already mapped; the scope store's internal
+ * Inputs are the receipt-observed codes, the scope read's stable code, the host
+ * facts, and the mount points `apply` could not wire. Receipt codes are already
+ * mapped; the scope store's internal
  * `scope-degraded` label is deliberately **not** copied — the report's contract
  * is stable codes only. Order is deterministic (receipts, scope, host) and the
  * result is deduplicated, so one condition observed through two channels
@@ -756,6 +790,7 @@ function degradationCodes(
   read: Awaited<ReturnType<ScopeStore['read']>>,
   host: BoostHostFacts | undefined,
   fixedOverhead: FixedOverheadMeasurement | 'unknown',
+  missingMounts: readonly string[] = [],
 ): string[] {
   const codes: string[] = [...observed]
   if (read.degraded !== undefined) codes.push(read.code ?? ERR_SCOPE_READ_FAILED)
@@ -767,6 +802,10 @@ function degradationCodes(
   // (design §5.4), so reporting it while projection is `shadow` would be noise.
   if (host?.hasSpill === false && read.doc.projection === 'on') codes.push(ERR_HOST_NO_SPILL)
   if (host?.hasWorkspaceRegistry === false) codes.push(ERR_HOST_NO_WORKSPACE_REGISTRY)
+  // A missing mount is a wiring failure, not a capability absence: the plugin
+  // is loaded but at least one of its four integration points is not, so the
+  // ledgers cannot be trusted to describe what it is doing.
+  if (missingMounts.length > 0) codes.push(ERR_BOOST_PARTIAL_MOUNT)
 
   return [...new Set(codes)]
 }
@@ -779,7 +818,13 @@ async function statusCommand(deps: BoostDeps): Promise<BoostResult> {
   // receipts that predate the field, and `horizonReestimated` counts them.
   const totals = await aggregate(deps.receipts, horizon)
   const fixedOverhead = await fixedOverheadOf(deps)
-  const degraded = degradationCodes(totals.degraded, read, deps.host, fixedOverhead)
+  const degraded = degradationCodes(
+    totals.degraded,
+    read,
+    deps.host,
+    fixedOverhead,
+    deps.partialMounts?.() ?? [],
+  )
   // A shard the scan could not read is evidence, not a status failure: the
   // healthy shards were counted and the operator gets a stable code saying the
   // ledger is incomplete. `readErrors()` is the only producer; it counts skips

@@ -46,7 +46,6 @@ import type { SpillBackend } from './projection/apply.js'
 import { ProjectionCounters } from './projection/counters.js'
 import { PROTOCOL_NAME, PROTOCOL_TEXT } from './prompt/protocol.js'
 import { ReceiptStore } from './receipts/store.js'
-import { SELECTOR_PURPOSE } from './selector/jev.js'
 import type { LlmLike } from './selector/jev.js'
 import { resolveWorkspace } from './scope/resolve.js'
 import type { WorkspaceRegistry } from './scope/resolve.js'
@@ -80,6 +79,24 @@ function messageOf(error: unknown): string {
 
 /** The dsh host line this build was verified against (`engines.dsh`). */
 const VERIFIED_HOST_VERSION = '0.2.2-rc.4'
+
+/**
+ * Whether a reported version names the verified release, ignoring build
+ * metadata.
+ *
+ * The host's compatibility preflight compares with
+ * `semver.satisfies(version, range, { includePrerelease: true })`, and semver
+ * ignores `+build` metadata on both sides. String equality would warn on
+ * `0.2.2-rc.4+build.5` — a build the host itself accepts — so the comparison
+ * strips everything from the first `+` (review row 34).
+ */
+function isVerifiedHostVersion(version: string): boolean {
+  const core = (value: string): string => {
+    const build = value.indexOf('+')
+    return build === -1 ? value : value.slice(0, build)
+  }
+  return core(version) === core(VERIFIED_HOST_VERSION)
+}
 
 /**
  * Stable host code: the resolved host version is not the verified one.
@@ -151,7 +168,7 @@ function reportHostVersion(ctx: PluginContext): void {
     )
     return
   }
-  if (version === VERIFIED_HOST_VERSION) {
+  if (isVerifiedHostVersion(version)) {
     ctx.logger?.info?.(`dsh-boost: dsh host ${version} (verified)`)
     return
   }
@@ -208,7 +225,7 @@ function serviceOf<T>(ctx: PluginContext, name: string): T | undefined {
 }
 
 /**
- * A memoising, retrying service getter.
+ * A memoising, retrying service getter with an explicit reset.
  *
  * `ctx.get(name, strict=true)` answers `undefined` until the provider fiber is
  * ACTIVE, and cordis starts sibling plugin entries concurrently, so a service
@@ -216,14 +233,25 @@ function serviceOf<T>(ctx: PluginContext, name: string): T | undefined {
  * absence is never cached, because the provider may become active one tick
  * later. Every call site reads the getter, so the plugin recovers on the next
  * request instead of staying inert for the process lifetime.
+ *
+ * `reset()` drops the memo. It exists for a service that resolved but then
+ * failed at the point of use (a spill store whose `saveText` rejects): the
+ * provider may have been replaced or restarted, and a getter that trusted its
+ * first success forever would keep calling a dead backend (review row 31).
  */
-function lazyService<T>(ctx: PluginContext, name: string): () => T | undefined {
+type LazyService<T> = (() => T | undefined) & { reset(): void }
+
+function lazyService<T>(ctx: PluginContext, name: string): LazyService<T> {
   let resolved: T | undefined
-  return () => {
+  const get = (() => {
     if (resolved !== undefined) return resolved
     resolved = serviceOf<T>(ctx, name)
     return resolved
+  }) as LazyService<T>
+  get.reset = () => {
+    resolved = undefined
   }
+  return get
 }
 
 /**
@@ -668,9 +696,18 @@ function wireSessionEvents(
         // protocol there is nothing to teach the plan grammar, so substitution
         // (and the projection that shares the same visibility gate) must not
         // act for this request (review row 12).
+        //
+        // Only a main-agent request is evidence. Every auxiliary stream — the
+        // selector, compaction, and the default-on session-title provider —
+        // sets `purpose` and carries its own summariser prompt, which never
+        // contains the protocol section. Treating one as a swallow would count
+        // a suppression that never happened, flip the session's cached
+        // visibility off, and leave `ERR_HOST_COMPLETE_SECTION` in `status`
+        // for the rest of the process (review row 1). This is the same rule the
+        // synthesizer applies (`llm-stream.ts`: any `purpose` is auxiliary).
         if (
+          request.purpose === undefined &&
           typeof sessionId === 'string' &&
-          request.purpose !== SELECTOR_PURPOSE &&
           scope.judgement(sessionId)
         ) {
           const systemText = systemTextOf(options)
@@ -765,6 +802,106 @@ function registerBoostTool(ctx: PluginContext, deps: BoostDeps): void {
   ctx.tools.register(definition, { when: () => true })
 }
 
+/** The mount label the prompt section reports when it cannot be registered. */
+const MOUNT_SECTION = 'systemPrompt.section'
+
+/** One event listener recorded by {@link mountHooks} before it is mounted. */
+type DeferredMount = {
+  event: Parameters<PluginContext['on']>[0]
+  handler: Parameters<PluginContext['on']>[1]
+  options?: Parameters<PluginContext['on']>[2]
+}
+
+/**
+ * Mount the four integration points, attributing each failure.
+ *
+ * `registerHooks` mounts the prompt section first and aborts on its failure, so
+ * handing it the real context would lose the three event mounts whenever the
+ * section is rejected — while `apply` logged "continuing with the remaining
+ * mounts" and `status` still reported `degraded: []` (review row 2). It is
+ * called with a recording context instead: the section is registered
+ * immediately (its duplicate check must happen before anything else is
+ * mounted), a rejection is recorded rather than rethrown so `registerHooks`
+ * still describes the three event mounts, and those are then mounted one by one
+ * so a failure names the mount that failed and lands in `missing`.
+ *
+ * Returns `true` when the section error is the host's duplicate-registration
+ * error: a previous apply owns every mount and this one must register nothing.
+ */
+function mountHooks(ctx: PluginContext, deps: HookDeps, missing: Set<string>): boolean {
+  const deferred: DeferredMount[] = []
+  let sectionError: unknown
+  let registrationError: unknown
+
+  const recording = {
+    logger: ctx.logger,
+    on(
+      event: Parameters<PluginContext['on']>[0],
+      handler: Parameters<PluginContext['on']>[1],
+      options?: Parameters<PluginContext['on']>[2],
+    ): void {
+      deferred.push({ event, handler, options })
+    },
+    systemPrompt: {
+      section(section: Parameters<PluginContext['systemPrompt']['section']>[0]): void {
+        try {
+          ctx.systemPrompt.section(section)
+        } catch (error) {
+          // Record, do not rethrow: `registerHooks` aborts on a throwing
+          // section, and the other three mounts must still be described.
+          sectionError = error
+        }
+      },
+    },
+  } as unknown as PluginContext
+
+  try {
+    registerHooks(recording, deps)
+  } catch (error) {
+    registrationError = error
+  }
+
+  if (sectionError !== undefined && isDuplicateSectionError(sectionError)) {
+    duplicateMountAttempts += 1
+    ctx.logger?.warn?.(
+      `dsh-boost: ERR_BOOST_ALREADY_MOUNTED: duplicate apply #${duplicateMountAttempts} found an existing mount; registration skipped (${messageOf(sectionError)})`,
+    )
+    return true
+  }
+
+  if (sectionError !== undefined) {
+    missing.add(MOUNT_SECTION)
+    ctx.logger?.warn?.(
+      `dsh-boost: ERR_BOOST_SECTION_REGISTER_FAILED: prompt section registration failed; mounting the remaining hooks independently (${messageOf(sectionError)})`,
+    )
+  } else if (registrationError !== undefined) {
+    // The section did not throw, so this is an assembly bug: an unknown mount
+    // is missing even though no specific one can be named.
+    missing.add('hooks')
+    ctx.logger?.warn?.(
+      `dsh-boost: ERR_BOOST_PARTIAL_MOUNT: hook assembly failed (${messageOf(registrationError)})`,
+    )
+  }
+
+  for (const mount of deferred) {
+    try {
+      ctx.on(mount.event, mount.handler, mount.options)
+    } catch (error) {
+      missing.add(mount.event)
+      ctx.logger?.warn?.(
+        `dsh-boost: ERR_BOOST_PARTIAL_MOUNT: ${mount.event} mount failed (${messageOf(error)})`,
+      )
+    }
+  }
+
+  if (missing.size > 0) {
+    ctx.logger?.warn?.(
+      `dsh-boost: ERR_BOOST_PARTIAL_MOUNT: missing mount(s): ${[...missing].join(', ')}; the plugin is partially wired and boost status reports this code`,
+    )
+  }
+  return false
+}
+
 export function apply(ctx: PluginContext, config: unknown): void {
   const repairs: string[] = []
   const cfg = resolveConfig(config, message => {
@@ -823,7 +960,31 @@ export function apply(ctx: PluginContext, config: unknown): void {
     // seam; the spill store is the projection backend; the token meter prices
     // projections and admission.
     const registry = lazyService<WorkspaceRegistry>(ctx, 'workspaceRegistry')
-    const spill = lazyService<SpillBackend>(ctx, 'spillStore')
+    const spillService = lazyService<SpillBackend>(ctx, 'spillStore')
+    /**
+     * The spill backend the decision path uses, with a failure re-probe.
+     *
+     * A store that resolved is not a store that works: `saveText` rejecting is
+     * the only evidence the projection path gets (`projection-skipped:spill-failed`),
+     * and memoising that first success forever would keep every later
+     * projection pointed at a dead backend while `hasSpill` stayed true. A
+     * rejection therefore drops the memo; the next decision asks `ctx.get`
+     * again, which cordis answers from the provider fiber's live state.
+     */
+    const spillBackend = (): SpillBackend | undefined => {
+      const backend = spillService()
+      if (backend === undefined) return undefined
+      return {
+        saveText: async (input) => {
+          try {
+            return await backend.saveText(input)
+          } catch (error) {
+            spillService.reset()
+            throw error
+          }
+        },
+      }
+    }
     // `llm` is soft (see `inject`): projection and admission never need it, and
     // the selector checks it at call time. A getter keeps a provider that
     // becomes active after `apply` reachable on the next decision.
@@ -841,7 +1002,7 @@ export function apply(ctx: PluginContext, config: unknown): void {
         return meter.kind() === 'host'
       },
       get hasSpill() {
-        return spill() !== undefined
+        return spillService() !== undefined
       },
       get hasWorkspaceRegistry() {
         return registry() !== undefined
@@ -876,7 +1037,7 @@ export function apply(ctx: PluginContext, config: unknown): void {
       // Getters, not snapshots: the hook reads them per decision, so a service
       // that becomes active after `apply` is picked up on the next call.
       get spill() {
-        return spill()
+        return spillBackend()
       },
       retrievals,
       get estimateText() {
@@ -897,22 +1058,11 @@ export function apply(ctx: PluginContext, config: unknown): void {
     }
     // The section mount is the first thing `registerHooks` touches. Only the
     // host's genuine duplicate error means a previous apply already owns the
-    // mounts; every other throw is a wiring failure that must be named and must
-    // not take the control tool down with it (finding 8).
-    try {
-      registerHooks(ctx, deps)
-    } catch (error) {
-      if (isDuplicateSectionError(error)) {
-        duplicateMountAttempts += 1
-        ctx.logger?.warn?.(
-          `dsh-boost: ERR_BOOST_ALREADY_MOUNTED: duplicate apply #${duplicateMountAttempts} found an existing mount; registration skipped (${messageOf(error)})`,
-        )
-        return
-      }
-      ctx.logger?.warn?.(
-        `dsh-boost: ERR_BOOST_SECTION_REGISTER_FAILED: prompt section registration failed; continuing with the remaining mounts (${messageOf(error)})`,
-      )
-    }
+    // mounts; every other throw is a wiring failure that must be named, must
+    // not take the other three mounts (or the control tool) down with it, and
+    // must be visible in `status` as `ERR_BOOST_PARTIAL_MOUNT` (review row 2).
+    const missingMounts = new Set<string>()
+    if (mountHooks(ctx, deps, missingMounts)) return
 
     // The clock/visibility warm and the session-end cleanup. Wired separately
     // so a host that cannot accept these events still gets the tool below.
@@ -948,6 +1098,7 @@ export function apply(ctx: PluginContext, config: unknown): void {
         unknownTools: () => projectionCounters.unknownToolCounts(),
         protocolSuppressed: () => projectionCounters.protocolSuppressions(),
         completeSectionSuppressions: () => projectionCounters.protocolMissings(),
+        partialMounts: () => [...missingMounts],
       })
     } catch (error) {
       // The tool is the user's only control surface; its failure is reported

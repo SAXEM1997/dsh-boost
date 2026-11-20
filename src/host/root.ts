@@ -32,6 +32,13 @@ import { join, resolve } from 'node:path'
  * Passing it through would leave the stores resolving it again on every read,
  * so a later `chdir` would silently move the state root mid-session (review
  * minor).
+ *
+ * A leading `~` is expanded exactly as the host's `expandHomePath`
+ * (`@deepseek-ai/dsh-home-paths`) does: `~` is the home directory and `~/` or
+ * `~\` are joined under it. The host applies that rule to `$DSH_HOME` and to a
+ * configured `dshHome` before resolving; without it `DSH_HOME='~/x'` would
+ * create a literal `~` directory under the cwd while the host's own home is
+ * `$HOME/x`, and `boost status` would read an empty ledger (review row 30).
  */
 export function resolveBoostRoot(config?: unknown): string {
   const override = (config as { dshHome?: unknown } | null | undefined)?.dshHome
@@ -39,6 +46,19 @@ export function resolveBoostRoot(config?: unknown): string {
     typeof override === 'string' && override.trim() !== ''
       ? override.trim()
       : process.env.DSH_HOME?.trim()
-  const home = configured ? resolve(configured) : join(homedir(), '.dsh')
+  const home = configured ? resolve(expandHomePath(configured)) : join(homedir(), '.dsh')
   return join(home, 'boost')
+}
+
+/**
+ * Expand the host-supported tilde prefixes against the OS home.
+ *
+ * Mirrors `expandHomePath` in `@deepseek-ai/dsh-home-paths` (the host's one
+ * home-path rule): only a bare `~`, `~/…` and `~\…` are special. `~user` and a
+ * `~` in the middle of a path are left alone, exactly like the host.
+ */
+function expandHomePath(value: string): string {
+  if (value === '~') return homedir()
+  if (value.startsWith('~/') || value.startsWith('~\\')) return join(homedir(), value.slice(2))
+  return value
 }
