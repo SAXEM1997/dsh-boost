@@ -76,16 +76,21 @@ test('global 模式下能解析出 UUID 即可见', async () => {
   assert.equal(await resolveVisible(s, { session: { header: { cwd: '/w/a' } } }, registry), true)
 })
 
-test('宿主没有 tools.resolve 时判不支持步骤级 when', () => {
+test('supportsStepWhen 探测实际使用的 register，而不是另一个能力 resolve', () => {
   assert.equal(supportsStepWhen({}), false)
-  assert.equal(supportsStepWhen({ resolve: () => [] }), true)
+  // A host with `register` but no `resolve` can still take the tool (and its
+  // `when` option); probing `resolve` used to drop the only control tool.
+  assert.equal(supportsStepWhen({ register: () => () => {} }), true)
+  assert.equal(supportsStepWhen({ register: () => {}, resolve: () => [] } as any), true)
+  // `resolve` alone is not the capability this plugin registers through.
+  assert.equal(supportsStepWhen({ resolve: () => [] } as any), false)
 })
 
 test('supportsStepWhen 对 undefined / null / 非对象不抛错', () => {
   assert.equal(supportsStepWhen(undefined), false)
   assert.equal(supportsStepWhen(null), false)
   assert.equal(supportsStepWhen(42 as any), false)
-  assert.equal(supportsStepWhen({ resolve: null }), false)
+  assert.equal(supportsStepWhen({ register: null }), false)
 })
 
 test('resolveVisible 返回前把结果写进 judgement 缓存（派发 R2）', async () => {

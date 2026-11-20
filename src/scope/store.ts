@@ -66,6 +66,7 @@ import {
   ERR_SCOPE_READ_FAILED,
   ERR_SCOPE_REVISION_CONFLICT,
   parseScope,
+  parseVersionOneScope,
 } from './doc.js'
 import type { ScopeCode, ScopeDoc } from './doc.js'
 
@@ -98,7 +99,15 @@ const BOOT_NONCE = randomUUID()
  */
 type DiskRead =
   | { ok: true; doc: ScopeDoc; mtimeMs: number; text: string }
-  | { ok: false; doc: ScopeDoc; code: ScopeCode; missing: boolean; cause?: unknown }
+  | {
+      ok: false
+      doc: ScopeDoc
+      code: ScopeCode
+      missing: boolean
+      cause?: unknown
+      /** The v1 field values an explicit upgrade must carry (see `parseVersionOneScope`). */
+      upgrade?: ScopeDoc
+    }
 
 /** A write-path failure: the stable code is on `.code` and in the message. */
 function scopeError(code: ScopeCode, detail: string): Error & { code: ScopeCode } {
@@ -167,7 +176,18 @@ function decode(text: string, mtimeMs: number): DiskRead {
   }
   const parsed = parseScope(raw)
   if (parsed.code !== undefined) {
-    return { ok: false, doc: parsed.doc, code: parsed.code, missing: false }
+    // A v1 document is read-only-degraded, but the explicit upgrade rewrites
+    // its recognised fields rather than resetting them to DEFAULT_SCOPE
+    // (review row 38). `parseVersionOneScope` is deliberately not applied to
+    // the read path.
+    const upgrade = parseVersionOneScope(raw)
+    return {
+      ok: false,
+      doc: parsed.doc,
+      code: parsed.code,
+      missing: false,
+      ...(upgrade === undefined ? {} : { upgrade }),
+    }
   }
   return { ok: true, doc: parsed.doc, mtimeMs, text }
 }
@@ -252,15 +272,19 @@ export class ScopeStore {
         const detail = current.cause === undefined ? 'unknown read error' : messageOf(current.cause)
         throw scopeError(ERR_SCOPE_READ_FAILED, `cannot read ${this.file}: ${detail}`)
       }
-      if (current.doc.revision !== baseRevision) {
+      // A v1 file was read as DEFAULT_SCOPE at revision 0, but its recognised
+      // fields are the user's configuration: base the upgrade on those so a
+      // partial `scope-set` cannot silently drop `global`/`workspaceIds`.
+      const base = current.ok ? current.doc : current.upgrade ?? current.doc
+      if (base.revision !== baseRevision) {
         throw scopeError(
           ERR_SCOPE_REVISION_CONFLICT,
-          `base revision ${baseRevision} does not match ${current.doc.revision}`,
+          `base revision ${baseRevision} does not match ${base.revision}`,
         )
       }
 
       const doc: ScopeDoc = {
-        ...mutate(current.doc),
+        ...mutate(base),
         revision: baseRevision + 1,
         updatedAt: new Date().toISOString(),
       }

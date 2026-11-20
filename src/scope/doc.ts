@@ -192,6 +192,36 @@ export function parseScope(raw: unknown): {
 }
 
 /**
+ * The upgrade base for a version 1 document.
+ *
+ * Reading a v1 file still degrades to {@link DEFAULT_SCOPE} and reports
+ * {@link ERR_SCOPE_UNKNOWN_VERSION} (design §5.5 rule 3: unknown versions are
+ * read-only). Only the explicit `scope-set` upgrade may rewrite it, and this
+ * function answers "what did the user's v1 file actually say" for that one
+ * write: `version` becomes 2 and `revision` starts at the degraded read's 0,
+ * while every recognised field keeps its value (strict side for malformed
+ * ones). Never use this on the read path — a v1 document is not a valid v2
+ * document and must keep presenting as invisible until upgraded.
+ *
+ * `undefined` for anything that is not a plain object with `version === 1`,
+ * including v2, future versions, missing versions and non-objects.
+ */
+export function parseVersionOneScope(raw: unknown): ScopeDoc | undefined {
+  if (raw === null || typeof raw !== 'object' || Array.isArray(raw)) return undefined
+  if ((raw as { version?: unknown }).version !== 1) return undefined
+  const source = raw as Record<string, unknown>
+  return {
+    version: 2,
+    revision: 0,
+    ...(typeof source.updatedAt === 'string' ? { updatedAt: source.updatedAt } : {}),
+    mode: parseMode(source.mode),
+    workspaceIds: parseWorkspaceIds(source.workspaceIds),
+    shadow: parseShadow(source.shadow),
+    projection: parseProjection(source.projection),
+  }
+}
+
+/**
  * Whether the plugin may act for an agent in `workspaceId`.
  *
  * An agent with no workspace has the global view, and the plugin never injects

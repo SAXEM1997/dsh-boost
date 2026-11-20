@@ -375,6 +375,34 @@ test('version 1 文件在显式写入时升级到 v2（baseRevision 取降级读
   assert.equal(after.doc.version, 2)
 })
 
+test('version 1 升级保留原文档的 global / workspaceIds / shadow / projection（row 38）', async () => {
+  const dir = await tempDir()
+  const file = join(dir, 'scope.json')
+  await writeFile(
+    file,
+    JSON.stringify({
+      version: 1,
+      mode: 'global',
+      workspaceIds: ['ws-a', 'ws-b'],
+      shadow: false,
+      projection: 'on',
+    }),
+  )
+  const s = new ScopeStore(dir)
+
+  // A partial mutation must not reset the fields the caller did not name.
+  const upgraded = await s.write(d => ({ ...d, projection: 'off' }), 0)
+  assert.equal(upgraded.version, 2)
+  assert.equal(upgraded.mode, 'global')
+  assert.deepEqual(upgraded.workspaceIds, ['ws-a', 'ws-b'])
+  assert.equal(upgraded.shadow, false)
+  assert.equal(upgraded.projection, 'off')
+
+  const after = await s.read()
+  assert.equal(after.degraded, undefined)
+  assert.deepEqual(after.doc, upgraded)
+})
+
 test('future version 文件只读降级且拒绝写入，内容逐字保留', async () => {
   const dir = await tempDir()
   const file = join(dir, 'scope.json')

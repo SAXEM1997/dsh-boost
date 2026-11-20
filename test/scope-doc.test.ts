@@ -10,6 +10,7 @@ import {
   ERR_SCOPE_READ_FAILED,
   ERR_SCOPE_REVISION_CONFLICT,
   ERR_SCOPE_LOCKED,
+  parseVersionOneScope,
 } from '../src/scope/doc.ts'
 
 test('默认谁都不给', () => {
@@ -193,4 +194,73 @@ test('updatedAt 只做字符串检查：字符串保留，其他类型丢弃', (
   for (const updatedAt of [42, null, {}, ['x'], true]) {
     assert.equal(Object.hasOwn(parseScope({ version: 2, updatedAt }).doc, 'updatedAt'), false)
   }
+})
+
+// ---------------------------------------------------------------------------
+// Version-1 upgrade base (review row 38): only the explicit upgrade path may
+// rewrite a v1 file, and it must carry the fields the user wrote.
+// ---------------------------------------------------------------------------
+
+test('version 1 升级基线保留 global / workspaceIds / shadow / projection', () => {
+  const v1 = {
+    version: 1,
+    revision: 9,
+    mode: 'global',
+    workspaceIds: ['ws-a', 'ws-b'],
+    shadow: false,
+    projection: 'on',
+    updatedAt: '2026-11-19T00:00:00Z',
+  }
+  const doc = parseVersionOneScope(v1)
+  assert.ok(doc)
+  assert.deepEqual(doc, {
+    version: 2,
+    revision: 0,
+    mode: 'global',
+    workspaceIds: ['ws-a', 'ws-b'],
+    shadow: false,
+    projection: 'on',
+    updatedAt: '2026-11-19T00:00:00Z',
+  })
+})
+
+test('version 1 升级基线只接受 version === 1，畸形字段按最严一侧补齐', () => {
+  for (const raw of [
+    { version: 2, mode: 'global' },
+    { version: 3, mode: 'global' },
+    { mode: 'global' },
+    { version: '1', mode: 'global' },
+    null,
+    [],
+    'x',
+  ]) {
+    assert.equal(parseVersionOneScope(raw), undefined, JSON.stringify(raw))
+  }
+
+  const doc = parseVersionOneScope({
+    version: 1,
+    mode: 'GLOBAL',
+    workspaceIds: ['ok', 1, null],
+    shadow: 'no',
+    projection: 'partial',
+    revision: 4,
+  })
+  assert.deepEqual(doc, {
+    version: 2,
+    revision: 0,
+    mode: 'selected',
+    workspaceIds: ['ok'],
+    shadow: true,
+    projection: 'shadow',
+  })
+})
+
+test('version 1 升级基线返回独立副本', () => {
+  const first = parseVersionOneScope({ version: 1, workspaceIds: ['ws-a'] })
+  assert.ok(first)
+  first.workspaceIds.push('ws-b')
+  first.mode = 'global'
+  const second = parseVersionOneScope({ version: 1, workspaceIds: ['ws-a'] })
+  assert.deepEqual(second?.workspaceIds, ['ws-a'])
+  assert.equal(second?.mode, 'selected')
 })
