@@ -216,6 +216,7 @@ bundle，patch 的 `insert` 行落在 profile root 上。**装完必须重启 DS
 | `stepsPerTurn` | 8 | 每个 turn 的替换步数上限 |
 | `horizonSteps` | 20 | 算不出会话历史均值时的剩余步数 horizon |
 | `historyTurns` | 5 | 求步数均值所用的最近 turn 数 |
+| `dshHome` | `$DSH_HOME`，未设则 `~/.dsh` | 状态根前缀：实际用 `<dshHome>/boost`，且优先于 `$DSH_HOME`；空白或非字符串视为未设，相对路径按装配时 cwd 解析一次。装配日志会打印解析后的 `root=` |
 
 字符按 Unicode 码点计。错误回执与超过 256 KiB 的回执不投影。
 

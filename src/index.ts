@@ -648,10 +648,22 @@ export function apply(ctx: PluginContext, config: unknown): void {
     repairs.push(message)
     ctx.logger?.warn?.(message)
   })
+  // The effective-config line serialises `resolveConfig`'s output, which never
+  // carries `dshHome` (that override is resolved by `resolveBoostRoot`). Log
+  // the resolved root with it, once, so the operator can see the state root in
+  // use — including the `$DSH_HOME`/`~/.dsh` fallback and the cwd resolution of
+  // a relative override.
+  let root: string
+  try {
+    root = resolveBoostRoot(config)
+  } catch (error) {
+    ctx.logger?.warn?.(`dsh-boost: cannot resolve the state root: ${messageOf(error)}`)
+    return
+  }
   // One line with the effective values (not only the keys this module happens
   // to use): an operator can see every clamp and fallback instead of guessing.
   ctx.logger?.info?.(
-    `dsh-boost loaded (stepsPerTurn=${cfg.stepsPerTurn}, horizonSteps=${cfg.horizonSteps}); effective config=${JSON.stringify(cfg)}`,
+    `dsh-boost loaded (stepsPerTurn=${cfg.stepsPerTurn}, horizonSteps=${cfg.horizonSteps}); effective config=${JSON.stringify(cfg)}; root=${root}`,
   )
   if (repairs.length > 0) {
     ctx.logger?.info?.(`dsh-boost: ${repairs.length} configuration value(s) repaired`)
@@ -664,9 +676,9 @@ export function apply(ctx: PluginContext, config: unknown): void {
 
   let hooksMounted = false
   try {
-    // One root rule for both stores (design §10); `resolveBoostRoot` is the
-    // only implementation, so `apply` and the hook stores cannot diverge.
-    const root = resolveBoostRoot(config)
+    // The root was resolved above (D4) so the log can show it; both stores use
+    // the same value. `resolveBoostRoot` is the only root rule (design §10), so
+    // `apply` and the hook stores cannot diverge.
     const scope = new ScopeStore(root, { warn: (message: string) => ctx.logger?.warn?.(message) })
     const receipts = new ReceiptStore(root)
     const anchors = new AnchorStore()

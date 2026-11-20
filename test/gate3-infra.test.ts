@@ -404,6 +404,9 @@ test('minor: apply logs the resolved configuration once', async () => {
   const line = lines[0]
   assert.ok(line !== undefined, JSON.stringify(app.infos))
   assert.match(line, /"stepsPerTurn":4/)
+  // D4: the effective-config line does not carry `dshHome`; the resolved state
+  // root is logged with it so the operator can see the root actually in use.
+  assert.ok(line.includes(`root=${app.root}`), line)
 })
 
 // ---------------------------------------------------------------------------

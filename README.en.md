@@ -251,6 +251,7 @@ cap is 256 KiB, so `300000` prevents the family from triggering at all (there is
 | `stepsPerTurn` | 8 | Maximum substituted steps per turn |
 | `horizonSteps` | 20 | Remaining-step horizon used when the session average cannot be computed |
 | `historyTurns` | 5 | Number of recent turns averaged for the step count |
+| `dshHome` | `$DSH_HOME`, else `~/.dsh` | State-root prefix: the plugin uses `<dshHome>/boost`, and it wins over `$DSH_HOME`; a blank or non-string value counts as unset, and a relative path is resolved once against the cwd at assembly. The assembly log prints the resolved `root=` |
 
 Characters are Unicode code points. Error receipts and receipts above 256 KiB are never projected.
 
