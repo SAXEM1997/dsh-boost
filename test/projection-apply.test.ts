@@ -113,13 +113,13 @@ test('applied 结果带省略字节与码点，token 计量留给调用方（T23
   })
 })
 
-test('低于触发阈值：不投影、不落盘，outcome 只有 kind', async () => {
+test('低于触发阈值：不投影、不落盘，outcome 带 not-worth-it', async () => {
   const text = 'a'.repeat(2999)
   let saved = 0
   const counting = { saveText: async () => { saved++; return { locator: '/x', retrievalHint: 'h' } } }
   const r = await projectApply({ text, isError: false, family: 'read', cfg: DEFAULT_CONFIG, sessionId: 's1', toolName: 'read', spill: counting, formatFooter: footer })
   assert.equal(r.content, text)
-  assert.deepEqual(r.outcome, { kind: 'skipped' })
+  assert.deepEqual(r.outcome, { kind: 'skipped', reason: 'not-worth-it' })
   assert.equal(saved, 0)
 })
 

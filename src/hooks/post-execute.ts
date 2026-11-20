@@ -7,15 +7,17 @@
  *
  * - `tools/post-execute` first gates on the same cached scope judgement the
  *   protocol section reads, then canonicalises the result and runs a
- *   conservative invalidation check plus the double-projection guard. It then
- *   files the arriving receipt under `'root'`, works the substitution decision
- *   (`decide` → admission → pending queue / shadow receipt / fallback), and
+ *   conservative invalidation check. It files the arriving receipt under
+ *   `'root'`, works the substitution decision (`decide` → admission → pending
+ *   queue / shadow receipt / fallback), then the double-projection guard, and
  *   finally projects the receipt when the scope document asks for it. Order is
- *   fixed: `next() → canonicalise → invalidate → decide → (shadow receipt |
- *   admit and enqueue | fallback) → projection → return the decision`
- *   (plan §Task 23b). A call with no `exec.agent` is not the plugin's to
- *   inspect: the downstream decision is returned untouched and a
- *   `skip:no-scope` receipt keeps the pass visible (design §5.5).
+ *   fixed: `next() → scope gate → canonicalise → invalidate → decide →
+ *   (shadow receipt | admit and enqueue | fallback) → double-projection guard →
+ *   projection → return the decision` (plan §Task 23b). A call with no
+ *   `exec.agent` is not the plugin's to inspect: the downstream decision is
+ *   returned untouched and a `skip:no-scope` receipt keeps the pass visible
+ *   (design §5.5). A call carrying `exec.parent` is a PTC inner dispatch and
+ *   returns before any of this: it is not the step's root receipt.
  * - `llm/stream` is the model-request waterfall. Its body lives in
  *   `./llm-stream.ts` (Task 23c-1) and is re-exported below: it lets the
  *   plugin's own selector request through untouched, then answers a pending
@@ -43,15 +45,19 @@
  * later step can project a value from an earlier step. The executable args
  * always come from the *decision* (`decision.args` / `decision.candidates[i]
  * .args`), never from `plan.steps[i].args`, which still holds `$public`
- * templates. A commit consumes that candidate from the session plan; without
- * it `decide` would re-commit the same step until the budget ran out.
+ * templates. A plan is one-shot per receipt: the first post-execute that reads
+ * it removes it, so neither a guard failure nor a commit can leave the block
+ * alive to fire against a later receipt (the model writes a new block for its
+ * next call). It also means `decide` cannot re-commit the same step.
  *
  * The `shadow` flag from the scope document drives both `decide` (which skips
  * the whitelist) and the record-only branch: a shadow commit writes a
- * `{kind:'shadow'}` receipt and neither enqueues, takes budget, nor projects.
- * Admission runs in the mandated order — existence, `worthSubstituting`, then
- * `budget.take()` — so a fallback never spends budget for a call it did not
- * substitute.
+ * `{kind:'shadow'}` receipt and neither enqueues nor takes budget. It does
+ * **not** suppress projection: `shadow` and `projection` are independent
+ * switches (design §5.2-5), and projection-shadow mode writes only its
+ * accounting receipt. Admission runs in the mandated order — existence,
+ * `worthSubstituting`, then `budget.take()` — so a fallback never spends budget
+ * for a call it did not substitute.
  *
  * Everything here is contained: the host turns a throwing `post-execute`
  * listener into an error result and the tool's real output is lost, so every
@@ -94,11 +100,22 @@ import { familyOf } from '../tools/family.js'
 import type { AgentLike, BoostConfig, PluginContext } from '../types.js'
 import type { TurnClock } from './clock.js'
 import { rejectIfTampered } from './execute.js'
-import { sessionBudget, sessionClock, sessionUsage, streamHook } from './llm-stream.js'
+import { receiptsStopped, sessionBudget, sessionClock, sessionUsage, streamHook } from './llm-stream.js'
 import type { SessionRuntime } from './llm-stream.js'
 import { callIdFor } from './pending.js'
 import type { PendingEntry, PendingQueue } from './pending.js'
-import { ReceiptSessionState } from './session-state.js'
+import {
+  ReceiptSessionState,
+  appendReceipt,
+  callPreview,
+  clearAnchors,
+  clearPlan,
+  clearPending,
+  clockTurnOf,
+  peekPending,
+  previewOf,
+} from './session-state.js'
+import type { ReceiptInput } from './session-state.js'
 
 /**
  * The `llm/stream` body lives in its own module (Task 23c-1). It is re-exported
@@ -106,9 +123,6 @@ import { ReceiptSessionState } from './session-state.js'
  * and the integration tests import; the mount below uses the same function.
  */
 export { streamHook }
-
-/** The store's append input, without exporting the private alias from T7. */
-type ReceiptInput = Parameters<ReceiptStore['append']>[0]
 
 /**
  * The substitution whitelist: exactly the read-only trio (design §5.2-5).
@@ -270,6 +284,12 @@ type PostExecuteExec = {
   agent?: AgentLike | undefined
   /** Parsed tool arguments; the retrieval matcher reads them (Task 25). */
   arguments?: unknown
+  /**
+   * PTC transport token. Present on an SDK sub-dispatch (`tools/execute` and
+   * `tools/post-execute` run for inner calls too), where the result belongs to
+   * the enclosing `run_code` step and is not the step's root receipt.
+   */
+  parent?: unknown
 }
 
 /** The normalized result fields canonicalisation reads. */
@@ -351,16 +371,6 @@ function protocolText(scope: ScopeStore | undefined, context: { scope?: unknown 
 // Defensive readers: every foreign call is wrapped
 // ---------------------------------------------------------------------------
 
-/** The session's host turn, or 0 when no clock is wired (receipts still carry `ts`). */
-function clockTurnOf(deps: HookDeps, sessionId: string): number {
-  try {
-    const turn = sessionClock(deps, sessionId)?.turn()
-    return typeof turn === 'number' && Number.isFinite(turn) ? turn : 0
-  } catch {
-    return 0
-  }
-}
-
 /**
  * The host step index, or `undefined` when no clock can supply one.
  *
@@ -373,28 +383,6 @@ function clockStepOf(deps: HookDeps, sessionId: string): number | undefined {
     return typeof step === 'number' && Number.isFinite(step) ? step : undefined
   } catch {
     return undefined
-  }
-}
-
-/** The pending entry for a session, never removing it and never throwing. */
-function peekPending(deps: HookDeps, sessionId: string): PendingEntry | undefined {
-  try {
-    const queue = deps.queue
-    if (queue == null || typeof queue.peek !== 'function') return undefined
-    return queue.peek(sessionId)
-  } catch {
-    return undefined
-  }
-}
-
-/** Drop the session's pending entry; a foreign queue must not break the call. */
-function clearPending(deps: HookDeps, sessionId: string): void {
-  try {
-    const queue = deps.queue
-    if (queue == null || typeof queue.clear !== 'function') return
-    queue.clear(sessionId)
-  } catch {
-    // Containment only: a stale entry costs a false reject later, not this call.
   }
 }
 
@@ -430,15 +418,6 @@ function markerResetOf(
   }
 }
 
-/** Clear the session's anchors; a foreign store must not turn the result into an error. */
-function clearAnchors(deps: HookDeps, sessionId: string): void {
-  try {
-    deps.anchors?.clear(sessionId)
-  } catch {
-    // Containment only: the store is evidence, not a precondition.
-  }
-}
-
 /** Write one ledger record, keyed to the session and host turn. */
 function ledgerEntry(
   ctx: DecisionContext,
@@ -454,18 +433,12 @@ function ledgerEntry(
     kind,
     code,
     ...(typeof ctx.exec.name === 'string' ? { tool: ctx.exec.name } : {}),
+    // The operator's evidence line: the canonical receipt head and the executed
+    // args. Without args every same-tool/same-turn receipt hashed identically
+    // (stepId is always 'root').
+    preview: previewOf(ctx.receipt.text),
+    ...(ctx.exec.arguments !== undefined ? { args: ctx.exec.arguments } : {}),
     ...extra,
-  }
-}
-
-/** Append one receipt; a receipt is evidence, never a precondition. */
-async function appendReceipt(deps: HookDeps, receipt: ReceiptInput): Promise<void> {
-  const store = deps.receipts
-  if (store == null || typeof store.append !== 'function') return
-  try {
-    await store.append(receipt)
-  } catch {
-    // A receipt is evidence, not a precondition: never break the call for it.
   }
 }
 
@@ -540,9 +513,12 @@ async function resetInvalidatedPending(
   code: 'pruned-reset' | 'compaction-reset',
 ): Promise<void> {
   // Design §5.2-7: a reset returns to the slow path *and* empties pending, so no
-  // queued substitution can fire from anchors that no longer name live text.
+  // queued substitution can fire from anchors that no longer name live text. The
+  // plan is dropped too: it was written for the invalidated receipt, and leaving
+  // it would let it fire against a later one.
   clearAnchors(deps, sessionId)
   clearPending(deps, sessionId)
+  clearPlan(deps, sessionId)
   await appendResetReceipt(deps.receipts, exec, sessionId, turn, pending.stepId, code)
 }
 
@@ -755,12 +731,14 @@ async function recordProjectionRetrieval(
       version: 1,
       ts: new Date().toISOString(),
       sessionId,
-      turn: clockTurnOf(deps, sessionId),
+      turn: clockTurnOf(deps, sessionId) ?? 0,
       kind: 'projection',
       code: 'projection-retrieval',
       tool: name,
       retrieved: true,
       locator: pending.locator,
+      preview: previewOf(visibleText),
+      ...(exec.arguments !== undefined ? { args: exec.arguments } : {}),
     }
     if (cost === undefined) {
       entry.estimate = 'unknown'
@@ -851,23 +829,6 @@ function markSubstituted(deps: HookDeps, sessionId: string, candidateId: string)
     sessionUsage(deps, sessionId)?.markSubstituted(candidateId)
   } catch {
     // A ledger miss costs a measurement, never this call.
-  }
-}
-
-/** Replace the session plan with one that no longer contains the committed candidate. */
-function consumePlan(deps: HookDeps, sessionId: string, candidateId: string): void {
-  try {
-    const plans = deps.plans
-    if (plans == null || typeof plans.get !== 'function' || typeof plans.set !== 'function') return
-    const plan = plans.get(sessionId)
-    if (plan === undefined) return
-    if (!plan.steps.some((step) => step.id === candidateId)) return
-    plans.set(sessionId, {
-      goal: plan.goal,
-      steps: plan.steps.filter((step) => step.id !== candidateId),
-    })
-  } catch {
-    // A plan that cannot be updated only costs a re-decision later.
   }
 }
 
@@ -1115,15 +1076,19 @@ async function chooseCandidate(
       // `candidates` are the decision's copies: their args are the bound tree.
       return candidates.find((candidate) => candidate.id === result.choice)
     }
+    // §5.2-3 distinguishes a timeout/no-label abstention from a failed call:
+    // `choose` maps its own dispatch failure to `abstain: 'error'`, and that is
+    // the `selector-error` branch, not a second abstention reason.
+    const code = result.abstain === 'error' ? 'selector-error' : 'selector-abstain'
     await appendReceipt(
       deps,
-      ledgerEntry(ctx, 'skip', 'selector-abstain', { stepId: 'root', reason: result.abstain }),
+      ledgerEntry(ctx, 'skip', code, { stepId: 'root', reason: result.abstain }),
     )
     return undefined
   } catch {
     await appendReceipt(
       deps,
-      ledgerEntry(ctx, 'skip', 'selector-abstain', { stepId: 'root', reason: 'error' }),
+      ledgerEntry(ctx, 'skip', 'selector-error', { stepId: 'root', reason: 'error' }),
     )
     return undefined
   }
@@ -1145,16 +1110,32 @@ async function chooseCandidate(
  * `fallback` records the decision code and leaves the pending entry alone: this
  * invocation has enqueued nothing, so any entry it finds belongs to another
  * call, and clearing it would cancel a live substitution in a multi-call step.
- * A commit consumes the candidate and, outside shadow mode, parks the
- * substituted call for `tools/execute`; the entry is dropped at turn rollover
- * or on a reset.
+ * A plan is **one-shot per receipt**: the first post-execute that reads it
+ * removes it from the session map, whatever the outcome (commit, guard
+ * failure, selector abstention, no candidate). The protocol says a block
+ * describes the next call and may be omitted when unsure; retaining it would
+ * let a plan the model has withdrawn fire against a much later receipt. The
+ * remaining candidates are not reused either; the model writes a fresh block
+ * for the next call (and may still reference an earlier receipt by id).
+ *
+ * A shadow commit parks nothing, but projection is independent of the shadow
+ * flag (design §5.2-5) and still runs in `applyDecision`.
  */
 async function decideSubstitution(
   deps: HookDeps,
   ctx: DecisionContext,
-): Promise<{ shadowCommitted: boolean }> {
+): Promise<void> {
+  // Fail-closed gate (design §5.2-3): a store that cannot record evidence
+  // cannot justify spending a selector call or a budget step. No receipt is
+  // attempted here either; the store is already failing, and status exposes
+  // `receipts.stopped()` to the operator.
+  if (receiptsStopped(deps)) return
+
   const plan = safePlan(deps, ctx.sessionId)
-  if (plan === undefined) return { shadowCommitted: false }
+  if (plan === undefined) return
+  // One-shot: capture the plan for this pass, then drop it before any branch can
+  // return, so no later receipt can reuse it.
+  clearPlan(deps, ctx.sessionId)
 
   // Design §9: no token meter means no substitution. The meter is what prices
   // `worthSubstituting` and the selector's input, so running without it would
@@ -1173,7 +1154,7 @@ async function decideSubstitution(
         reason: 'no-token-meter',
       }),
     )
-    return { shadowCommitted: false }
+    return
   }
 
   let decision: ReturnType<typeof decide>
@@ -1186,7 +1167,7 @@ async function decideSubstitution(
       shadow: ctx.doc.shadow,
     })
   } catch {
-    return { shadowCommitted: false }
+    return
   }
 
   // Substitution synthesises a dispatch and expects POSIX process semantics;
@@ -1203,7 +1184,7 @@ async function decideSubstitution(
         reason: 'platform-unsupported',
       }),
     )
-    return { shadowCommitted: false }
+    return
   }
 
   let candidate: Candidate | undefined
@@ -1220,7 +1201,7 @@ async function decideSubstitution(
     // `selector-unavailable` degradation, not an admission decision.
     if (selectorSeamUnavailable(deps, ctx)) {
       await appendReceipt(deps, ledgerEntry(ctx, 'skip', 'selector-unavailable', { stepId: 'root' }))
-      return { shadowCommitted: false }
+      return
     }
     selectorReceiptText = selectorReceiptOf(deps, ctx)
     const charge = selectorChargeOf(deps, decision.candidates, selectorReceiptText)
@@ -1229,17 +1210,17 @@ async function decideSubstitution(
         deps,
         ledgerEntry(ctx, 'skip', 'not-admitted', { stepId: 'root', reason: 'no-estimator' }),
       )
-      return { shadowCommitted: false }
+      return
     }
     selectorOverhead = charge
     if (!admittedFor(deps, ctx.sessionId, plan, selectorOverhead)) {
       await appendReceipt(deps, ledgerEntry(ctx, 'skip', 'not-admitted', { stepId: 'root' }))
-      return { shadowCommitted: false }
+      return
     }
     // The decision's candidates already carry the bound trees; committing from
     // the plan here would dispatch a `$public` template.
     const chosen = await chooseCandidate(deps, ctx, decision.candidates, selectorReceiptText)
-    if (chosen === undefined) return { shadowCommitted: false }
+    if (chosen === undefined) return
     candidate = chosen
     boundArgs = chosen.args
     candidateId = chosen.id
@@ -1248,7 +1229,7 @@ async function decideSubstitution(
     // call in the step; cancelling it would leave the budget spent and usage
     // marked for a substitution that never runs (review F2).
     await appendReceipt(deps, ledgerEntry(ctx, 'skip', decision.code, { stepId: 'root' }))
-    return { shadowCommitted: false }
+    return
   } else {
     candidate = plan.steps.find((step) => step.id === decision.candidateId)
     boundArgs = decision.args
@@ -1258,7 +1239,7 @@ async function decideSubstitution(
   if (candidate === undefined || boundArgs === undefined || candidateId === undefined) {
     // decide only commits its own plan's ids; this is containment, not a path.
     await appendReceipt(deps, ledgerEntry(ctx, 'skip', 'no-candidate', { stepId: 'root' }))
-    return { shadowCommitted: false }
+    return
   }
 
   // The live visibility check runs for the shadow path too: the record-only
@@ -1267,13 +1248,14 @@ async function decideSubstitution(
   // but the document may have changed while the session ran.
   if (!substitutableSession(deps, ctx.sessionId, ctx.doc)) {
     await appendReceipt(deps, ledgerEntry(ctx, 'skip', 'skip:no-scope', { stepId: 'root' }))
-    return { shadowCommitted: false }
+    return
   }
 
   if (ctx.doc.shadow) {
     // Record-only: the same `shadow` flag was passed to `decide` above, so the
-    // recorded potential matches the policy that produced it. No queue entry,
-    // no budget, and no projection (obligation 5).
+    // recorded potential matches the policy that produced it. No queue entry
+    // and no budget. Projection is a separate switch and still runs afterwards
+    // (design §5.2-5); this branch only stops the substitution side.
     await appendReceipt(
       deps,
       ledgerEntry(ctx, 'shadow', 'ok', {
@@ -1289,8 +1271,7 @@ async function decideSubstitution(
         args: boundArgs,
       }),
     )
-    consumePlan(deps, ctx.sessionId, candidateId)
-    return { shadowCommitted: true }
+    return
   }
 
   const step = clockStepOf(deps, ctx.sessionId)
@@ -1299,26 +1280,26 @@ async function decideSubstitution(
       deps,
       ledgerEntry(ctx, 'skip', 'substitution-unavailable', { stepId: 'root', reason: 'no-step' }),
     )
-    return { shadowCommitted: false }
+    return
   }
   if (deps.queue == null || typeof deps.queue.set !== 'function') {
     await appendReceipt(
       deps,
       ledgerEntry(ctx, 'skip', 'substitution-unavailable', { stepId: 'root', reason: 'no-queue' }),
     )
-    return { shadowCommitted: false }
+    return
   }
 
   if (!admittedFor(deps, ctx.sessionId, plan, selectorOverhead)) {
     await appendReceipt(deps, ledgerEntry(ctx, 'skip', 'not-admitted', { stepId: 'root' }))
-    return { shadowCommitted: false }
+    return
   }
 
   if (!takeBudget(deps, ctx.sessionId)) {
     // No entry is ours to clear here: this invocation enqueued nothing, so a
     // live entry belongs to another call in the step (review F2).
     await appendReceipt(deps, ledgerEntry(ctx, 'skip', 'steps-exhausted', { stepId: 'root' }))
-    return { shadowCommitted: false }
+    return
   }
 
   const callId = callIdFor(ctx.sessionId, ctx.turn, step, candidateId)
@@ -1346,7 +1327,7 @@ async function decideSubstitution(
         budget: 'spent',
       }),
     )
-    return { shadowCommitted: false }
+    return
   }
 
   markSubstituted(deps, ctx.sessionId, candidateId)
@@ -1354,8 +1335,7 @@ async function decideSubstitution(
   // args are already expanded, so only the plan copy still carries the
   // `$public` references. That tree is inspected here, never dispatched.
   setAnchors(deps, ctx, plan.steps.find((step) => step.id === candidateId)?.args ?? boundArgs)
-  consumePlan(deps, ctx.sessionId, candidateId)
-  return { shadowCommitted: false }
+  return
 }
 
 /** The session's plan, or `undefined` when none is known (or the map is foreign). */
@@ -1453,12 +1433,15 @@ async function projectDecision(
   const toolName = ctx.exec.name
   const family = toolName === undefined ? undefined : familyOf(toolName)
   if (family === undefined) {
-    // The mapper missed a tool. Count it so status can distinguish "no window
-    // configured, by design" from "a decorated name was never recognised".
-    try {
-      deps.projectionCounters?.unknownFamily(toolName)
-    } catch {
-      // A counter is evidence, never a precondition.
+    // `edit`, `web_fetch`, `todo_write`, `boost` and friends are by-design
+    // passes, not mapper gaps. Only a decorated (`mcp__*`) name means the
+    // mapper may have missed a real family, so only that is counted.
+    if (typeof toolName === 'string' && toolName.startsWith('mcp__')) {
+      try {
+        deps.projectionCounters?.unknownFamily(toolName)
+      } catch {
+        // A counter is evidence, never a precondition.
+      }
     }
     return decision
   }
@@ -1568,8 +1551,10 @@ async function projectDecision(
       // deterministic policy, not a per-call decision (design §5.3), so they
       // write nothing.
       // A skip projected nothing, so it is a `skip` receipt, not a
-      // `projection` one: every `kind:'projection'` receipt in this plugin
-      // carries numeric before/after and `saved_projection_tokens`.
+      // `projection` one. `kind:'projection'` is not a promise of numeric
+      // fields: the meterless branch above writes `estimate:'unknown'` without
+      // before/after/saved_projection_tokens (design §9), and consumers must
+      // treat those as unpriced rather than assume the numbers exist.
       await appendReceipt(
         deps,
         ledgerEntry(ctx, 'skip', projectionSkipCode(outcome.reason)),
@@ -1588,21 +1573,25 @@ async function projectDecision(
  *
  * Both seams live in one place so the listener's order is visible in one
  * function: decide, then the double-projection guard, then project. A shadow
- * commit stops before the guard because it must neither project nor pay for
- * the notice predicate.
+ * substitution does not stop the projection: the two switches are independent
+ * (design §5.2-5), and in projection-shadow mode the projection writes only
+ * its accounting line.
  */
 async function applyDecision(
   deps: HookDeps,
   decision: PostExecuteDecision,
   ctx: DecisionContext,
 ): Promise<PostExecuteDecision> {
-  const outcome = await decideSubstitution(deps, ctx)
-  if (outcome.shadowCommitted) return decision
+  // Projection below runs for a shadow commit too: the decision side never
+  // suppresses the projection ledger.
+  await decideSubstitution(deps, ctx)
 
-  // Second-projection guard. The host spiller registers with `{ prepend: true }`,
-  // so its footer is applied to the decision *after* this listener's next(),
-  // never to the `result.content` received here. Check the decision that will
-  // enter history, and the receiver as it arrived (design §5.4).
+  // Second-projection guard. The host spiller registers with `{ prepend: true }`:
+  // it calls `next()` and adds its footer to that decision *after* this listener
+  // returns. So this check sees only the footer an inner listener already wrote,
+  // never the host's own; it must not be read as full double-spill detection.
+  // Both the receiver as it arrived and the decision that will enter history are
+  // checked (design §5.4).
   if (await isAlreadySpilled(deps, ctx.receipt.text)) return decision
   const downstreamText = decisionTextOf(decision) ?? ctx.receipt.text
   if (downstreamText !== ctx.receipt.text && await isAlreadySpilled(deps, downstreamText)) {
@@ -1639,6 +1628,13 @@ async function postExecute(
 ): Promise<PostExecuteDecision> {
   const decision = await next()
 
+  // A PTC inner call traverses this waterfall with `parent` set. Its result
+  // belongs to the enclosing `run_code` step, not to a step of its own: it must
+  // not become `root`, drive a decision, consume the outer plan or overwrite the
+  // outer anchors. Leaving it untouched is what keeps a plan from being decided
+  // from an inner receipt.
+  if (exec !== undefined && exec.parent !== undefined) return decision
+
   if (exec?.agent === undefined) {
     await appendSkipNoScope(deps.receipts, exec)
     return decision
@@ -1656,6 +1652,13 @@ async function postExecute(
     return decision
   }
 
+  // A substituted call denied by `tools/pre-execute` (approval or sandbox)
+  // returns a post-result without invoking `tools/execute`, while post-execute
+  // still runs. Matching the call id here clears the pending entry even though
+  // no dispatch mapping exists, so the substitution is not re-synthesized on
+  // every later step of the turn.
+  clearMatchingPending(deps, sessionId, exec)
+
   // Detect the retrieval before the visibility gate (a projected receipt
   // already consumed context regardless of today's scope), but write its cost
   // only after projection, when the final visible content is known (review I3).
@@ -1666,7 +1669,7 @@ async function postExecute(
       const arrival = canonicalise(result?.content ?? [], result?.isError === true)
       await recordProjectionRetrieval(deps, exec, sessionId, retrieval, arrival.text)
     }
-    await appendSkipNoScope(deps.receipts, exec, sessionId, clockTurnOf(deps, sessionId))
+    await appendSkipNoScope(deps.receipts, exec, sessionId, clockTurnOf(deps, sessionId) ?? 0)
     return decision
   }
 
@@ -1674,7 +1677,7 @@ async function postExecute(
     // Canonicalise the original receiver, not a downstream replacement: guards
     // and the selector read the receipt as it arrived.
     const receipt = canonicalise(result?.content ?? [], result?.isError === true)
-    const turn = clockTurnOf(deps, sessionId)
+    const turn = clockTurnOf(deps, sessionId) ?? 0
 
     // The receipt map is the gate's memory for this turn. `begin` folds the
     // previous turn away (anchors live in the store, receipts and in-flight
@@ -1686,6 +1689,10 @@ async function postExecute(
       // one, so it is dead weight; the reset path clears mid-turn (F2).
       clearAnchors(deps, sessionId)
       clearPending(deps, sessionId)
+      // The plan map is not cleared here: `llm/stream` already dropped the old
+      // turn's plan on this turn's first request, and the plan present now was
+      // parsed by that request's response. Clearing it here would discard a
+      // valid new-turn plan.
     }
     state.recordRoot(sessionId, turn, receipt)
     fileDispatchedReceipt(state, exec, sessionId, turn, receipt)
@@ -1736,6 +1743,25 @@ async function postExecute(
   }
 }
 
+/**
+ * Drop a pending entry whose call id matches the arriving result.
+ *
+ * The execute hook clears the entry when it inspects an accepted or rejected
+ * dispatch, but a call denied by `tools/pre-execute` never reaches that hook;
+ * post-execute is then the only observer that knows the substituted call is
+ * over. A different call id is an ordinary call and leaves the entry alone.
+ */
+function clearMatchingPending(
+  deps: HookDeps,
+  sessionId: string,
+  exec: PostExecuteExec,
+): void {
+  const pending = peekPending(deps, sessionId)
+  if (pending === undefined) return
+  if (typeof exec.callId !== 'string' || exec.callId !== pending.callId) return
+  clearPending(deps, sessionId)
+}
+
 /** File an executed candidate's receipt under its plan id, consuming the dispatch record. */
 function fileDispatchedReceipt(
   state: ReceiptSessionState,
@@ -1774,13 +1800,17 @@ async function appendDispatchRejected(
     version: 1,
     ts: new Date().toISOString(),
     sessionId,
-    turn: clockTurnOf(deps, sessionId),
+    turn: clockTurnOf(deps, sessionId) ?? 0,
     stepId: 'root',
     kind: 'skip',
     code: 'dispatch-rejected',
     tool: exec.name,
     callId: typeof exec.callId === 'string' ? exec.callId : undefined,
     candidateId: entry.candidateId,
+    // The refused call's own args, not the pending decision's: the operator
+    // needs to see exactly what the host was asked to run.
+    args: exec.arguments,
+    preview: callPreview(exec.name, exec.arguments),
   })
 }
 
@@ -1867,7 +1897,7 @@ async function executeHook(
     try {
       state.recordDispatch(
         outcome.sessionId,
-        clockTurnOf(deps, outcome.sessionId),
+        clockTurnOf(deps, outcome.sessionId) ?? 0,
         outcome.callId,
         outcome.candidateId,
       )

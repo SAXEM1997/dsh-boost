@@ -1,7 +1,13 @@
 /**
  * Per-session bookkeeping for the post-execute decision path.
  *
- * Two maps live here, both keyed by session id and both scoped to one host turn
+ * The receipt/dispatch maps below are the class's own state. The module also
+ * owns the small plumbing both hook modules share — queue/anchor/plan access,
+ * receipt appends, the clock-turn read and receipt previews — so the two
+ * former copies cannot drift (in particular, their `clockTurnOf` fallbacks
+ * disagreed on `0` vs `undefined`).
+ *
+ * Both maps are keyed by session id and scoped to one host turn
  * (design §5.2-7: the anchor cache expires at turn end):
  *
  * - **Receipts.** `decide` evaluates guards and `$public` templates against the
@@ -25,20 +31,24 @@
  * **Lifetime.** One entry per session, scoped to the host turn. A session's
  * entry is replaced on the first call of its next turn, so the steady-state
  * retention is one turn's receipts (at most 27: `'root'` plus the plan's
- * `A`–`Z`) and any in-flight dispatches. There is no session-end signal in the
- * hooks this task owns, so a session that is never touched again keeps its last
- * turn until the process exits. `clear(sessionId)` is exposed for 23c: pass the
- * instance through `HookDeps.sessionState` and call it on whatever session-end
- * signal the host offers.
+ * `A`–`Z`) and any in-flight dispatches. `session/disposed` is wired in
+ * `src/index.ts`, which calls `clearSession(deps, sessionId)`; that drops this
+ * state along with the queue, anchors, plan and per-session runtime, so a
+ * disposed session leaves nothing behind.
  *
- * This module is private (`HookDeps` exposes only the optional instance, not
- * the class's internals). It lives apart from `post-execute.ts` because that
- * file already carries the four mount bodies and the twelve obligations;
- * mixing a mutable session map into it would make the hook harder to audit.
+ * The class's internals stay private (`HookDeps` exposes only the optional
+ * instance), and only the plumbing helpers are exported. It lives apart from
+ * `post-execute.ts` because that file already carries the four mount bodies and
+ * the eleven obligations; mixing a mutable session map into it would make the
+ * hook harder to audit.
  *
  * @module dsh-boost/hooks/session-state
  */
+import type { ReceiptAnchors } from '../gate/invalidate.js'
+import type { ReceiptStore } from '../receipts/store.js'
 import type { CanonicalReceipt } from '../projection/canonicalise.js'
+import type { TurnClock } from './clock.js'
+import type { PendingEntry, PendingQueue } from './pending.js'
 
 /** One session's receipts and in-flight dispatches for the current turn. */
 interface SessionEntry {
@@ -111,10 +121,155 @@ export class ReceiptSessionState {
   /**
    * Drop everything for one session: both maps and the stored turn.
    *
-   * 23c calls this on a session-end signal; the hooks themselves only replace
-   * an entry lazily when the next turn's first call arrives.
+   * `src/index.ts` calls this from its `session/disposed` listener through
+   * `clearSession`; the hooks themselves only replace an entry lazily when the
+   * next turn's first call arrives.
    */
   clear(sessionId: string): void {
     this.bySession.delete(sessionId)
   }
+}
+
+// ---------------------------------------------------------------------------
+// Shared session plumbing
+// ---------------------------------------------------------------------------
+//
+// `post-execute.ts` and `llm-stream.ts` both read the queue, anchors, plans and
+// receipt store. These helpers live here so the two copies that used to exist
+// cannot drift: in particular the old `clockTurnOf` returned `0` in one file and
+// `undefined` in the other, which stamped different `turn` values on receipts
+// for the same state. `receipts` and `anchors` are typed structurally so the
+// module stays usable from a test double as well as from `HookDeps`.
+
+/** The store's append input, shared by both hook modules. */
+export type ReceiptInput = Parameters<ReceiptStore['append']>[0]
+
+/** The dependencies these helpers read; `HookDeps` is structurally assignable. */
+export interface SessionPlumbing {
+  /** Shared fallback clock when no per-session runtime is wired. */
+  clock?: TurnClock
+  /** Per-session runtime; its clock is authoritative when present. */
+  sessions?: { clockFor(sessionId: string): TurnClock }
+  /** At most one pending substitution per session. */
+  queue?: PendingQueue
+  /** Per-session receipt anchors. */
+  anchors?: {
+    get(sessionId: string): ReceiptAnchors | undefined
+    clear(sessionId: string): void
+  }
+  /** Append-only receipt store. */
+  receipts?: ReceiptStore
+  /** Parsed plans, keyed by session. */
+  plans?: { delete(sessionId: string): boolean }
+}
+
+/**
+ * The session's host turn, or `undefined` when no clock can answer a real turn.
+ *
+ * The per-session runtime wins over the shared fallback, exactly as in
+ * `sessionClock`. A clock that throws, a missing clock and a non-finite or
+ * non-positive turn all mean "no host turn": `TurnClock` reports 0 before the
+ * first `agent/request`, and real host turns start at 1. Callers that need a
+ * number for a receipt field write `?? 0`; callers that decide turn validity
+ * keep the `undefined` distinction.
+ */
+export function clockTurnOf(
+  deps: SessionPlumbing,
+  sessionId: string,
+): number | undefined {
+  let clock: TurnClock | undefined
+  try {
+    clock = deps.sessions?.clockFor(sessionId) ?? deps.clock
+  } catch {
+    clock = deps.clock
+  }
+  try {
+    const turn = clock?.turn()
+    return typeof turn === 'number' && Number.isFinite(turn) && turn > 0 ? turn : undefined
+  } catch {
+    return undefined
+  }
+}
+
+/** The pending entry for a session, never removing it and never throwing. */
+export function peekPending(
+  deps: SessionPlumbing,
+  sessionId: string,
+): PendingEntry | undefined {
+  try {
+    const queue = deps.queue
+    if (queue == null || typeof queue.peek !== 'function') return undefined
+    return queue.peek(sessionId)
+  } catch {
+    return undefined
+  }
+}
+
+/** Drop the session's pending entry; a foreign queue must not break the call. */
+export function clearPending(deps: SessionPlumbing, sessionId: string): void {
+  try {
+    const queue = deps.queue
+    if (queue == null || typeof queue.clear !== 'function') return
+    queue.clear(sessionId)
+  } catch {
+    // Containment only: a stale entry costs a false reject later, not this call.
+  }
+}
+
+/** Drop the session's anchors; a foreign store must not break the call. */
+export function clearAnchors(deps: SessionPlumbing, sessionId: string): void {
+  try {
+    deps.anchors?.clear(sessionId)
+  } catch {
+    // Containment only: the store is evidence, not a precondition.
+  }
+}
+
+/** Drop the session's parsed plan; a foreign map must not break the call. */
+export function clearPlan(deps: SessionPlumbing, sessionId: string): void {
+  try {
+    deps.plans?.delete(sessionId)
+  } catch {
+    // A foreign map can only cost a later decision.
+  }
+}
+
+/** Append one receipt; a receipt is evidence, never a precondition. */
+export async function appendReceipt(
+  deps: SessionPlumbing,
+  receipt: ReceiptInput,
+): Promise<void> {
+  const store = deps.receipts
+  if (store == null || typeof store.append !== 'function') return
+  try {
+    await store.append(receipt)
+  } catch {
+    // A receipt is evidence, not a precondition: never break the call for it.
+  }
+}
+
+/** The design's preview bound: 256 code points, never split a surrogate pair. */
+const PREVIEW_CODE_POINTS = 256
+
+/** The first 256 code points of a canonical receipt, or of a synthesized call. */
+export function previewOf(text: string | undefined): string {
+  return Array.from(text ?? '').slice(0, PREVIEW_CODE_POINTS).join('')
+}
+
+/**
+ * The evidence line for a receipt that predates its tool result.
+ *
+ * A substitute or a refused dispatch has no canonical tool result yet, so its
+ * preview names the call that is being made (or was refused): the operator's
+ * question is "why did this call run?", and the name plus bound args is the
+ * answer available at that point.
+ */
+export function callPreview(name: string, args: unknown): string {
+  let encoded = ''
+  try {
+    encoded = JSON.stringify(args) ?? ''
+  } catch {
+    // A non-serialisable tree still leaves the tool name as evidence.
+  }
+  return previewOf(`${name} ${encoded}`.trim())
 }

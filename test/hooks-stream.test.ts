@@ -410,6 +410,9 @@ test('有 pending 时合成：nextCalls === 0、流里有 tool-call-delta、收�
   assert.equal(substitute.candidateId, 'A')
   assert.equal(substitute.saved_input_tokens, 'unknown')
   assert.equal(substitute.output_tokens, 'unknown')
+  assert.deepEqual(substitute.args, entry.args, 'the synthesized call args are the evidence')
+  assert.match(substitute.preview, /read/, 'preview names the call that ran')
+  assert.match(substitute.preview, /\/x/, 'preview carries the bound arguments')
 })
 
 test('O3 合成用 peek 不 take：条目活到 execute，篡改的派发仍被拒绝', async () => {
@@ -756,14 +759,60 @@ test('I1 registerHooks 自建的 sessionState 写回 deps：caller 省略时 cle
 })
 
 test('I2 换回合清计划：新回合第一次请求前丢弃上一回合的 plan', async () => {
-  const env = setup({ chunks: [{ type: 'finish', reason: { kind: 'stop' } }] })
+  const planText = `<CHISEL_PLAN>${JSON.stringify({ goal: 'turn-1', steps: [candidate()] })}</CHISEL_PLAN>`
+  const env = setup({
+    chunks: [
+      { type: 'text-delta', index: 0, text: planText },
+      { type: 'finish', reason: { kind: 'stop' } },
+    ],
+  })
   env.runtime.onModelRequest(SESSION, 1, 0)
-  await streamOnce(env, { messages: [] })
-  env.plans.set(SESSION, { goal: 'turn-1', steps: [candidate()] })
-  await streamOnce(env, { messages: [] })
-  assert.equal(env.plans.get(SESSION)?.goal, 'turn-1', 'the same turn keeps the plan it parsed')
+  await streamOnce(env)
+  assert.equal(env.plans.get(SESSION)?.goal, 'turn-1')
 
+  env.setChunks([{ type: 'finish', reason: { kind: 'stop' } }])
   env.runtime.onModelRequest(SESSION, 2, 0)
   await streamOnce(env, { messages: [] })
   assert.equal(env.plans.has(SESSION), false, 'a new turn starts without the previous turn plan')
+})
+
+test('I3 无计划回应清空旧计划：模型省略块后旧计划不得再驱动替换', async () => {
+  const env = setup({
+    chunks: [
+      { type: 'text-delta', index: 0, text: 'I am unsure; no plan this time.' },
+      { type: 'finish', reason: { kind: 'stop' } },
+    ],
+  })
+  env.runtime.onModelRequest(SESSION, 1, 0)
+  // Establish the plan-turn note, then seed a plan the response will not renew.
+  await streamOnce(env)
+  env.plans.set(SESSION, { goal: 'old', steps: [candidate()] })
+
+  await streamOnce(env)
+  assert.equal(env.plans.has(SESSION), false, 'a plan-less response clears the stored plan')
+})
+
+test('I3 reset 清空计划：pruned 与 compaction 两个分支都不得留下旧计划', async () => {
+  const cases = [
+    ['pruned-reset', `${LONG_ANCHOR.slice(0, 120)}${PRUNE_MARKER}${LONG_ANCHOR.slice(-120)}`],
+    ['compaction-reset', 'an unrelated summary of older history'],
+  ] as const
+  for (const [code, body] of cases) {
+    const env = setup({ chunks: [{ type: 'finish', reason: { kind: 'stop' } }] })
+    env.runtime.onModelRequest(SESSION, 1, 0)
+    await streamOnce(env)
+    env.plans.set(SESSION, { goal: 'old', steps: [candidate()] })
+    seedAnchored(env)
+
+    // Cancel after one chunk: `applyAbandon` must clear the plan on its own,
+    // without the normal end-of-response `rememberPlan` doing it.
+    const stream = env.host.stream(SESSION, { messages: messagesWith(body) })
+    const iterator = stream[Symbol.asyncIterator]()
+    await iterator.next()
+    await iterator.return?.(undefined)
+
+    const reset = env.receipts.find((r) => r.kind === 'reset')
+    assert.equal(reset?.code, code)
+    assert.equal(env.plans.has(SESSION), false, `${code} must clear the plan too`)
+  }
 })

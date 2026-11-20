@@ -222,7 +222,7 @@ function precheck(input: ProjectApplyInput): { skip: ProjectionOutcome } | Ready
   if (!params) return { skip: { kind: 'skipped', reason: 'family-not-configured' } }
 
   const truncation = truncate(text, params)
-  if (truncation === null) return { skip: { kind: 'skipped' } }
+  if (truncation === null) return { skip: { kind: 'skipped', reason: 'not-worth-it' } }
 
   if (!spill) return { skip: { kind: 'skipped', reason: 'no-spill' } }
   if (!sessionId) return { skip: { kind: 'skipped', reason: 'no-owner' } }

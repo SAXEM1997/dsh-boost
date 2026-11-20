@@ -16,6 +16,8 @@ import { StepBudget } from '../src/admission/ledger.ts'
 import { UsageLedger } from '../src/admission/usage.ts'
 import { TurnClock } from '../src/hooks/clock.ts'
 import { DEFAULT_CONFIG } from '../src/config.ts'
+import { ProjectionCounters } from '../src/projection/counters.ts'
+import { receiptHash } from '../src/receipts/store.ts'
 import { DEFAULT_SCOPE } from '../src/scope/doc.ts'
 
 const SESSION = 's1'
@@ -206,12 +208,25 @@ test('O2 被派发候选的回执按 candidateId 入图，后续步骤的 $publi
   assert.equal(dispatched, 'DISPATCHED')
   assert.equal(env.queue.peek(SESSION), undefined, 'execute clears on the accept path')
 
-  // Step 3: A's own receipt arrives. The anchor mismatch performs its
-  // documented conservative reset, but the receipt is still filed under A.
+  // Step 3: A's own receipt arrives. The plan was spent when A was committed,
+  // so this receipt is not a second decision; the receipt is still filed under A.
   await runPost(env.host, '/from-a', { kind: 'accept' }, { callId: first?.callId })
+  assert.equal(env.plans.has(SESSION), false, 'the plan is one-shot per receipt')
   env.anchors.clear(SESSION)
 
-  // Step 4: a fresh trigger; B's template must bind A's receipt text.
+  // Step 4: the model writes a fresh plan in its next response. B's template
+  // must still bind A's receipt text, which the session state kept.
+  env.plans.set(SESSION, {
+    goal: 'g',
+    steps: [
+      {
+        id: 'B',
+        tool: 'read',
+        args: { file_path: { $public: { after: 'A', field: '$scalar' } } },
+        guards: [{ text_contains: 'B-TRIGGER' }],
+      },
+    ],
+  })
   await runPost(env.host, 'B-TRIGGER')
   const second = env.queue.peek(SESSION)
   assert.equal(second?.candidateId, 'B')
@@ -245,29 +260,31 @@ test('O3 入队参数是绑定后的字面量，绝不重新读 plan.steps 里�
 // Obligation 4: a committed candidate is consumed from the plan
 // ---------------------------------------------------------------------------
 
-test('O4 commit 后计划移除该候选；未消费会重复 commit（此测试会变红）', async () => {
+test('O4 计划按回执一次性使用：commit 后整份计划清空，后续回执不得复用', async () => {
   const env = setup()
-  const plan = {
+  env.plans.set(SESSION, {
     goal: 'g',
     steps: [candidate('A', 'TRIGGER'), candidate('B', 'IMPOSSIBLE')],
-  }
-  env.plans.set(SESSION, plan)
+  })
 
   await runPost(env.host, 'TRIGGER')
   assert.equal(env.queue.peek(SESSION)?.candidateId, 'A')
+  assert.equal(env.plans.has(SESSION), false, 'the plan is spent once its receipt was considered')
 
-  // A second trigger that satisfies A's guard again. With consumption only the
-  // failing B remains -> no-candidate. Without consumption A re-commits.
+  // A second trigger must not re-commit A from a plan the model no longer owns.
   env.queue.clear(SESSION)
   env.anchors.clear(SESSION)
   await runPost(env.host, 'TRIGGER')
   assert.equal(env.queue.peek(SESSION), undefined, 'A must not be committed twice')
+  assert.equal(env.receipts.some((r) => r.code === 'no-candidate'), false, 'no plan, no decision')
+
+  // The model's next response can write a fresh plan; this one has nothing viable
+  // and is consumed without committing.
+  env.plans.set(SESSION, { goal: 'g', steps: [candidate('B', 'IMPOSSIBLE')] })
+  await runPost(env.host, 'TRIGGER')
+  assert.equal(env.queue.peek(SESSION), undefined)
   assert.ok(env.receipts.some((r) => r.code === 'no-candidate'))
-  assert.deepEqual(
-    env.plans.get(SESSION)?.steps.map((s: Any) => s.id),
-    ['B'],
-    'the committed candidate must leave the session plan',
-  )
+  assert.equal(env.plans.has(SESSION), false, 'a failing plan must not outlive its receipt')
 })
 
 test('O4 ask-selector 无 llm/route 时只记 selector-unavailable，不猜、不消费', async () => {
@@ -280,10 +297,10 @@ test('O4 ask-selector 无 llm/route 时只记 selector-unavailable，不猜、�
   await runPost(env.host, 'TRIGGER')
 
   assert.equal(env.queue.peek(SESSION), undefined, 'without a selector seam nothing may be queued')
-  assert.deepEqual(
-    env.plans.get(SESSION)?.steps.map((s: Any) => s.id),
-    ['A', 'B'],
-    'an abstention must keep the whole plan',
+  assert.equal(
+    env.plans.has(SESSION),
+    false,
+    'a plan considered once is spent even when the selector is unavailable',
   )
   assert.ok(
     env.receipts.some((r) => r.kind === 'skip' && r.code === 'selector-unavailable'),
@@ -308,11 +325,11 @@ test('O1 无 estimator 时拒绝替换：不入队、不调 selector、写 ERR_H
 // Obligation 5: one shadow flag drives decide and the record-only branch
 // ---------------------------------------------------------------------------
 
-test('O5 影子期 commit：写 shadow 收据，不入队、不扣预算、不投影', async () => {
+test('O5 影子期 commit：shadow 与 projection 两账独立，队列/预算/usage 不动', async () => {
   let estimated = 0
   const big = 'T'.repeat(6000) + ' TRIGGER'
   const env = setup({
-    doc: doc({ shadow: true, projection: 'on' }),
+    doc: doc({ shadow: true, projection: 'shadow' }),
     deps: { estimateText: (t: string) => (estimated += 1, Math.ceil(t.length / 4)) },
   })
   env.plans.set(SESSION, {
@@ -320,20 +337,59 @@ test('O5 影子期 commit：写 shadow 收据，不入队、不扣预算、不�
     steps: [{ id: 'A', tool: 'bash', args: { command: 'ls' }, guards: [{ text_contains: 'TRIGGER' }] }],
   })
 
-  await runPost(env.host, big)
+  const res = await runPost(env.host, big, { kind: 'accept' }, { arguments: { path: '/big' } })
 
-  const shadow = env.receipts.find((r) => r.kind === 'shadow')
+  const shadow = env.receipts.find((r) => r.kind === 'shadow' && r.code === 'ok')
   assert.ok(shadow, 'a shadow commit writes a shadow receipt')
   assert.equal(shadow.decision, 'commit')
   assert.equal(shadow.candidateId, 'A')
   assert.equal(shadow.candidateTool, 'bash', 'byFamily keys on the candidate, not the executed call')
   assert.equal(typeof shadow.admitted, 'boolean')
   assert.equal(shadow.whitelisted, false, 'shadow records families outside the whitelist')
+
+  // §5.2-5: the two switches are independent. A shadow substitution must not
+  // hide the projection ledger on exactly the receipts the gate acts on.
+  const projection = env.receipts.find(
+    (r) => r.kind === 'shadow' && r.code === 'projection-shadow',
+  )
+  assert.ok(projection, 'the shadow commit must still write projection accounting')
+  assert.equal(projection.unit, 'raw')
+  assert.equal(typeof projection.before, 'number')
+  assert.equal(typeof projection.after, 'number')
+  assert.equal(typeof projection.saved_projection_tokens, 'number')
+  assert.equal(projection.estimate, 'unknown', 'no estimateKind wired means unknown')
+  assert.ok(estimated > 0, 'projection accounting prices the receipt')
+
   assert.equal(env.queue.peek(SESSION), undefined)
   assert.equal(env.deps.budget.count(), 0, 'shadow must not take budget')
-  assert.equal(env.receipts.filter((r) => r.kind === 'projection').length, 0)
-  assert.equal(estimated, 0, 'shadow commit must not project')
   assert.equal(env.deps.usage.pendingCandidateId(), undefined, 'shadow must not mark a substitution')
+  assert.equal(env.receipts.filter((r) => r.kind === 'projection').length, 0, 'shadow projection applies nothing')
+  assert.equal(Object.hasOwn(res, 'content'), false, 'projection-shadow must not replace content')
+})
+
+test('O5 shadow 替换 + projection on：两开关独立，投影仍然生效', async () => {
+  const big = 'T'.repeat(6000) + ' TRIGGER'
+  const env = setup({
+    doc: doc({ shadow: true, projection: 'on' }),
+    deps: {
+      spill: {
+        saveText: async () => ({ locator: '/spill/read.txt', retrievalHint: 'read it' }),
+      },
+      hasSpillNotice: () => false,
+    },
+  })
+  env.plans.set(SESSION, {
+    goal: 'g',
+    steps: [{ id: 'A', tool: 'bash', args: { command: 'ls' }, guards: [{ text_contains: 'TRIGGER' }] }],
+  })
+
+  const res = await runPost(env.host, big)
+
+  assert.ok(env.receipts.some((r) => r.kind === 'shadow' && r.decision === 'commit'))
+  assert.ok(env.receipts.some((r) => r.kind === 'projection' && r.code === 'projected'))
+  assert.ok(res.content[0].text.length < big.length, 'projection on replaces content')
+  assert.equal(env.queue.peek(SESSION), undefined, 'the substitution side stays record-only')
+  assert.equal(env.deps.budget.count(), 0)
 })
 
 test('O5 同一 shadow flag 也传给 decide：bash 在影子期 commit，非影子期被白名单拒绝', async () => {
@@ -367,7 +423,7 @@ test('O5 影子期也走 live visibility：越权会话不记影子（F2 复核�
   assert.equal(env.receipts.some((r) => r.kind === 'shadow'), false)
   assert.ok(env.receipts.some((r) => r.code === 'skip:no-scope'))
   assert.equal(env.queue.peek(SESSION), undefined)
-  assert.equal(env.plans.get(SESSION)?.steps.length, 1, 'no commit, so no consumption')
+  assert.equal(env.plans.has(SESSION), false, 'the plan was considered and is spent')
 })
 
 // ---------------------------------------------------------------------------
@@ -386,11 +442,7 @@ test('O6 没有决定时不扣预算；准入通过后才 take（顺序颠倒则
   await runPost(env.host, 'TRIGGER')
   assert.ok(env.receipts.some((r) => r.code === 'no-candidate'))
   assert.equal(budget.count(), 0, 'a fallback must not take budget')
-  assert.deepEqual(
-    env.plans.get(SESSION)?.steps.map((s: Any) => s.id),
-    ['A'],
-    'a fallback keeps the plan',
-  )
+  assert.equal(env.plans.has(SESSION), false, 'a failing plan must not outlive its receipt')
 
   // A viable candidate that is admitted: only now may the budget be spent.
   env.plans.set(SESSION, {
@@ -520,6 +572,13 @@ test('O7 名/参不符走 rejectIfTampered，且同样清队列', async () => {
   assert.equal(out.isError, true)
   assert.equal(out.error.info.code, 'dispatch-rejected')
   assert.equal(env.queue.peek(SESSION), undefined)
+
+  const rejected = env.receipts.find((r) => r.code === 'dispatch-rejected')
+  assert.ok(rejected)
+  assert.deepEqual(rejected.args, { file_path: '/b' }, 'the executed (tampered) args are evidence')
+  assert.match(rejected.preview, /read/)
+  assert.match(rejected.preview, /\/b/)
+  assert.ok(Array.from(rejected.preview).length <= 256)
 })
 
 test('O7 accept 路径清队列（条目完成使命后不得残留）', async () => {
@@ -674,6 +733,19 @@ test('O10 anchors 同时记录候选引用的历史回执 id', async () => {
   await runPost(env.host, '/from-a', { kind: 'accept' }, { callId: first?.callId })
   env.anchors.clear(SESSION)
 
+  // The plan is one-shot, so B arrives in the model's next response and still
+  // binds the receipt cached under A.
+  env.plans.set(SESSION, {
+    goal: 'g',
+    steps: [
+      {
+        id: 'B',
+        tool: 'read',
+        args: { file_path: { $public: { after: 'A', field: '$scalar' } } },
+        guards: [{ text_contains: 'B-TRIGGER' }],
+      },
+    ],
+  })
   await runPost(env.host, 'B-TRIGGER')
   const anchors = env.anchors.get(SESSION)
   assert.deepEqual(anchors?.anchors, { root: 'B-TRIGGER', A: '/from-a' })
@@ -709,9 +781,11 @@ test('F2 重置清空 pending 条目并写真实 turn（设计 §5.2-7）', asyn
   await runPost(env.host, 'TRIGGER')
   assert.ok(env.queue.peek(SESSION), 'the commit is pending')
 
+  env.plans.set(SESSION, { goal: 'late', steps: [candidate('B', 'tail')] })
   await runPost(env.host, `head${PRUNE_MARKER}tail`)
 
   assert.equal(env.queue.peek(SESSION), undefined, 'a reset empties pending')
+  assert.equal(env.plans.has(SESSION), false, 'a reset also drops the plan it invalidated')
   assert.equal(env.anchors.get(SESSION), undefined)
   const reset = env.receipts.find((r) => r.kind === 'reset')
   assert.equal(reset?.code, 'pruned-reset')
@@ -739,12 +813,14 @@ test('O11 投影收据：kind=projection、unit=raw、before/after 为数字、�
   })
   env.plans.set(SESSION, { goal: 'g', steps: [candidate('A', 'IMPOSSIBLE')] })
 
-  const res = await runPost(env.host, big)
+  const res = await runPost(env.host, big, { kind: 'accept' }, { arguments: { file_path: '/big' } })
 
   const projection = env.receipts.find((r) => r.kind === 'projection')
   assert.ok(projection, 'projection mode on writes a projection receipt')
   assert.equal(projection.unit, 'raw')
   assert.equal(projection.code, 'projected')
+  assert.equal(projection.preview, big.slice(0, 256))
+  assert.deepEqual(projection.args, { file_path: '/big' }, 'the applied call args are evidence')
   assert.equal(typeof projection.before, 'number')
   assert.equal(typeof projection.after, 'number')
   assert.equal(projection.before, estimate(big))
@@ -872,4 +948,181 @@ test('O12 越权会话（judgement 假）整条决策链都不跑', async () => 
   assert.equal(env.receipts.length, 1)
   assert.equal(env.receipts[0]?.code, 'skip:no-scope')
   assert.equal(estimated, 0)
+})
+
+// ---------------------------------------------------------------------------
+// Gate 3 review: lifecycle and measurement defects
+// ---------------------------------------------------------------------------
+
+test('I3 守卫失败后计划按回执作废：下一条回执不得复用旧计划', async () => {
+  const env = setup()
+  env.plans.set(SESSION, { goal: 'g', steps: [candidate('A', 'IMPOSSIBLE')] })
+
+  await runPost(env.host, 'TRIGGER')
+  assert.ok(env.receipts.some((r) => r.code === 'no-candidate'))
+  assert.equal(env.plans.has(SESSION), false, 'the considered plan must be dropped')
+
+  // The model omitted the block; this receipt must not fire the old candidate.
+  await runPost(env.host, 'TRIGGER')
+  assert.equal(env.queue.peek(SESSION), undefined)
+  assert.equal(env.receipts.some((r) => r.kind === 'shadow'), false)
+  assert.equal(env.receipts.filter((r) => r.code === 'no-candidate').length, 1)
+})
+
+test('I2 PTC 内层回执不是 root：不决策、不入队、不写收据、不动 anchors', async () => {
+  const env = setup({ doc: doc({ shadow: true, projection: 'off' }) })
+  const previous = { stepId: 'root', anchors: { root: 'OLD-ANCHOR' } }
+  env.anchors.set(SESSION, previous)
+  env.plans.set(SESSION, { goal: 'g', steps: [candidate('A', 'TRIGGER')] })
+  const innerAgent = { session: { header: { id: SESSION, cwd: '/w' } } }
+
+  const res = await runPost(
+    env.host,
+    'TRIGGER',
+    { kind: 'accept' },
+    { parent: { token: 'outer-step' }, agent: innerAgent },
+  )
+
+  assert.equal(res.kind, 'accept')
+  assert.equal(env.queue.peek(SESSION), undefined)
+  assert.equal(env.receipts.length, 0, 'an inner result is not a decision receipt')
+  assert.deepEqual(env.anchors.get(SESSION), previous, 'anchors belong to the outer step')
+  assert.ok(env.plans.get(SESSION), 'an inner receipt must not consume the outer plan')
+  assert.equal(env.deps.sessionState.receiptsFor(SESSION, 1).size, 0, 'no root receipt is filed')
+
+  // The following outer receipt still decides normally.
+  await runPost(env.host, 'TRIGGER')
+  assert.ok(env.receipts.some((r) => r.kind === 'shadow' && r.decision === 'commit'))
+})
+
+test('I3 被 pre-execute 拒绝的替换调用在 post-execute 清 pending（无 dispatch 映射）', async () => {
+  const env = setup()
+  env.plans.set(SESSION, { goal: 'g', steps: [candidate('A', 'TRIGGER')] })
+
+  await runPost(env.host, 'TRIGGER')
+  const entry = env.queue.peek(SESSION)
+  assert.ok(entry)
+
+  // A denied substituted call never reaches tools/execute, so this post-execute
+  // is the only place that can see the matching callId.
+  await runPost(env.host, 'Error: approval denied', { kind: 'accept' }, { callId: entry.callId })
+
+  assert.equal(env.queue.peek(SESSION), undefined, 'the denied dispatch must not survive')
+})
+
+test('I4 receipts.stopped()：替换在 selector/准入/预算之前 fail-closed', async () => {
+  let selectorCalls = 0
+  const receipts: Any[] = []
+  const env = setup({
+    deps: {
+      receipts: {
+        append: async (r: Any) => {
+          receipts.push(r)
+        },
+        stopped: () => true,
+      },
+      llm: {
+        stream: async function* () {
+          selectorCalls += 1
+          yield { type: 'finish', reason: { kind: 'stop' } }
+        },
+      },
+      selectorRoute: () => ({ provider: 'p', model: 'm' }),
+    },
+  })
+  env.plans.set(SESSION, {
+    goal: 'g',
+    steps: [candidate('A', 'TRIGGER'), candidate('B', 'TRIGGER')],
+  })
+
+  await runPost(env.host, 'TRIGGER')
+
+  assert.equal(selectorCalls, 0, 'a stopped receipt store must not pay for a selector call')
+  assert.equal(env.deps.budget.count(), 0, 'a stopped store must not spend budget')
+  assert.equal(env.deps.usage.pendingCandidateId(), undefined)
+  assert.equal(env.queue.peek(SESSION), undefined)
+  assert.equal(receipts.length, 0, 'no receipt can be recorded while the store is stopped')
+})
+
+test('I5 projection 收据带 preview 与 args：同 tool/同 turn 的不同调用 hash 不同', async () => {
+  const text = 'x'.repeat(4000)
+  const env = setup({ doc: doc({ projection: 'shadow' }) })
+
+  await runPost(
+    env.host,
+    text,
+    { kind: 'accept' },
+    { callId: 'call-a', arguments: { file_path: '/a' } },
+  )
+  await runPost(
+    env.host,
+    text,
+    { kind: 'accept' },
+    { callId: 'call-b', arguments: { file_path: '/b' } },
+  )
+
+  const projections = env.receipts.filter((r) => r.code === 'projection-shadow')
+  assert.equal(projections.length, 2)
+  const expectedPreview = Array.from(text).slice(0, 256).join('')
+  for (const projection of projections) {
+    assert.equal(projection.preview, expectedPreview, 'preview is the canonical receipt head')
+  }
+  assert.deepEqual(projections[0].args, { file_path: '/a' })
+  assert.deepEqual(projections[1].args, { file_path: '/b' })
+  assert.notEqual(
+    receiptHash(projections[0]),
+    receiptHash(projections[1]),
+    'args must distinguish two calls of the same tool in one turn',
+  )
+})
+
+test('I5 shadow commit 收据带 preview 与绑定后的 args', async () => {
+  const env = setup({ doc: doc({ shadow: true, projection: 'off' }) })
+  env.plans.set(SESSION, { goal: 'g', steps: [candidate('A', 'TRIGGER')] })
+
+  await runPost(env.host, 'TRIGGER', { kind: 'accept' }, { arguments: { file_path: '/exec' } })
+
+  const shadow = env.receipts.find((r) => r.kind === 'shadow' && r.code === 'ok')
+  assert.ok(shadow)
+  assert.deepEqual(shadow.args, { file_path: '/x' }, 'args are the bound decision tree')
+  assert.equal(shadow.preview, 'TRIGGER')
+})
+
+test('I10 projection_unknown_tools 只计装饰名（mcp__*），普通未配置工具不冒充 mapper gap', async () => {
+  const counters = new ProjectionCounters()
+  const env = setup({
+    doc: doc({ projection: 'shadow' }),
+    deps: { projectionCounters: counters },
+  })
+
+  await runPost(env.host, 'x'.repeat(4000), { kind: 'accept' }, { name: 'edit' })
+  assert.equal(counters.unknownFamilies(), 0, 'edit is a by-design pass, not a mapper gap')
+
+  await runPost(env.host, 'y'.repeat(4000), { kind: 'accept' }, { name: 'mcp__custom__do-thing' })
+  assert.equal(counters.unknownFamilies(), 1)
+  assert.deepEqual(counters.unknownToolCounts(), { 'mcp__custom__do-thing': 1 })
+})
+
+test('I10 selector 调用抛错记 selector-error，而不是 selector-abstain(error)', async () => {
+  const env = setup({
+    deps: {
+      llm: {
+        stream: async function* () {
+          throw new Error('selector boom')
+        },
+      },
+      selectorRoute: () => ({ provider: 'p', model: 'm' }),
+    },
+  })
+  env.plans.set(SESSION, {
+    goal: 'g',
+    steps: [candidate('A', 'TRIGGER'), candidate('B', 'TRIGGER')],
+  })
+
+  await runPost(env.host, 'TRIGGER')
+
+  const error = env.receipts.find((r) => r.code === 'selector-error')
+  assert.ok(error, 'a throwing selector call is a selector-error, not an abstention')
+  assert.equal(error.kind, 'skip')
+  assert.equal(env.receipts.some((r) => r.code === 'selector-abstain'), false)
 })

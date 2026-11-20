@@ -58,16 +58,24 @@
  * session's substitution with another session's request. `SessionRuntime`
  * (exported here) keys all three by `sessionId`; `HookDeps.sessions` accepts it,
  * and when present it is authoritative for both this hook and Task 23b's
- * helpers. Task 23c-2 must:
+ * helpers. The shipped wiring lives in `wireSessionEvents` (`src/index.ts`):
  *
  * ```ts
  * const sessions = new SessionRuntime(cfg.stepsPerTurn)
  * registerHooks(ctx, { ...deps, sessions })
- * ctx.on('agent/request', (payload, next) => {
- *   sessions.onModelRequest(payload.agent.session.header.id, payload.turn, payload.step)
- *   return next()
+ * ctx.on('agent/request', async (payload, next) => {
+ *   sessions.onModelRequest(sessionId, payload.turn, payload.step)
+ *   await warmVisibility(scope, registry, payload.agent, sessionId, workspaces)
+ *   const config = await next()
+ *   rememberRoute(routes, sessionId, config)
+ *   return config
  * })
+ * ctx.on('session/disposed', (session) => clearSession(deps, sessionId))
  * ```
+ *
+ * The visibility warm and the selector-route capture are part of the same
+ * listener: a clock-only snippet would leave the scope judgement cold and the
+ * selector without the boundary request's route.
  *
  * `onModelRequest` copies the host turn/step (never a plugin count) and resets
  * that session's budget only when its turn changes. `notePlanTurn` is the
@@ -119,20 +127,20 @@ import { DEFAULT_CONFIG } from '../config.js'
 import { looksPruned } from '../gate/invalidate.js'
 import type { ReceiptAnchors } from '../gate/invalidate.js'
 import { parsePlan } from '../gate/plan.js'
-import type { ReceiptStore } from '../receipts/store.js'
 import { TurnClock } from './clock.js'
 import { synthesizeTurn } from './synthesize.js'
 import type { PendingEntry } from './pending.js'
 import type { HookDeps } from './post-execute.js'
-
-/**
- * The store's append input, without exporting the private alias from T7.
- *
- * `ReceiptStore.append` exposes the shape structurally even though the alias is
- * module-private; reusing it keeps the receipts written here type-checked
- * against the same contract as Task 23b's.
- */
-type ReceiptInput = Parameters<ReceiptStore['append']>[0]
+import {
+  appendReceipt,
+  callPreview,
+  clearAnchors,
+  clearPlan,
+  clearPending,
+  clockTurnOf,
+  peekPending,
+} from './session-state.js'
+import type { ReceiptInput } from './session-state.js'
 
 /** Which external rewrite invalidated a decision. */
 type ResetCode = 'pruned-reset' | 'compaction-reset'
@@ -299,56 +307,12 @@ export function sessionUsage(deps: HookDeps, sessionId: string): UsageLedger | u
   }
 }
 
-/** The session's clock turn, or `undefined` when no clock can answer a real turn. */
-function clockTurnOf(deps: HookDeps, sessionId: string): number | undefined {
-  try {
-    const turn = sessionClock(deps, sessionId)?.turn()
-    // `TurnClock` reports 0 before the first `agent/request`; real host turns
-    // start at 1. Treating 0 as a turn would let a `turn: 0` entry match an
-    // undriven clock and synthesize a substitution nobody decided.
-    return typeof turn === 'number' && Number.isFinite(turn) && turn > 0 ? turn : undefined
-  } catch {
-    return undefined
-  }
-}
-
-/** The pending entry for a session, never removing it and never throwing. */
-function peekPending(deps: HookDeps, sessionId: string): PendingEntry | undefined {
-  try {
-    const queue = deps.queue
-    if (queue == null || typeof queue.peek !== 'function') return undefined
-    return queue.peek(sessionId)
-  } catch {
-    return undefined
-  }
-}
-
-/** Drop the session's pending entry; a foreign queue must not break the request. */
-function clearPending(deps: HookDeps, sessionId: string): void {
-  try {
-    const queue = deps.queue
-    if (queue == null || typeof queue.clear !== 'function') return
-    queue.clear(sessionId)
-  } catch {
-    // Containment only: a stale entry costs a false reject later, not this turn.
-  }
-}
-
 /** The session's anchors without ever failing the request. */
 function anchorsOf(deps: HookDeps, sessionId: string): ReceiptAnchors | undefined {
   try {
     return deps.anchors?.get(sessionId)
   } catch {
     return undefined
-  }
-}
-
-/** Drop the session's anchors; a foreign store must not break the request. */
-function clearAnchors(deps: HookDeps, sessionId: string): void {
-  try {
-    deps.anchors?.clear(sessionId)
-  } catch {
-    // Containment only: the store is evidence, not a precondition.
   }
 }
 
@@ -359,7 +323,7 @@ function clearAnchors(deps: HookDeps, sessionId: string): void {
  * stopped", so the ordinary path is unchanged. A store that *throws* cannot
  * record evidence, which is exactly what stopped means.
  */
-function receiptsStopped(deps: HookDeps): boolean {
+export function receiptsStopped(deps: HookDeps): boolean {
   try {
     const store = deps.receipts
     if (store == null || typeof store.stopped !== 'function') return false
@@ -643,17 +607,6 @@ function passPlan(
 // Effects
 // ---------------------------------------------------------------------------
 
-/** Append one receipt; a receipt is evidence, never a precondition. */
-async function appendReceipt(deps: HookDeps, receipt: ReceiptInput): Promise<void> {
-  const store = deps.receipts
-  if (store == null || typeof store.append !== 'function') return
-  try {
-    await store.append(receipt)
-  } catch {
-    // A receipt is evidence, not a precondition: never break the request.
-  }
-}
-
 /**
  * Consume the session's usage mark without reporting a saving.
  *
@@ -695,6 +648,10 @@ async function appendSubstituteReceipt(
     tool: entry.name,
     callId: entry.callId,
     candidateId: entry.candidateId,
+    // The synthesized call has no tool result yet; its name and bound args are
+    // the evidence for why this turn asked for it.
+    args: entry.args,
+    preview: callPreview(entry.name, entry.args),
     // Measured only after the next real request; `'unknown'` never counts.
     saved_input_tokens: 'unknown',
     cache_hit_delta: null,
@@ -749,14 +706,23 @@ function recordUsage(deps: HookDeps, sessionId: string, usage: TokenUsage | unde
   }
 }
 
-/** Store a parsed plan when the real turn carried one; keep the old one otherwise. */
+/**
+ * Store the plan a real response carried, or drop the old one when it carried
+ * none.
+ *
+ * The protocol tells the model to omit the block when unsure, so a response
+ * that does not contain a valid plan is also the model withdrawing the previous
+ * one. Keeping the old plan would let it fire against a much later receipt the
+ * model never wrote it for. A malformed block is likewise not a plan.
+ */
 function rememberPlan(deps: HookDeps, sessionId: string | undefined, text: string): void {
-  if (sessionId === undefined || text.length === 0) return
+  if (sessionId === undefined) return
   try {
     const plans = deps.plans
     if (plans == null || typeof plans.set !== 'function') return
-    const parsed = parsePlan(text)
+    const parsed = text.length === 0 ? { error: 'no-plan' as const } : parsePlan(text)
     if ('plan' in parsed) plans.set(sessionId, parsed.plan)
+    else plans.delete(sessionId)
   } catch {
     // A plan that cannot be stored only costs a later decision.
   }
@@ -774,6 +740,9 @@ async function applyAbandon(
   settleDiscarded(deps, sessionId)
   if (abandon.clearQueue) clearPending(deps, sessionId)
   if (abandon.clearAnchors) clearAnchors(deps, sessionId)
+  // A plan that produced this abandoned decision must not survive to drive a
+  // later receipt, for either reset kind (and for the non-reset abandons too).
+  clearPlan(deps, sessionId)
   if (abandon.reset === undefined) return
   await appendReceipt(deps, {
     version: 1,
@@ -881,7 +850,7 @@ export function streamHook(
         } catch {
           rolledOver = false
         }
-        if (rolledOver) clearPlans(deps, sessionId)
+        if (rolledOver) clearPlan(deps, sessionId)
       }
     }
 
@@ -910,29 +879,21 @@ export function streamHook(
   }
 }
 
-/** Drop the session's parsed plan; a foreign map must not break the request. */
-function clearPlans(deps: HookDeps, sessionId: string): void {
-  try {
-    deps.plans?.delete(sessionId)
-  } catch {
-    // A foreign map can only cost a later decision.
-  }
-}
-
 /**
  * Drop every per-session trace the plugin keeps for `sessionId`.
  *
- * This is the session-end cleanup Task 23c-2 must call: the receipt/dispatch
- * store ships its own `clear`, but it does not own the queue, the anchors, the
- * plan map or the per-session runtime, so the caller would otherwise have to
- * know four separate clears. A pending usage mark is settled first so a mark
- * cannot outlive the session it belongs to.
+ * This is the session-end cleanup `src/index.ts` calls from its
+ * `session/disposed` listener: the receipt/dispatch store ships its own
+ * `clear`, but it does not own the queue, the anchors, the plan map or the
+ * per-session runtime, so the caller would otherwise have to know four separate
+ * clears. A pending usage mark is settled first so a mark cannot outlive the
+ * session it belongs to.
  */
 export function clearSession(deps: HookDeps, sessionId: string): void {
   settleDiscarded(deps, sessionId)
   clearPending(deps, sessionId)
   clearAnchors(deps, sessionId)
-  clearPlans(deps, sessionId)
+  clearPlan(deps, sessionId)
   try {
     // Projection locators are session-scoped evidence: a disposed session must
     // not leave its spill paths behind for the next session id to inherit.
