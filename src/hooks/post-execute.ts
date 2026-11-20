@@ -97,7 +97,7 @@ import type { ScopeStore } from '../scope/store.js'
 import { SELECTOR_SYSTEM_PROMPT, choose, selectorPromptText } from '../selector/jev.js'
 import type { LlmLike } from '../selector/jev.js'
 import { familyOf } from '../tools/family.js'
-import type { AgentLike, BoostConfig, PluginContext } from '../types.js'
+import type { AbortSignalLike, AgentLike, BoostConfig, PluginContext } from '../types.js'
 import type { TurnClock } from './clock.js'
 import { rejectIfTampered } from './execute.js'
 import {
@@ -324,6 +324,12 @@ type PostExecuteExec = {
   name?: string
   callId?: string
   agent?: AgentLike | undefined
+  /**
+   * The host's cancellation signal. `tools/post-execute` is async, and the
+   * host contract requires async listeners to observe `exec.signal`; this
+   * listener reads `aborted` before it does any projection work.
+   */
+  signal?: AbortSignalLike | undefined
   /** Parsed tool arguments; the retrieval matcher reads them (Task 25). */
   arguments?: unknown
   /**
@@ -392,6 +398,24 @@ function agentKeyOf(scope: unknown): string | undefined {
 function sessionIdOf(exec: PostExecuteExec | DispatchExec | undefined): string | undefined {
   const id = (exec as PostExecuteExec | undefined)?.agent?.session?.header?.id
   return typeof id === 'string' ? id : undefined
+}
+
+/**
+ * Whether the host cancelled the call that produced this result.
+ *
+ * `tools/post-execute` is async, and the host contract (`dsh-tools`'
+ * `events.d.ts`) requires async listeners to observe `exec.signal`. A
+ * cancelled call's result never reaches the model, so projecting it would pay
+ * a spill write and persist an artifact nobody can read. The signal crosses
+ * the host boundary, so a malformed one means "not cancelled" rather than a
+ * reason to throw out of the hook.
+ */
+function cancelled(exec: PostExecuteExec | undefined): boolean {
+  try {
+    return exec?.signal?.aborted === true
+  } catch {
+    return false
+  }
 }
 
 /**
@@ -636,7 +660,9 @@ async function resetInvalidatedPending(
   // Design §5.2-7: a reset returns to the slow path *and* empties pending, so no
   // queued substitution can fire from anchors that no longer name live text. The
   // plan is dropped too: it was written for the invalidated receipt, and leaving
-  // it would let it fire against a later one.
+  // it would let it fire against a later one. A dispatch accepted for the
+  // invalidated decision must not settle a later mark that reuses its id.
+  clearAcceptedDispatch(deps, sessionId)
   settleDiscarded(deps, sessionId)
   clearAnchors(deps, sessionId)
   clearPending(deps, sessionId)
@@ -1014,6 +1040,145 @@ function markSubstituted(deps: HookDeps, sessionId: string, candidateId: string)
   } catch {
     // A ledger miss costs a measurement, never this call.
   }
+}
+
+/** The session's pending usage-mark candidate, or `undefined` for a foreign ledger. */
+function pendingCandidateOf(deps: HookDeps, sessionId: string): string | undefined {
+  try {
+    return sessionUsage(deps, sessionId)?.pendingCandidateId()
+  } catch {
+    return undefined
+  }
+}
+
+/**
+ * The last substitution dispatch `tools/execute` accepted for a session.
+ *
+ * `ReceiptSessionState` records the same callId -> candidate mapping, but the
+ * candidate's own `tools/post-execute` consumes it when it files the receipt.
+ * A turn rollover needs the fact *after* that consumption: a late parallel
+ * tool result can roll the turn before the next real request, and the usage
+ * mark must then be reported instead of discarded as if nothing ran. The
+ * accepted dispatch is mirrored here together with the evidence that would
+ * otherwise be parked for the next settlement.
+ *
+ * One record per session: a later accepted dispatch replaces it, a session
+ * whose usage mark is already gone drops it, and a rollover consumes it. The
+ * `HookDeps` key keeps two assemblies in one process from reading each other's
+ * sessions. The record is small and per-session; it is never persisted.
+ */
+const ACCEPTED_DISPATCH = new WeakMap<
+  HookDeps,
+  Map<string, { turn: number; candidateId: string; evidence?: SubstitutionEvidence }>
+>()
+
+/** Mirror an accepted dispatch for a possible rollover settlement. */
+function noteAcceptedDispatch(
+  deps: HookDeps,
+  sessionId: string,
+  turn: number,
+  candidateId: string,
+  evidence: SubstitutionEvidence | undefined,
+): void {
+  let bySession = ACCEPTED_DISPATCH.get(deps)
+  if (bySession === undefined) {
+    bySession = new Map()
+    ACCEPTED_DISPATCH.set(deps, bySession)
+  }
+  bySession.set(sessionId, {
+    turn,
+    candidateId,
+    ...(evidence === undefined ? {} : { evidence }),
+  })
+}
+
+/**
+ * Consume the accepted dispatch that matches `candidateId`, if any.
+ *
+ * The turn check is a staleness guard: the record that a pending mark belongs
+ * to was written in the turn now rolling over. A record written in the new
+ * turn cannot belong to it.
+ */
+function takeAcceptedDispatch(
+  deps: HookDeps,
+  sessionId: string,
+  candidateId: string,
+  turn: number,
+): { evidence?: SubstitutionEvidence } | undefined {
+  const bySession = ACCEPTED_DISPATCH.get(deps)
+  const record = bySession?.get(sessionId)
+  bySession?.delete(sessionId)
+  if (record === undefined || record.candidateId !== candidateId || record.turn === turn) {
+    return undefined
+  }
+  return record.evidence === undefined ? {} : { evidence: record.evidence }
+}
+
+/** Drop the mirrored dispatch; no pending mark is waiting to settle it. */
+function clearAcceptedDispatch(deps: HookDeps, sessionId: string): void {
+  ACCEPTED_DISPATCH.get(deps)?.delete(sessionId)
+}
+
+/**
+ * Settle the usage mark at a turn rollover, reporting a substitution that ran.
+ *
+ * The ordinary path settles at the first real request after synthesis. A late
+ * parallel tool result can roll the turn before that request; the mark must not
+ * survive into the new turn, where it would pair with a request that is not the
+ * substitution's next one. If `tools/execute` never accepted the synthesized
+ * dispatch, the substitution did not run and the mark is a discard. If it did,
+ * the model round really was skipped: the settlement line is written with
+ * whatever sample the ledger holds (`'unknown'` when no after-mark request has
+ * run yet) and with the evidence captured at dispatch, so the substitution is
+ * reported instead of disappearing.
+ */
+async function settleRollover(deps: HookDeps, sessionId: string, turn: number): Promise<void> {
+  const candidateId = pendingCandidateOf(deps, sessionId)
+  if (candidateId === undefined) {
+    settleDiscarded(deps, sessionId)
+    return
+  }
+
+  const dispatched = takeAcceptedDispatch(deps, sessionId, candidateId, turn)
+  if (dispatched === undefined) {
+    settleDiscarded(deps, sessionId)
+    return
+  }
+
+  let settled: ReturnType<UsageLedger['settle']>
+  try {
+    const ledger = sessionUsage(deps, sessionId)
+    if (ledger === undefined) {
+      settleDiscarded(deps, sessionId)
+      return
+    }
+    settled = ledger.settle()
+  } catch {
+    settleDiscarded(deps, sessionId)
+    return
+  }
+
+  // The parked evidence lives in `llm-stream`'s private map and would outlive
+  // the mark. `settleDiscarded` is the module's idempotent cleanup: the ledger
+  // was settled above, so this call only forgets that evidence. It runs before
+  // the receipt write so the `await` cannot let a new mark be created and then
+  // be consumed by this cleanup.
+  settleDiscarded(deps, sessionId)
+
+  await appendReceipt(deps, {
+    version: 1,
+    ts: new Date().toISOString(),
+    sessionId,
+    turn,
+    stepId: 'root',
+    kind: 'substitute-settled',
+    code: 'substitute-settled',
+    candidateId,
+    ...(dispatched.evidence ?? {}),
+    saved_input_tokens: settled.saved_input_tokens,
+    cache_hit_delta: settled.cache_hit_delta,
+    output_tokens: settled.output_tokens,
+  })
 }
 
 /**
@@ -1845,12 +2010,26 @@ async function applyDecision(
   // suppresses the projection ledger.
   await decideSubstitution(deps, ctx)
 
-  // Second-projection guard. The host spiller registers with `{ prepend: true }`:
-  // it calls `next()` and adds its footer to that decision *after* this listener
-  // returns. So this check sees only the footer an inner listener already wrote,
-  // never the host's own; it must not be read as full double-spill detection.
-  // Both the receiver as it arrived and the decision that will enter history are
-  // checked (design §5.4).
+  // Second-projection guard. Two host shapers are outer to this listener:
+  //
+  // - The spill policy registers with `{ prepend: true }`: it calls `next()`
+  //   and adds its footer to *that* decision after this listener returns. So
+  //   this check sees only a footer an inner listener already wrote, never the
+  //   host's own; it must not be read as full double-spill detection.
+  // - For `glob`/`grep`, `@deepseek-ai/dsh-tool-fs-search` is outer too
+  //   (`dsh-base` loads it first) and would replace an over-cap result with its
+  //   own spill-backed preview. The plugin pre-empts it **deliberately**:
+  //   `acceptedDirectCallValue` does nothing as soon as the decision carries
+  //   `content` (`dsh-tool-fs-search/lib/index.js:490-493`), so the projection
+  //   accept below wins and the host preview never runs. That is the intended
+  //   trade for these two families: the plugin's window triggers at 700
+  //   characters, far below the host's 100-path / 250-match caps, and its own
+  //   footer keeps the spill locator, so the host preview has nothing to add
+  //   to a receipt this listener already clipped. A family the plugin does not
+  //   project leaves the host shaper untouched.
+  //
+  // Both the receiver as it arrived and the decision that will enter history
+  // are checked (design §5.4).
   if (await isAlreadySpilled(deps, ctx.receipt.text)) return decision
   const downstreamText = decisionTextOf(decision) ?? ctx.receipt.text
   if (downstreamText !== ctx.receipt.text && await isAlreadySpilled(deps, downstreamText)) {
@@ -1887,6 +2066,13 @@ async function postExecute(
 ): Promise<PostExecuteDecision> {
   const decision = await next()
 
+  // The host cancels a call by aborting `exec.signal`; an async listener must
+  // observe it before doing work whose result the model will never receive.
+  // `next()` still runs — the waterfall must not drop the listeners mounted
+  // after this one, and the host only replaces a successful accepted outcome
+  // after they settle — but nothing after it does.
+  if (cancelled(exec)) return decision
+
   // A PTC inner call traverses this waterfall with `parent` set. Its result
   // belongs to the enclosing `run_code` step, not to a step of its own: it must
   // not become `root`, drive a decision, consume the outer plan or overwrite the
@@ -1910,6 +2096,11 @@ async function postExecute(
     await appendSkipNoScope(deps.receipts, exec)
     return decision
   }
+
+  // The mirrored dispatch is only meaningful while its usage mark is pending.
+  // Once the mark is gone (settled by the next real request, or discarded), the
+  // record is stale and a later turn's mark could reuse the candidate id.
+  if (pendingCandidateOf(deps, sessionId) === undefined) clearAcceptedDispatch(deps, sessionId)
 
   // A substituted call denied by `tools/pre-execute` (approval or sandbox)
   // returns a post-result without invoking `tools/execute`, while post-execute
@@ -1947,13 +2138,14 @@ async function postExecute(
       // A pending entry and its decision-time usage mark from the previous turn
       // can never match a call in this one, so both are dead weight; the reset
       // path does the same mid-turn (F2). The mark is settled **without** a
-      // settlement receipt, exactly like `resetInvalidatedPending` and
-      // `applyAbandon`: no substitution ran, so there is no saving to report.
-      // This branch is reachable with a live mark because a parallel tool
-      // result can land after the host advanced the turn but before this turn's
-      // first `llm/stream`, so the old "the stream always runs first" argument
-      // does not hold (D1).
-      settleDiscarded(deps, sessionId)
+      // settlement receipt when no substitution ran, exactly like
+      // `resetInvalidatedPending` and `applyAbandon`. This branch is reachable
+      // with a live mark because a parallel tool result can land after the host
+      // advanced the turn but before this turn's first `llm/stream`, so the old
+      // "the stream always runs first" argument does not hold (D1). When the
+      // synthesized dispatch *was* accepted, the skipped model round is real:
+      // `settleRollover` reports it with the sample the ledger has (row 28).
+      await settleRollover(deps, sessionId, turn)
       clearAnchors(deps, sessionId)
       clearPending(deps, sessionId)
       // The plan map is normally reconciled by `SessionRuntime.notePlanTurn` on
@@ -2105,7 +2297,14 @@ async function inspectDispatch(
 ): Promise<
   | { kind: 'next' }
   | { kind: 'reject'; message: string }
-  | { kind: 'accept'; sessionId: string; callId: string; candidateId: string }
+  | {
+      kind: 'accept'
+      sessionId: string
+      callId: string
+      candidateId: string
+      /** The plan/guard evidence the entry carried; mirrored for a rollover settle. */
+      evidence: SubstitutionEvidence | undefined
+    }
 > {
   const sessionId = sessionIdOf(exec)
   if (sessionId === undefined) return { kind: 'next' }
@@ -2135,7 +2334,13 @@ async function inspectDispatch(
 
   // Accept path: the entry has done its job, so drop it before dispatching.
   clearPending(deps, sessionId)
-  return { kind: 'accept', sessionId, callId: entry.callId, candidateId: entry.candidateId }
+  return {
+    kind: 'accept',
+    sessionId,
+    callId: entry.callId,
+    candidateId: entry.candidateId,
+    evidence: (entry as AuditedPendingEntry).evidence,
+  }
 }
 
 /**
@@ -2170,16 +2375,21 @@ async function executeHook(
 
   if (outcome.kind === 'reject') return dispatchFailure(outcome.message)
   if (outcome.kind === 'accept') {
+    const turn = clockTurnOf(deps, outcome.sessionId) ?? 0
     try {
-      state.recordDispatch(
-        outcome.sessionId,
-        clockTurnOf(deps, outcome.sessionId) ?? 0,
-        outcome.callId,
-        outcome.candidateId,
-      )
+      state.recordDispatch(outcome.sessionId, turn, outcome.callId, outcome.candidateId)
     } catch {
       // Losing the mapping costs the candidate receipt, not this call.
     }
+    // The same fact, kept outside `ReceiptSessionState` because the candidate's
+    // post-execute consumes that mapping before a rollover can look at it.
+    noteAcceptedDispatch(
+      deps,
+      outcome.sessionId,
+      turn,
+      outcome.candidateId,
+      outcome.evidence,
+    )
   }
   return next()
 }

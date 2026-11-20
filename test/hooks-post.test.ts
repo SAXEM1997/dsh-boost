@@ -21,6 +21,7 @@ import { DEFAULT_CONFIG } from '../src/config.ts'
 import { ProjectionCounters } from '../src/projection/counters.ts'
 import { receiptHash } from '../src/receipts/store.ts'
 import { DEFAULT_SCOPE } from '../src/scope/doc.ts'
+import type { AbortSignalLike } from '../src/types.ts'
 
 const SESSION = 's1'
 const WORKSPACE = 'w1'
@@ -1565,4 +1566,96 @@ test('D1 rollover keeps a plan the new turn already parsed', async () => {
   assert.equal(entry?.candidateId, 'B', 'a plan parsed for this turn must still fire')
   assert.equal(env.plans.has(SESSION), false, 'the plan remains one-shot after it fires')
   assert.equal(env.usage.pendingCandidateId(), 'B', 'the new decision marks its own usage')
+})
+
+// ---------------------------------------------------------------------------
+// Round 3: post-execute findings (rows 22, 28, 33, 36)
+// ---------------------------------------------------------------------------
+
+test('row 33: AbortSignalLike accepts the host AbortSignal', () => {
+  // The declaration is structural so a DOM-free consumer can read it; a real
+  // host signal must still satisfy it. This assertion is compiled by
+  // `tsconfig.test.json`, so a signature drift fails typecheck, not just this
+  // runtime no-op.
+  const signal: AbortSignalLike = new AbortController().signal
+  assert.equal(signal.aborted, false)
+})
+
+test('row 22: a malformed foreign exec is skipped, not thrown out of the hook', async () => {
+  // `AgentLike` declares `session/header/id`, but `exec` crosses the host
+  // boundary: a foreign host can hand us an agent object without them. The
+  // hook must fail closed with a skip receipt, never throw — a throw here
+  // would turn the real tool output into an error result.
+  const env = setup()
+  const res = await runPost(env.host, 'x', { kind: 'accept' }, { agent: {} })
+
+  assert.equal(res.kind, 'accept')
+  assert.equal(env.host.nextCalls, 1, 'the waterfall must still have run once')
+  assert.ok(
+    env.receipts.some((r) => r.code === 'skip:no-scope'),
+    'an unreadable agent shape must be the same no-scope pass, not a throw',
+  )
+})
+
+test('row 28: a rollover after the dispatch was accepted reports the skipped round', async () => {
+  const env = setup()
+  env.plans.set(SESSION, { goal: 'g', steps: [candidate('A', 'TRIGGER')] })
+  await runPost(env.host, 'TRIGGER')
+  const entry = env.queue.peek(SESSION)
+  assert.ok(entry, 'the decision committed a substitution')
+  assert.equal(env.usage.pendingCandidateId(), 'A')
+
+  // The host dispatched the synthesized call and `tools/execute` accepted it:
+  // the queue entry is gone, so the substitution really ran. Its result has not
+  // arrived yet.
+  const dispatched = await env.host.callHook(
+    'tools/execute',
+    [{ name: 'read', callId: entry.callId, arguments: entry.args, agent }],
+    async () => 'DISPATCHED',
+  )
+  assert.equal(dispatched, 'DISPATCHED')
+  assert.equal(env.queue.peek(SESSION), undefined, 'execute clears on the accept path')
+
+  // A late parallel tool result rolls the turn before the next real request.
+  env.clock.onModelRequest(2, 0)
+  await runPost(env.host, 'late parallel result', { kind: 'accept' }, { callId: 'parallel' })
+
+  assert.equal(env.usage.pendingCandidateId(), undefined, 'the mark is consumed')
+  const settled = env.receipts.find((r) => r.kind === 'substitute-settled')
+  assert.ok(settled, 'a dispatched substitution must not be discarded as if it never ran')
+  assert.equal(settled.code, 'substitute-settled')
+  assert.equal(settled.candidateId, 'A')
+  assert.equal(
+    settled.saved_input_tokens,
+    'unknown',
+    'no after-mark sample exists; the line reports the skip without inventing a measurement',
+  )
+  assert.equal(settled.plan, 'g', 'the settled line keeps the plan evidence')
+  assert.deepEqual(settled.guards, [{ text_contains: 'TRIGGER' }])
+})
+
+test('row 36: an aborted exec.signal returns before projection', async () => {
+  let saves = 0
+  const controller = new AbortController()
+  controller.abort()
+  const env = setup({
+    doc: doc({ projection: 'on' }),
+    deps: {
+      spill: {
+        saveText: async () => {
+          saves += 1
+          return { locator: '/spill/read.txt', retrievalHint: 'read it' }
+        },
+      },
+      hasSpillNotice: () => false,
+    },
+  })
+  const decision = { kind: 'accept' }
+
+  const res = await runPost(env.host, 'x'.repeat(4000), decision, { signal: controller.signal })
+
+  assert.equal(res, decision, 'the decision must be returned untouched')
+  assert.equal(env.host.nextCalls, 1, 'the waterfall must still have run once')
+  assert.equal(saves, 0, 'a cancelled call must not pay the spill write')
+  assert.equal(env.receipts.length, 0, 'a cancelled call must not write projection receipts')
 })

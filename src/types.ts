@@ -24,6 +24,24 @@ export interface AgentLike {
 }
 
 /**
+ * The parts of the host's `AbortSignal` this package's declarations name.
+ *
+ * The plugin never constructs a signal and never calls a method on one: it
+ * forwards the host's object through `ToolActivationContext` and reads
+ * `aborted` at the post-execute seam. Naming the DOM global directly made the
+ * published `dist/types.d.ts` unusable for a consumer compiled with
+ * `lib: ["ES2023"]` and `types: []` (`TS2304: Cannot find name 'AbortSignal'`),
+ * even though that consumer would never call the missing lib. A structural
+ * shape keeps the declaration self-contained and still accepts a real
+ * `AbortSignal` (it has `aborted` and both listener methods).
+ */
+export interface AbortSignalLike {
+  readonly aborted: boolean
+  addEventListener(type: string, listener: (...args: any[]) => void, options?: unknown): void
+  removeEventListener(type: string, listener: (...args: any[]) => void, options?: unknown): void
+}
+
+/**
  * The host's activation context for a step-time tool condition.
  *
  * Mirrors `dsh-tools`' `ToolActivationContext`; the plugin only passes it
@@ -32,7 +50,7 @@ export interface AgentLike {
 export interface ToolActivationContext {
   readonly agent: AgentLike
   readonly modelSelection: Readonly<Record<string, unknown>>
-  readonly signal: AbortSignal
+  readonly signal: AbortSignalLike
 }
 
 /** The host's step-admitted tool set (`dsh-tools`' `ResolvedToolSet`). */
