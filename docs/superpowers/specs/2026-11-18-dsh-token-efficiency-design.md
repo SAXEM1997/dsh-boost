@@ -143,9 +143,9 @@
 
 **术语**：Jev = 选择器 = 快速模型在"多候选里选一个"；蒸馏 = 快速模型"压缩单条回执"（二期）。全文统一按这个用。
 
-**Jev 的自调用怎么认**：Jev 自己的每次调用也走 `ctx.llm`，落进同一个 `llm/stream` waterfall，而该钩子的 options 里**没有 agent**（只有可选的 `sessionId`），所以必须显式标记。约定：Jev 的内部调用一律带 `purpose: 'boost-selector'`（`GenerateOptions.purpose`，经 `LlmRequestPurposeMap` 声明合并注册；`GenerateOptions` 没有 `metadata` 字段，不要用它），或走专用 route。`llm/stream` 的**第一条规则**是"见到该标记 → 直接 `next()` 放行，不合成回合、不记账"。没有这条规则，内部调用会被当成边界请求，形成递归合成。
+**Jev 的自调用怎么认**：Jev 自己的每次调用也走 `ctx.llm`，落进同一个 `llm/stream` waterfall，而该钩子的 options 里**没有 agent**（只有可选的 `sessionId`），所以必须显式标记。约定：Jev 的内部调用一律带 `purpose: 'boost-selector'`（`GenerateOptions.purpose`，经 `LlmRequestPurposeMap` 声明合并注册；`GenerateOptions` 没有 `metadata` 字段，不要用它）。`llm/stream` 的**第一条规则**是"`options.purpose !== undefined` → 直接 `next()` 原样放行，不合成回合、不记账、不结算"——不限于 `boost-selector`：宿主在**同一个 sessionId** 上还会发 `purpose: 'compaction'` 与 `purpose: 'session-title'`，把它们当成边界请求会污染测量（假的 `compaction-reset`、向摘要器里合成回合、以及压缩请求的 usage 被当成 `after` 样本）。没有这条规则，内部调用会被当成边界请求，形成递归合成。
 
-**`purpose` 的风险**：参照实现**刻意不发** `purpose` / `temperature`——provider adapter 拒绝任一可选字段会让整次选择调用报废。因此 `purpose` 必须经 `LlmRequestPurposeMap` 注册，并验证 thinking-only 网关不拒；被拒则回退到专用 route。
+**`purpose` 的风险**：参照实现**刻意不发** `purpose` / `temperature`，担心 provider adapter 拒绝任一可选字段会让整次选择调用报废；本实现核实后相反：`purpose` **始终发送**，没有回退，也没有 sticky 标记——`purpose` 由宿主的 header-preparation 插件消费（`dsh-llm-pi-ai/lib/index.js:1964`），从不进入请求体，网关无法拒绝它。sticky 的"曾被拒"标记是进程级的，任何一次无关的 pre-text 失败都会清掉它；一旦清掉，选择器调用就不再带标记，钩子唯一的判别器失效，最坏情况下会把真实 turn 的待替换项合成进选择器调用。`purpose` 仍必须经 `LlmRequestPurposeMap` 注册，否则编译期拒绝。
 
 **v1 不含快速模型蒸馏**：上表与 §5.3 杠杆表都标二期。理由：研究结论是 LLM 压缩器在短任务上让 token 增加 24–94%，而确定性遮蔽省 8.6%。
 
@@ -193,7 +193,7 @@
 - **每个候选至少一个非平凡 guard**：只有 `ok: true` 的候选判不合格（`guard-trivial`）。
 - guard 一律读**原始规范化回执**（§5.4-5），不读投影后的文本。
 
-**`$public` 文本抽取语法（规范）**：模板值形如 `{ "$public": { "after": "root" | "A"…"P", "field": "<identifier>" | "$scalar" | "$single" } }`，从指定回执的文本里取**唯一**匹配：
+**`$public` 文本抽取语法（规范）**：模板值形如 `{ "$public": { "after": "root" | "A"…"Z", "field": "<identifier>" | "$scalar" | "$single" } }`，从指定回执的文本里取**唯一**匹配——候选 id 是单个大写 ASCII 字母（`/^[A-Z]$/`），一份计划最多 26 个候选，更多按 `bad-shape` 拒绝：
 
 | `field` 取值 | 语法 | 失败条件 |
 |---|---|---|
@@ -202,7 +202,7 @@
 | `"$single"` | 整段形如 `['value']` 的单元素字符串数组 | 多元素、非字符串、带尾随内容 |
 
 - `field` 是**任意标识符**（如 `name`、`path`）或两个保留值 `$scalar` / `$single`；标识符在文本中的形态是 `name:` 或 `name=`，`name` 只是示例，不是保留字。
-- `after`：`root` = 本步回执；`A`…`P` = 图上第 N 步的回执（必须在本步之前；字母不在图里即判不可解析）。引用的回执必须**成功且只有单个 text block**，否则模板不可解析。
+- `after`：`root` = 本步回执；`A`…`Z` = 图上第 N 步的回执（必须在本步之前；字母不在图里即判不可解析）。引用的回执必须**成功且只有单个 text block**，否则模板不可解析。
 - 只取**字面量**：不做求值、不做正则替换、不做字段拼接。模板参数**先解析再比对**（D5）。
 - 抽取不到或有多解，一律回退主模型，不做"猜一个"。
 
@@ -227,13 +227,13 @@
 
 | 工具族 | 触发阈值（字符） | 窗口（头 + 尾） | 净收益 > 0 的最小长度 | 说明 |
 |---|---|---|---|---|
-| `read` | 3,000 | 2,000 + 500 | 2,610 | 超过阈值才裁剪 |
-| `grep` / `glob` | 700 | 400 + 100 | 610 | 同上 |
-| `bash` | 4,000 | 2,000 + 500 | 2,610 | 同上 |
-| `ssh`（`mcp__ssh__execute-command`） | 2,000 | 1,200 + 300 | 1,610 | 同上 |
+| `read` | 3,000 | 2,000 + 500 | 2,745 | 超过阈值才裁剪 |
+| `grep` / `glob` | 700 | 400 + 100 | 745 | 最小长度 > 触发阈值：落在死区（下条） |
+| `bash` | 4,000 | 2,000 + 500 | 2,745 | 同上 |
+| `ssh`（`mcp__ssh__execute-command`） | 2,000 | 1,200 + 300 | 1,745 | 同上 |
 
-- **净收益 > 0 的最小长度 = 头 + 尾 + 页脚（约 110B，按 ASCII 保守计）**；低于它的回执裁了反而更贵。
-- **不变量：触发阈值 ≥ 窗口 + 页脚 + 头行 + 1**（头行 `[output N chars; showing first A and last B]` 加两个换行约 55–60 字符；漏掉它会让「投影后反而变长」在触发阈值附近发生——grep/glob 的 700 只有约 7 字符余量。**装配完页脚后必须复核 `assembled.length < original.length`，否则回退原文**）。表中四项都满足：3,000 ≥ 2,611、700 ≥ 611、4,000 ≥ 2,611、2,000 ≥ 1,611。窗口不得大于等于触发阈值，否则会出现"触发了却裁不动"的净亏区间（旧 read 参数 2,000 触发 / 2,500 窗口时，(2,000, 2,500] 区间内就有 200 条回执净亏）。
+- **净收益 > 0 的最小长度 = 头行 + 头 + 尾 + 页脚（真实页脚 182–204 字符，按 ASCII 计；头行约 50 字符 + 3 个换行）**；低于它的回执裁了反而更贵。
+- **不变量：触发阈值 ≥ 窗口 + 页脚 + 头行 + 1**（头行 `[output N chars; showing first A and last B]` 加三个换行约 50 字符；页脚由宿主 `formatSpillNotice` 生成，实测 182–204 字符，不是旧稿按 110 估的值。漏掉它会让「投影后反而变长」在触发阈值附近发生）。**grep/glob 的默认值不满足这条不变量**：400 + 100 + 50 + 192 + 3 = 745 > 700，于是刚过 700、约 745 以下的回执会被 `truncate` 判为可裁，但 `projectApply` 装配后并不短于原文，直接返回原文——这是死区，不是净亏。**运行时的 `assembled.length >= original.length` 复核保证投影绝不会让回执变长；死区只浪费一次裁剪与一次无人引用的落盘，从不增加 token**。不变量仍是调参要达到的目标：要消除死区就把 `triggerChars` 提到这个和以上（例如 grep/glob 用 800），或缩小窗口。其余三族满足：3,000 ≥ 2,745、4,000 ≥ 2,745、2,000 ≥ 1,745。窗口不得大于等于触发阈值，否则会出现"触发了却裁不动"的净亏区间（旧 read 参数 2,000 触发 / 2,500 窗口时，(2,000, 2,500] 区间内就有 200 条回执净亏）。
 - **其余未配置族一律不投影**：没有窗口参数的工具（含 `web_fetch`、`edit`、未来新增工具）直接原样进历史，不设"默认裁剪"。
 
 **其余默认值**：
@@ -279,14 +279,15 @@ config:
 
 | 字段 | 定义 |
 |---|---|
-| `projected_tokens_before` | 投影前规范化原文的 token 估计（`estimateContent`） |
-| `projected_tokens_after` | 投影后可见 content（窗口 + 页脚）的 token 估计 |
+| `before` | 投影前规范化原文的 token 估计（宿主 `tokenMeter` 的 `estimateMessage`） |
+| `after` | 投影后可见 content（窗口 + 页脚）的 token 估计 |
 | `saved_projection_tokens` | `before − after`，**毛节省** |
-| `projection_unit` | 固定 `'raw'` |
+| `estimate` | `'host'` 或 `'unknown'`；`'unknown'` 表示没有 meter 的投影，收据**不写** `before` / `after` / `saved_projection_tokens`，不伪造数字 |
+| `unit` | 固定 `'raw'` |
 | `projection_retrievals` | 模型对该 spill locator 路径的 `read`/`grep` 次数 |
-| `projection_net_tokens` | `saved_projection_tokens − Σ(取回调用 token + 取回内容 × 剩余步数)`；**投影账只报净额** |
+| `projection_net_tokens` | `(gross_non_retrieval − retrieval_content) × (1 + horizon) − retrieval_calls`；`gross_non_retrieval` **不含**取回调用自身的投影；**投影账只报净额** |
 
-投影账报**净额** = 毛节省 − 取回调用及其回放；`projection_retrievals` 与净额都进 `boost status`。
+投影账报**净额**：毛额先剔除取回调用自身的投影，再与取回内容一起按 `(1 + 剩余步数)` 回放，最后一次性扣掉取回调用。两条理由：把取回自身的投影算进毛额、又把它的可见窗口算成取回成本，会把同一批 token 从两边各算一次；毛额与取回内容必须用同一个回放因子（只回放一边会让符号翻转——旧式子在两个常规用例上报出了很大的负节省）。`projection_retrievals` 与净额都进 `boost status`。
 
 ### 5.4 回执投影的可见性契约
 
@@ -308,7 +309,7 @@ config:
 - `owner` 取 `exec.agent.session.header.id`：先判 `exec.agent` 是否为 `undefined`；为 `undefined` 时不投影（PTC 子派发等场景）。`Agent.session` 与 `Session.header` 都是非可选字段，不要再套可选的冗余链。缺 session id 时同样不投影（`projection-skipped:no-owner`）。
 - 顺序无关的代价是**多一次落盘**：只对确实要投影的回执落盘，未触发阈值的不落。
 - **大回执直接不投影**：`Buffer.byteLength(text, 'utf8') > 256 * 1024` 跳过（**按 UTF-8 字节计，不按 `text.length` 的 UTF-16 单元**——同一段 CJK 的字节数是单元数的 3 倍，用错口径会让上限浮动 2–4 倍）。先比 `text.length` 做粗筛（它是 code point 数的上界），只有确定要裁时才 `Array.from` 转 code point 数组（实测 1 MB 字符串做这一步 17.7 ms、约 9 MB 堆）。
-- **`projection: 'shadow'` 不依赖 `spillStore`**：影子模式不改 content、不调 `saveText`、不落盘，只用 `estimateContent`（从 `@deepseek-ai/dsh-token-meter/estimate` **动态导入**，包 try/catch）对原/裁剪文本做对比记账；`projection-skipped:no-spill` 只在 `projection: 'on'` 且确实要落盘时触发。否则宿主没装 spill 包时影子期拿不到账。
+- **`projection: 'shadow'` 不依赖 `spillStore`**：影子模式不改 content、不调 `saveText`、不落盘，只用宿主 `tokenMeter` 的同步 `estimateMessage` 对原/裁剪文本做对比记账（meter 缺失时记 `unknown`，不伪造数字）；`projection-skipped:no-spill` 只在 `projection: 'on'` 且确实要落盘时触发。否则宿主没装 spill 包时影子期拿不到账。
 
 可见性三条：
 
@@ -442,7 +443,7 @@ v1 的裁决组合：
 | 抽样复核 | 每天抽 10 条放行记录人工看 | 语义上对不对 |
 | 20 任务回归门 | 清单 `test/regression/tasks.jsonl` 双跑；**pass ⇔（两轮都完成且 `isError=false` 的任务数 ≥ 19）∧（每条被投影的回执都能用页脚 locator 取回，且取回字节数 = 页脚 `count` + 保留窗口字节数）** | 有没有灾难性回退；后半句即"无数据丢失"的可执行定义 |
 | 会话统计 | 相对 300 会话基线的 token 分布（按会话长度分层） | 省了多少 |
-| 固定开销预算 | 计划段 + `boost` 工具 schema 的每请求开销 ≤ 800 token；用 `estimateSystemMessage` / `estimateContent`（`@deepseek-ai/dsh-token-meter/estimate`，**`await import(...)` 包 try/catch**）**在构建时实测**，实测值写进 `boost status` | A4 的固定成本是否失控 |
+| 固定开销预算 | 计划段 + `boost` 工具 schema 的每请求开销 ≤ 800 token；插件加载时用 `estimateSystemMessage` / `estimateToolsTokens`（`@deepseek-ai/dsh-token-meter/estimate`，**`await import(...)` 包 try/catch**）测一次，`boost status` 惰性 await 同一次测量——测量从不在请求路径上；没有 `chars/4` 回退（`estimate: 'unknown'` 比错数字有用）。实测 **772 / 800**（计划段 379 + schema 393），写进 `boost status` | A4 的固定成本是否失控 |
 | 分桶净节省 | 按会话步数分桶：**≤5 / 6–50 / ≥51** 步，分别报净节省率；**短会话桶另用随机抽 300 个会话**（基线 top-300 里 ≤5 步会话为 0 个）；**样本 < 20 个会话的桶不出数** | 裁决 A4：短会话是否被长会话摊薄 |
 
 **A4 是聚合口径**，不是单会话口径：长会话摊薄固定开销，短会话可能倒亏。所以 A4 用上面的分桶行裁决，不看总体平均。top-300 基线里没有 ≤5 步会话，必须换随机样本才能填满短会话桶；随机样本只用于 A4，不替换 G1 的 top-300 基线。
@@ -495,7 +496,7 @@ v1 的裁决组合：
 - 移植 `ref-harnessmm/dsh-plugin/harnessmm-desktop` 的 `llm/stream` 合成回合与 `tools/execute` 防篡改逻辑，保留其收据结构。
 - 按 D5 展开为模板支持（bank 校验 + 防篡改 + 证书措辞）；起点是 `integrations/deepseek_harness/public_argument_binding.mjs` 的 `$public` 投影（语法规范见 §5.2）。注意现成的 bank 校验**不是**在 `parseBank` 拒模板——`{"path":{"$public":…}}` 是合法字面量对象，能通过解析；真正拒绝的是 `sameLiteral` 逐字校验链（`projectTurn` 的 `chain-arguments-differ` 与 `violateDispatch`）。扩成模板要同步改 `parseBank`、`projectTurn`、`violateDispatch` 三处，结论不变。
 - guard 按 §5.2 的词表实现：`ok` / `text_contains` / `text_not_contains` / `json_equals`。**不要**照抄参照实现的 `GUARD_FIELDS`——`stderr_empty` 在 v1 白名单（read/grep/glob）上恒真、`exit_code` 恒 `unknown`（恒拒），两者都不可用；"只有 `ok:true`"必须判不合格。
-- 收据格式：完整字段见 §5.3 的两组表——替换账 `saved_input_tokens` / `cache_hit_delta`；投影账 `projected_tokens_before` / `projected_tokens_after` / `saved_projection_tokens` / `projection_unit` / `projection_retrievals` / `projection_net_tokens`。不要写成 `saved_tokens_estimate`。
+- 收据格式：完整字段见 §5.3 的两组表——替换账 `saved_input_tokens` / `cache_hit_delta`；投影账 `before` / `after` / `saved_projection_tokens` / `estimate` / `unit` / `projection_retrievals` / `projection_net_tokens`。不要写成 `saved_tokens_estimate`。
 - 收据存储（`$DSH_HOME/boost/receipts/<encodeSegment(sessionId)>.jsonl`，分片名把 `[A-Za-z0-9_-]` 以外的字符按 UTF-8 字节可逆百分号编码——session id 可能含 `/` 或 `..`，存储绝不能写出 `receipts/`）：
   - 每行一条收据，带 `version`（收据 schema 版本，从 1 起）与 `receipt_hash`（对 `sessionId` / `turn` / `stepId` / 工具名 / 参数 的稳定哈希）。
   - **只存摘要与预览**：`preview` = 规范化回执的前 256 字符，**不存 stdout 全文**；全文只在 spill 后端（页脚 locator 指向它）。
@@ -561,11 +562,13 @@ dsh-boost/
   },
   "devDependencies": {
     "typescript": "^5.6.0",
-    "@deepseek-ai/dsh-tools": "^0.2.2-rc.1",
-    "@deepseek-ai/dsh-spill-policy": "^0.2.2-rc.1",
-    "@deepseek-ai/dsh-token-meter": "^0.2.2-rc.1"
+    "@deepseek-ai/dsh-llm": "0.2.2-rc.4",
+    "@deepseek-ai/dsh-tools": "0.2.2-rc.4",
+    "@deepseek-ai/dsh-spill-policy": "0.2.2-rc.4",
+    "@deepseek-ai/dsh-token-meter": "0.2.2-rc.4"
   },
   "peerDependencies": {
+    "@deepseek-ai/dsh-llm": ">=0.2.2-rc.1 <0.3.0-0",
     "@deepseek-ai/dsh-tools": ">=0.2.2-rc.1 <0.3.0-0",
     "@deepseek-ai/dsh-spill-policy": ">=0.2.2-rc.1 <0.3.0-0",
     "@deepseek-ai/dsh-token-meter": ">=0.2.2-rc.1 <0.3.0-0"
@@ -587,6 +590,7 @@ dsh-boost/
 - **`dist/` 不入库**（`.gitignore` 忽略），干净 clone 上必须能 `npm run build`——布局里因此要有 `tsconfig.json`，缺它 `tsc -p` 直接 `TS5058`；`prepublishOnly` 已含 build，发布包不会缺 dist。
 - `engines.dsh` 由 dsh 插件加载器读取，npm 忽略此字段。
 - `files` 与实际布局一致：没有 `lib`，所以不列 `lib`；`scripts/` 与 `test/` 是 dev-only，不进包。
+- **`dsh-llm` 同时进 `devDependencies` 与 `peerDependencies`**：`StreamChunk` / `GenerateOptions` 的类型来自它，isolated 布局下缺它直接 `TS2307`。peer 用区间（与其余 host 包一致），dev 用精确 pin——registry 的 `latest` 标签对 `dsh-llm` 仍是 `0.0.1-rc.1`（另一套旧 API），浮动的 dev 依赖会静默编译到错误的类型上。
 - `$DSH_HOME` 未设置时回退 `~/.dsh`；三处状态按同一规则解析：`boost/scope.json`、`boost/scope.lock`、`boost/receipts/<encodeSegment(sessionId)>.jsonl`（§10；分片名用可逆百分号编码，避免 id 中的 `/` 或 `..` 写出 `receipts/`）。
 
 **依赖声明（`inject`）**：依赖形态在这里定死。
