@@ -24,10 +24,17 @@ function planOf(steps: unknown, extra: Record<string, unknown> = {}) {
   return result.plan
 }
 
+/** The first element of a list the test has established is non-empty. */
+function head<T>(items: readonly T[]): T {
+  const value = items[0]
+  assert.ok(value !== undefined, 'expected a non-empty list')
+  return value
+}
+
 test('解析出计划与候选', () => {
   const r = parsePlan(wrap(JSON.stringify({ goal: 'g', steps: [{ id: 'A', tool: 'read', args: { path: '/a' }, guards: [{ text_contains: 'x' }] }] })))
   assert.ok('plan' in r)
-  if ('plan' in r) assert.equal(r.plan.steps[0].id, 'A')
+  if ('plan' in r) assert.equal(head(r.plan.steps).id, 'A')
 })
 
 test('没有计划块返回 no-plan', () => {
@@ -129,7 +136,7 @@ test('id 必须是单个大写字母 A–Z', () => {
     assert.deepEqual(parsePlan(body([candidate({ id })])), { error: 'bad-shape' }, JSON.stringify(id))
   }
   for (const id of ['A', 'M', 'Z']) {
-    assert.equal(planOf([candidate({ id })]).steps[0].id, id)
+    assert.equal(head(planOf([candidate({ id })]).steps).id, id)
   }
 })
 
@@ -143,7 +150,7 @@ test('tool 必须非空（trim 后），值本身不重写', () => {
   for (const tool of ['', '   ', '\t\n']) {
     assert.deepEqual(parsePlan(body([candidate({ tool })])), { error: 'bad-shape' }, JSON.stringify(tool))
   }
-  assert.equal(planOf([candidate({ tool: ' read ' })]).steps[0].tool, ' read ')
+  assert.equal(head(planOf([candidate({ tool: ' read ' })]).steps).tool, ' read ')
 })
 
 /* ------------------------------------------------------------------------- *
@@ -168,12 +175,12 @@ test('$public 子树原样保留，$scalar 是值不是键', () => {
     path: { $public: { after: 'root', field: '$scalar' } },
     extra: { nested: [{ $public: { after: 'A', field: '$single' } }] },
   }
-  assert.deepEqual(planOf([candidate({ args })]).steps[0].args, args)
+  assert.deepEqual(head(planOf([candidate({ args })]).steps).args, args)
 })
 
 test('根级 $public 在此放行，由绑定阶段拒绝', () => {
   const args = { $public: { after: 'A', field: 'name' } }
-  assert.deepEqual(planOf([candidate({ args })]).steps[0].args, args)
+  assert.deepEqual(head(planOf([candidate({ args })]).steps).args, args)
 })
 
 test('$public 子树里也不能出现别的 $ 前缀键', () => {
@@ -193,7 +200,7 @@ test('原型相关键名在任何深度都返回 bad-shape', () => {
     assert.deepEqual(parsePlan(body([candidate({ args })])), { error: 'bad-shape' }, JSON.stringify(args))
   }
   // 作为值出现是合法的：只有键名受限
-  assert.equal(planOf([candidate({ args: { pattern: 'constructor' } })]).steps[0].args.pattern, 'constructor')
+  assert.equal(head(planOf([candidate({ args: { pattern: 'constructor' } })]).steps).args.pattern, 'constructor')
 })
 
 test('args 深度上限 64，超过返回 bad-shape', () => {
@@ -279,7 +286,7 @@ test('guard 多余键被丢弃', () => {
     { text_contains: 'x', note: 'y' },
     { json_equals: { pointer: '/a', value: 1, note: 'y' } },
   ]
-  assert.deepEqual(planOf([candidate({ guards })]).steps[0].guards, [
+  assert.deepEqual(head(planOf([candidate({ guards })]).steps).guards, [
     { ok: true },
     { text_contains: 'x' },
     { json_equals: { pointer: '/a', value: 1 } },
@@ -288,7 +295,7 @@ test('guard 多余键被丢弃', () => {
 
 test('json_equals 的数值原样保留', () => {
   const guards = [{ json_equals: { pointer: '/a', value: 1 } }]
-  const parsed = planOf([candidate({ guards })]).steps[0].guards[0]
+  const parsed = head(head(planOf([candidate({ guards })]).steps).guards)
   assert.deepEqual(parsed, guards[0])
   assert.ok('json_equals' in parsed)
   if ('json_equals' in parsed) assert.equal(typeof parsed.json_equals.value, 'number')
@@ -332,7 +339,7 @@ test('未知顶层键与候选键被忽略，结果只含约定字段', () => {
   const step = candidate({ note: 'ignored', extra: true })
   const plan = planOf([step], { note: 'ignored', version: 2, extra: { a: 1 } })
   assert.deepEqual(Object.keys(plan), ['goal', 'steps'])
-  assert.deepEqual(Object.keys(plan.steps[0]), ['id', 'tool', 'args', 'guards'])
+  assert.deepEqual(Object.keys(head(plan.steps)), ['id', 'tool', 'args', 'guards'])
 })
 
 test('垃圾输入不抛错，只返回错误码', () => {

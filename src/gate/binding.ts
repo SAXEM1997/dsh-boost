@@ -98,7 +98,7 @@ function escapeRegExp(value: string): string {
 const SCALAR = /^[A-Za-z0-9_+@.:/-]+$/
 
 /** `$single`: the whole trimmed text is a one-element single-quoted array. */
-const SINGLE = /^\['([^']*)'\]$/
+const SINGLE = /^\['[^']*'\]$/
 
 /**
  * Line boundaries the scan recognises: LF, CR, CRLF (split twice,
@@ -151,15 +151,18 @@ function scalarField(text: string): string | undefined {
 /**
  * Whole-text single-element string array whose value stays on one line.
  *
- * The whole-text anchoring makes the capture the entire interior of the array,
- * so there is no truncated-prefix case: a backslash is literal text here, and
- * `['C:\']` binds `C:\` exactly as the spec regex says.
+ * The whole-text anchoring makes the interior the entire value, so there is no
+ * truncated-prefix case: a backslash is literal text here, and `['C:\']` binds
+ * `C:\` exactly as the spec regex says.
  */
 function singleField(text: string): string | undefined {
-  const match = SINGLE.exec(text.trim())
-  if (match === null) return undefined
-  const value = match[1]
-  // An empty capture is never a useful argument (it reaches a tool as
+  const trimmed = text.trim()
+  if (!SINGLE.test(trimmed)) return undefined
+  // The pattern is anchored and matches exactly `['` + interior + `']`, so the
+  // value is the interior itself: no capture to narrow, and no way for the
+  // delimiters to survive.
+  const value = trimmed.slice(2, -2)
+  // An empty value is never a useful argument (it reaches a tool as
   // `path: ""`), and the identifier form already refuses empty values; the
   // whole-text form must apply the same rule (review row 65).
   if (value.length === 0 || LINE_TERMINATOR.test(value)) return undefined
@@ -181,9 +184,14 @@ function identifierField(text: string, field: string): string | undefined {
   for (const line of text.split(LINE_TERMINATOR)) {
     const match = pattern.exec(line)
     if (match === null) continue
-    if (escapedClosingQuote(match[1])) return undefined
+    const value = match[1]
+    // `identifierPattern` carries one mandatory, non-empty group, so a missing
+    // capture is unreachable; treating it as "this line has no value" keeps
+    // the type honest instead of asserting it away.
+    if (value === undefined) continue
+    if (escapedClosingQuote(value)) return undefined
     if (found !== undefined) return undefined
-    found = match[1]
+    found = value
   }
   return found
 }

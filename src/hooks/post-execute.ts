@@ -1970,7 +1970,6 @@ async function appendDispatchRejected(
  */
 async function inspectDispatch(
   deps: HookDeps,
-  state: ReceiptSessionState,
   exec: DispatchExec,
 ): Promise<
   | { kind: 'next' }
@@ -2033,7 +2032,7 @@ async function executeHook(
 ): Promise<unknown> {
   let outcome: Awaited<ReturnType<typeof inspectDispatch>>
   try {
-    outcome = await inspectDispatch(deps, state, exec)
+    outcome = await inspectDispatch(deps, exec)
   } catch {
     return next()
   }

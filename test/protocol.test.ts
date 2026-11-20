@@ -128,6 +128,7 @@ test('协议段示例可解析、用 file_path，并由下一句复述 guard 操
   assert.ok('plan' in parsed, `示例计划解析失败：${JSON.stringify(parsed)}`)
   assert.equal(parsed.plan.steps.length, 1)
   const step = parsed.plan.steps[0]
+  assert.ok(step !== undefined)
   assert.deepEqual(step.args, { file_path: '/repo/b.ts' })
   assert.equal('path' in step.args, false)
 

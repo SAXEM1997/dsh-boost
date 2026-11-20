@@ -215,8 +215,11 @@ test('projection 缺 unit 或被篡改时由 store 强制写 unit:"raw"', async 
   await s.append(rec('a', { kind: 'projection', before: 5, after: 2 }))
   await s.append(rec('a', { kind: 'projection', unit: 'tokens', before: 9, after: 3 }))
   const lines = (await readFile(join(root, 'receipts', 'a.jsonl'), 'utf8')).trim().split('\n')
-  assert.equal(JSON.parse(lines[0]).unit, 'raw')
-  assert.equal(JSON.parse(lines[1]).unit, 'raw')
+  const [first, second] = lines
+  assert.ok(first !== undefined)
+  assert.ok(second !== undefined)
+  assert.equal(JSON.parse(first).unit, 'raw')
+  assert.equal(JSON.parse(second).unit, 'raw')
 })
 
 test('调用方传入的 receipt_hash 不可信，store 总是重算', async () => {
@@ -254,7 +257,9 @@ test('只有半行的分片先截为空再追加', async () => {
   const text = await readFile(join(root, 'receipts', 'a.jsonl'), 'utf8')
   const lines = text.split('\n').filter((line) => line !== '')
   assert.equal(lines.length, 1)
-  assert.equal(JSON.parse(lines[0]).turn, 7)
+  const [line] = lines
+  assert.ok(line !== undefined)
+  assert.equal(JSON.parse(line).turn, 7)
   assert.equal(text.includes('"half"'), false)
   assert.equal(await s.count('a'), 1)
 })

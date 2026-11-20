@@ -654,7 +654,12 @@ export class ReceiptStore {
   /** Replay buffered lines in order; the head stays queued until its write succeeds. */
   private async drainPending(): Promise<void> {
     while (this.pending.length > 0) {
-      await this.writeLine(this.pending[0])
+      const entry = this.pending[0]
+      // `length > 0` guarantees a dense head (the buffer is only appended to
+      // and shifted from); the check narrows the type without a bang. Returning
+      // rather than spinning keeps an impossible sparse buffer from looping.
+      if (entry === undefined) return
+      await this.writeLine(entry)
       this.pending.shift()
     }
   }

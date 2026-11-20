@@ -257,7 +257,7 @@ test('fakeHost 的 section 拒绝重名、返回 disposer，section() 跟踪最�
 test('fakeHost 的 callHook 遵守真实瀑布：参数固定、next() 无参、返回值可变换', async () => {
   const host = fakeHost()
   const seen: string[] = []
-  host.on('tools/post-execute', async (args: any, next: any) => {
+  host.on('tools/post-execute', async (_args: any, next: any) => {
     seen.push('first')
     const downstream = await next()
     return { ...downstream, wrapped: true }

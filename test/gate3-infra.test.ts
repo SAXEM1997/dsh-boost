@@ -401,7 +401,9 @@ test('minor: apply logs the resolved configuration once', async () => {
   const app = await applyHost({ config: { stepsPerTurn: 4 } })
   const lines = app.infos.filter(message => message.includes('effective config'))
   assert.equal(lines.length, 1, JSON.stringify(app.infos))
-  assert.match(lines[0], /"stepsPerTurn":4/)
+  const line = lines[0]
+  assert.ok(line !== undefined, JSON.stringify(app.infos))
+  assert.match(line, /"stepsPerTurn":4/)
 })
 
 // ---------------------------------------------------------------------------

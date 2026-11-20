@@ -117,7 +117,9 @@ test('跨键不变量：head + tail 必须小于 trigger，否则整族回退默
   )
   assert.deepEqual(c.projection.read, DEFAULT_CONFIG.projection.read)
   assert.equal(repairs.length, 1)
-  assert.match(repairs[0], /triggerChars/)
+  const repair = repairs[0]
+  assert.ok(repair !== undefined)
+  assert.match(repair, /triggerChars/)
 
   const tight = resolveConfig({ projection: { read: { triggerChars: 2901, headChars: 2500, tailChars: 400 } } })
   assert.deepEqual(tight.projection.read, { triggerChars: 2901, headChars: 2500, tailChars: 400 })

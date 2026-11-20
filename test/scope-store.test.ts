@@ -506,7 +506,9 @@ test('I8: startedAt triggers a bounded takeover even when the recorded pid is al
   assert.equal(written.revision, 1)
   assert.equal(existsSync(lock), false)
   assert.equal(warnings.length, 1)
-  assert.match(warnings[0], /ERR_SCOPE_LOCK_TAKEOVER/)
+  const [warning] = warnings
+  assert.ok(warning !== undefined)
+  assert.match(warning, /ERR_SCOPE_LOCK_TAKEOVER/)
 })
 
 test('I8: a live lock inside the takeover window is never evicted', async () => {

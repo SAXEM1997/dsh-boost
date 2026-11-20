@@ -938,7 +938,7 @@ test('O11 投影收据：kind=projection、unit=raw、before/after 为数字、�
     deps: {
       estimateText: estimate,
       spill: {
-        saveText: async (input: { content: string }) => ({
+        saveText: async (_input: { content: string }) => ({
           locator: '/spill/read.txt',
           retrievalHint: 'read it',
         }),

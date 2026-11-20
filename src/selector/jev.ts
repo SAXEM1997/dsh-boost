@@ -200,8 +200,11 @@ async function attempt(input: ChooseInput): Promise<Attempt> {
 
 /** Map the label characters onto a choice; anything but one known id is `no-label`. */
 function interpret(label: readonly string[], candidates: readonly SelectorCandidate[]): ChooseResult {
-  if (label.length !== 1 || label[0] === '?') return { abstain: 'no-label' }
   const [only] = label
+  // `collectLabel` keeps at most two characters, so `only` is only undefined
+  // for the empty answer, which the length check already refuses; the extra
+  // clause narrows the type and states that case explicitly.
+  if (label.length !== 1 || only === undefined || only === '?') return { abstain: 'no-label' }
   return candidates.some((candidate) => candidate.id === only) ? { choice: only } : { abstain: 'no-label' }
 }
 

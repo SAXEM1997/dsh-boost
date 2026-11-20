@@ -426,7 +426,7 @@ function wireSessionEvents(
   /** Warn once per process about a prompt that swallowed the protocol section. */
   let warnedCompleteSection = false
 
-  ctx.on('system-prompt/assemble', async (assembly: unknown, context: unknown, next: () => unknown) => {
+  ctx.on('system-prompt/assemble', async (_assembly: unknown, context: unknown, next: () => unknown) => {
     const resolved = await next()
     try {
       // `dsh-agent` augments `AssembleContext` with the real `Agent`; `scope`
@@ -578,7 +578,7 @@ function wireSessionEvents(
   // persistence contract rests on, and `session/disposed` flushes again after
   // the last hook for the id. Receipts are evidence, so an early flush that
   // does not happen costs latency, never correctness.
-  ctx.on('session/event', (session: unknown, event: unknown) => {
+  ctx.on('session/event', (_session: unknown, event: unknown) => {
     const type = (event as { type?: unknown } | undefined)?.type
     if (type === 'turn/end') {
       // Fire-and-forget on the real host; `flush()` never rejects.

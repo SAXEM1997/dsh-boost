@@ -160,12 +160,16 @@ test('ask-selector 携带已绑定参数，plan 原件保持模板不变', () =>
   if (d.kind === 'ask-selector') {
     // 每个候选带着绑定后的参数，且是新的对象（原件不被改写）。
     assert.deepEqual(d.candidates.map((c) => c.args), [{ path: '/from-root' }, { path: '/other' }])
-    assert.notEqual(d.candidates[0], a)
-    assert.notEqual(d.candidates[1], b)
+    const first = d.candidates[0]
+    const second = d.candidates[1]
+    assert.ok(first !== undefined)
+    assert.ok(second !== undefined)
+    assert.notEqual(first, a)
+    assert.notEqual(second, b)
     // guards 及其中的 guard 对象也不能与 plan 共享：调用方改 guard 不能改到计划。
-    assert.notEqual(d.candidates[0].guards, a.guards)
-    assert.notEqual(d.candidates[0].guards[0], a.guards[0])
-    d.candidates[0].guards[0] = { ok: true }
+    assert.notEqual(first.guards, a.guards)
+    assert.notEqual(first.guards[0], a.guards[0])
+    first.guards[0] = { ok: true }
     assert.deepEqual(a.guards, [{ text_contains: 'path:' }])
   }
   assert.deepEqual(a.args, { path: template('path') })

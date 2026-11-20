@@ -30,6 +30,7 @@ test('after 按“头行 + head + 省略说明 + tail”估计，不是 t.after�
 
   // 关键断言：估算对象是拼上省略说明后的替换串，不是 T4 的 t.after。
   const projected = seen[1]
+  assert.ok(projected !== undefined)
   assert.notEqual(projected, t.after)
   assert.ok(projected.length > t.after.length)
   assert.ok(projected.includes(renderHeadLine(t)))

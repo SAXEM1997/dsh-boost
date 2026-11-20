@@ -131,6 +131,9 @@ function matchGuard(raw: unknown): Guard | undefined {
   const forms = GUARD_FORMS.filter((form) => Object.hasOwn(raw, form.key))
   if (forms.length !== 1) return undefined
   const form = forms[0]
+  // `length === 1` above guarantees the head; the check is here to narrow the
+  // type without a bang, not because the array can be short.
+  if (form === undefined) return undefined
   return form.decode(raw[form.key])
 }
 

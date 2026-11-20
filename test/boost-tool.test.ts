@@ -90,9 +90,10 @@ test('工具定义带宿主必填的 output.render（R32）', async () => {
   const def = boostTool(d)
   assert.equal(def.name, 'boost')
   assert.equal(typeof def.output.render, 'function')
-  const blocks = def.output.render({ cmd: 'status' }, { ok: true, data: { shadow: true } })
-  assert.equal(blocks[0].type, 'text')
-  assert.match(blocks[0].text, /shadow/)
+  const [block] = def.output.render({ cmd: 'status' }, { ok: true, data: { shadow: true } })
+  assert.ok(block !== undefined)
+  assert.equal(block.type, 'text')
+  assert.match(block.text, /shadow/)
 })
 
 // --- rule 1: the four subcommands and the unknown-command code -------------
