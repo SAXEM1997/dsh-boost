@@ -24,7 +24,12 @@ The plugin does two things:
    the footer names the path. Projection is deterministic and makes no per-call decision.
 2. **Substitution** — when a repeated read-only call (`read` / `grep` / `glob`) already has
    deterministic evidence satisfying its guard, commit it without asking the model for another
-   decision. With several candidates, a selector that may only return a single label picks one.
+   decision. With several candidates, a single-label selector — one auxiliary request
+   (`maxTokens` 512 plus its input) — picks one. For the three substituted tools, the plan's
+   `$public` argument binding (copying a value from an earlier receipt into a later call's
+   arguments) is effective in practice only for `glob`'s single-token output; `read` and `grep`
+   emit line-numbered or bare-path output that the identifier projection cannot match, so those
+   calls fall back to the model.
 
 The expected v1 range is **3.5% (floor) to 10.0% (ceiling)** of raw `totalTokens`. It was
 **estimated offline, ex ante** against a 300-session corpus during design: not a guarantee, and
@@ -37,8 +42,8 @@ statistic that a later version must add.
 
 ## Requirements
 
-- Node.js `>=24.9.0` and DSH `>=0.2.2-rc.1 <0.3.0-0` (both in `package.json` `engines`; the Node
-  floor matches the host `@deepseek-ai/dsh@0.2.2-rc.4`).
+- Node.js `>=24.9.0` and DSH `0.2.2-rc.4` (an exact pin, not a range; both in `package.json`
+  `engines`; the Node floor matches the host `@deepseek-ai/dsh@0.2.2-rc.4`).
 - **The package declares no peerDependencies**: installing it pulls in no `@deepseek-ai/*`
   package, and the module loads without any of them; the runtime capabilities (`tokenMeter`,
   `spillStore`, the estimator, the footer formatter) are provided by the DSH host process, and a
@@ -54,9 +59,7 @@ statistic that a later version must add.
 directory:
 
 ```bash
-# once published to a registry: latest still points at the incompatible old
-# API (0.0.1-rc.1), so pin the version — or use dsh-boost@next if the
-# publisher enabled a next dist-tag
+# install from the registry (0.1.0 is the first release; latest will be 0.1.0)
 dsh plugin --profile <name> add dsh-boost@^0.1.0
 
 # or from a local checkout (build first; dist/ is not committed)
@@ -86,8 +89,9 @@ After installation the plugin is inert. While `scope.json` does not exist it use
 { "version": 2, "revision": 0, "mode": "selected", "workspaceIds": [], "shadow": true, "projection": "shadow" }
 ```
 
-With no `workspaceIds` no workspace is visible: the protocol section is not injected and every
-hook returns the original. The `boost` tool itself is the one scope exemption, so it can always be
+With no `workspaceIds` no workspace is visible: the protocol section is not injected and
+projection and substitution pass through unchanged — but each tool call still records one
+`skip:no-scope` receipt. The `boost` tool itself is the one scope exemption, so it can always be
 called to enable a workspace.
 
 `boost` is a **model tool, not a shell command** — this package has no `bin`, and every step of
@@ -136,7 +140,10 @@ After the write, call `status` again. A healthy result looks like this:
   `1` (each write increments it).
 - `data.shadow` is `true` and `data.projection` is `"shadow"` — exactly the shadow-week state.
 - `data.degraded` is empty on POSIX with a host token meter and spill backend; `estimate_kind` is
-  `"host"` and `fixedOverheadTokens` is a number, not `"unknown"`.
+  `"host"` and `fixedOverheadTokens` is a number, not `"unknown"`. If the estimate package
+  `@deepseek-ai/dsh-token-meter/estimate` is unreachable, `fixedOverheadTokens` is the string
+  `"unknown"` (not 0) and `degraded` carries `ERR_HOST_NO_ESTIMATOR`; `estimate_kind` may still be
+  `"host"` because the token-meter service is present — the two are different things.
 - `data.counts` usually starts empty — but **control calls count too**: while no workspace is
   visible, `boost`'s own calls pass the same post-execute scope gate (there is no boost exemption
   there; the exemption lives at tool registration), each recording one `skip:no-scope`. It grows
@@ -164,13 +171,15 @@ ran while no workspace was visible yet, and each recorded one `skip:no-scope` (t
 scope gate does not exempt `boost` itself).
 
 `fixedOverheadTokens` is measured once at startup and is the **sum** of both components: protocol
-section 379 + `boost` tool schema 399 = 778 (in this checkout). It is never inferred from usage.
-**Which number applies to a request depends on scope**: the `boost` tool schema (399) is present
-whenever the plugin is assembled — `boost` is the one scope exemption and always stays in the tool
-declaration — while the protocol section (379) is injected only when a workspace is visible. Under
-`selected + []` the section's text is empty, so the real per-request fixed cost is **399**. `status`
-always reports the combined 778 regardless of scope; in the excerpt above a workspace is selected,
-so 778 is the true per-request cost there.
+section 379 + `boost` tool schema 399 = 778 (in this checkout). It is never inferred from usage;
+when the estimate package is unreachable it is the string `'unknown'`, not 778 and not 0, and
+`status.degraded` also carries `ERR_HOST_NO_ESTIMATOR`. **Which number applies to a request
+depends on scope**: the `boost` tool schema (399) is present whenever the plugin is assembled —
+`boost` is the one scope exemption and always stays in the tool declaration — while the protocol
+section (379) is injected only when a workspace is visible. Under `selected + []` the section's
+text is empty, so the real per-request fixed cost is **399**. `status` reports the combined 778
+(or `'unknown'` when the estimate package is unreachable) regardless of scope; in the excerpt
+above a workspace is selected, so 778 is the true per-request cost there.
 
 ## Shadow week
 
@@ -257,10 +266,10 @@ Characters are Unicode code points. Error receipts and receipts above 256 KiB ar
 
 The invariant is **not** `triggerChars >= headChars + tailChars + 1`. The real replacement is head
 line + head + footer + tail + 3 newlines; the footer is produced by the host's `formatSpillNotice`
-and is about 190 characters (68-character locator, 5-digit omitted-byte count, the host's fixed
+and is about 196 characters (68-character locator, 5-digit omitted-byte count, the host's fixed
 retrieval hint). With the grep/glob defaults of 400+100:
-`400 + 100 + 50 (head line) + 192 (footer) + 3 = 745 > 700`. So a receipt just over 700 — up to
-about 745 — is judged cuttable by `truncate`, but `projectApply` assembles a replacement that is
+`400 + 100 + 50 (head line) + 196 (footer) + 3 = 749 > 700`. So a receipt just over 700 — up to
+about 749 — is judged cuttable by `truncate`, but `projectApply` assembles a replacement that is
 not shorter than the original and returns the original. That is a dead band, not a net loss. The
 runtime `assembled.length >= text.length` check guarantees projection never makes a receipt
 longer; to remove the dead band, raise `triggerChars` to at least that sum (for example 800 for
@@ -318,19 +327,30 @@ State lives in `$DSH_HOME/boost/` (`$DSH_HOME` falls back to `~/.dsh` when unset
 
 - `scope.json` — the single source of truth for the exposure surface (version 2, with revision).
 - `scope.lock` — the short-lived write lock, removed after a normal write.
-- `receipts/<encoded-session>.jsonl` — append-only receipts. Besides metadata, each line carries
-  a preview of the first 256 code points of the receipt (never the full stdout), **the bound
+- `receipts/<encoded-session>.jsonl` — append-only receipts. Every line carries metadata, a
+  preview of the first 256 code points of the receipt (never the full stdout), and **the bound
   arguments `args` (model-written, capped to 2048 code points, stored as visibly truncated JSON
   with an `args_truncated` flag when oversized — `write` / `edit` arguments can carry whole file
-  contents and land here too)**, the plan goal (≤256 code points), and the guards (≤8, each
-  ≤300 code points).
+  contents and land here too)**. **Only substitution receipts** (`substitute` /
+  `substitute-settled` / `shadow`) also carry the plan goal (≤256 code points) and guards (≤8,
+  each ≤300 code points); projection and skip receipts carry `preview` and `args` but no plan
+  evidence.
+
+`boost status` replays the projection ledger at each receipt's own `horizon_steps`; a receipt
+written before that field existed is replayed at the current horizon and counted in
+`projection_horizon_reestimated`, while `projection_horizon_steps` reports the horizon currently
+in effect (the minimum over live sessions, falling back to `horizonSteps` when no history exists).
 
 With `projection: 'on'`, the complete original is written to the host spill backend **before** the
 replacement happens, and the footer locator can be read with `read` / `grep`. Projection never
 discards the only copy; if the spill write fails, nothing is replaced (the receipt records
-`spill-failed`; a footer failure records `footer-failed`).
+`projection-skipped:spill-failed`; a footer rendering failure records
+`projection-skipped:footer-failed`; a missing footer renderer records
+`projection-skipped:no-footer`, see "Host dependencies").
 
-Rollback and disablement:
+Rollback and disablement (the `baseRevision` values below are `3` after the enable path above and
+`4` after the first rollback; in practice always use the `data.scope.revision` you just read from
+`status`, never copy these):
 
 - **Turn both behaviours off** (no projection, no substitution; the protocol section is still
   injected for every still-visible workspace — the selected ones under `selected`, every defined
@@ -338,7 +358,7 @@ Rollback and disablement:
   overhead remains):
 
   ```json
-  { "cmd": "scope-set", "body": { "projection": "off", "shadow": true }, "baseRevision": 1 }
+  { "cmd": "scope-set", "body": { "projection": "off", "shadow": true }, "baseRevision": 3 }
   ```
 
 - **Go back to fully inert**: set `mode` back to `selected` and empty the list. **Note that
@@ -349,7 +369,7 @@ Rollback and disablement:
   enough; under `global` you must switch the mode at the same time:
 
   ```json
-  { "cmd": "scope-set", "body": { "mode": "selected", "workspaceIds": [] }, "baseRevision": 2 }
+  { "cmd": "scope-set", "body": { "mode": "selected", "workspaceIds": [] }, "baseRevision": 4 }
   ```
 
   With `selected` and an empty list the protocol section, projection, and substitution all stop
@@ -361,28 +381,46 @@ Rollback and disablement:
 
 ## Host dependencies
 
-`inject` lists hard dependencies: `tools`, `llm`, `systemPrompt`. Missing any of them makes the
-plugin fail to load.
+`inject` lists hard dependencies: `tools`, `systemPrompt`. Missing either makes the plugin fail
+to load. `llm` is soft (only the selector uses it); when absent the selector falls back with
+`selector-unavailable` and the rest of projection and substitution keeps working.
 
 | Dependency | Form | When missing |
 |---|---|---|
-| `workspaceRegistry` | soft (`ctx.get('workspaceRegistry')`) | **Nothing works at all**: a cwd can never map to a workspace id, so everything fails closed as invisible — no protocol section, projection and substitution all skipped, only `skip:no-scope` receipts accumulating; `status.degraded` reports `ERR_HOST_NO_WORKSPACE_REGISTRY`. This is the one code that explains "installed but nothing happens" |
+| `workspaceRegistry` | soft (`ctx.get('workspaceRegistry')`) | **The workspace is invisible**: a cwd can never map to a workspace id, so everything fails closed as invisible — no protocol section, projection and substitution all skipped, only `skip:no-scope` receipts accumulating; `status.degraded` reports `ERR_HOST_NO_WORKSPACE_REGISTRY`. This is the host-capability explanation **when a workspace should be visible**, not the only explanation for "installed but nothing happens": the shipped default `selected + []` is inert by design and reports no error; a missing token meter also refuses real substitution; a `complete: true` section also suppresses the protocol |
 | `tokenMeter` | soft (`ctx.get('tokenMeter')`) | Substitution is refused; projection keeps working and its accounting records `unknown` (never a fabricated number); `status.degraded` reports `ERR_HOST_NO_TOKENMETER` |
-| `spillStore` | soft (`ctx.get('spillStore')`) | With `projection: 'on'`, an over-limit receipt is not projected (evidence preserved), `projection-skipped:no-spill`; `status.degraded` reports `ERR_HOST_NO_SPILL` |
+| `spillStore` | soft (`ctx.get('spillStore')`) | With `projection: 'on'`, an over-limit receipt is not projected (evidence preserved) and the receipt records `projection-skipped:no-spill`; `status.degraded` reports `ERR_HOST_NO_SPILL` (the live probe only in on mode; a historical receipt reports it in any mode) |
+| `@deepseek-ai/dsh-spill-policy/notice` | soft (dynamic import) | The spill backend exists but the footer renderer `formatSpillNotice` cannot be loaded/is absent: apply-mode projection cannot build its footer and skips every receipt (`projection-skipped:no-footer`); `status.degraded` reports `ERR_HOST_NO_SPILL_NOTICE`. This is a different absence from `ERR_HOST_NO_SPILL` (no spill backend at all) |
 | `@deepseek-ai/dsh-token-meter/estimate` | soft (dynamic import) | Fixed overhead cannot be measured, so `fixedOverheadTokens` is `'unknown'`; `status.degraded` reports `ERR_HOST_NO_ESTIMATOR` |
 | `win32` platform | runtime `isPosixOnly()` check | Substitution is refused, projection still works; `status.degraded` reports `ERR_HOST_PLATFORM_UNSUPPORTED` |
-| Step-level `when` on `tools.resolve` | soft probe | The whole family (including the `boost` tool) is not registered, `ERR_HOST_NO_STEP_WHEN`; it normally surfaces in the registration warning because `status` itself is unavailable |
+| Host version line | startup check of the `@deepseek-ai/dsh-app-boot` version | A version other than `0.2.2-rc.4` logs `ERR_HOST_VERSION_MISMATCH` and loads anyway — advisory only, not a `status.degraded` code. An undeterminable version logs an info line, no code |
 | Receipt shard readability | `boost status` full scan (not a dependency) | When at least one receipt shard cannot be read (EACCES, a directory named `x.jsonl`, …), `status.degraded` carries `ERR_RECEIPTS_UNREADABLE`; `status` stays a **total over the healthy shards** — they are still counted — so the figures may be incomplete. Check permissions and stray entries in `$DSH_HOME/boost/receipts/`, fix, and re-run `status`, comparing counts |
 | Receipt shard count | `boost status` full scan (not a dependency) | When more than 256 shards exist, `status` counts only the first 256 by encoded name and `status.degraded` carries `ERR_RECEIPTS_TRUNCATED`; every count is therefore a **lower bound**. Shards are never pruned automatically; archive or move old session shards and re-run `status` |
 | Prompt assembly waterfall | outgoing-request probe (not a dependency) | When the host's `complete: true` prompt section replaces the assembled system prompt after the waterfall and the protocol section never reaches the request, `status.degraded` carries `ERR_HOST_COMPLETE_SECTION`; substitution and projection fail closed for the affected requests (the plugin stays inert although the workspace is visible). Find the complete section overriding the waterfall (usually another plugin's) and remove it, or accept the inaction on those requests |
+
+`ERR_HOST_NO_STEP_WHEN` no longer exists: step-level `when` has been part of
+`ToolRegistrationOptions` since the oldest host line this package declares, so the plugin no
+longer probes it and registers unconditionally.
+
+Several registration codes are log-only and never enter `status.degraded`: a non-duplicate throw
+while registering the protocol section logs `ERR_BOOST_SECTION_REGISTER_FAILED` and the remaining
+mounts (including the `boost` tool) still assemble; the host's genuine duplicate-section error logs
+`ERR_BOOST_ALREADY_MOUNTED` and skips the mount; a failure to register the `boost` tool itself
+logs `ERR_BOOST_TOOL_REGISTER_FAILED`.
 
 `ERR_HOST_NO_TOKENMETER` and `ERR_HOST_NO_ESTIMATOR` are **two different things**; do not merge
 them. The first is the host service (`ctx.get('tokenMeter')`) being absent, which refuses
 substitution. The second is the pure estimate package
 `@deepseek-ai/dsh-token-meter/estimate` being unreachable, which only makes the fixed-overhead
 figure unknown. One can exist without the other, and merging them sends the operator to the wrong
-host. `ERR_HOST_NO_SPILL` is reported only with `projection: 'on'`; shadow mode never touches
-spill, and reporting it there would be noise.
+host. `ERR_HOST_NO_SPILL` (no spill backend) and `ERR_HOST_NO_SPILL_NOTICE` (backend present, no
+footer renderer) are also two different things with different fixes.
+
+`ERR_HOST_NO_SPILL` has two halves: the **live host probe** reports it only with
+`projection: 'on'` (shadow mode never touches spill, so reporting it there would be noise); the
+**receipt channel** does not look at the current mode — any historical receipt carrying
+`projection-skipped:no-spill` maps to this code, so after you switch projection back to `off`, an
+old receipt keeps it in `degraded`.
 
 `tokenMeter` and `spillStore` must not be added to `inject`: with a host that lacks them the
 plugin would fail to load outright, and the "refuse substitution, keep projecting, preserve
@@ -408,8 +446,9 @@ evidence" degraded path would be unreachable.
 - Does not replace or take over DSH's compaction, pruning, or spill decisions (design N3);
   projection changes only the model-visible content and keeps the original in the host spill.
 - No model training or weight changes (N2); no attempt at the paper's 87.93% (N4).
-- No 10% promise: 3.5% is the floor and 10% the ideal upper bound; the shadow week only narrows
-  the range.
+- No 10% promise: 3.5% is the floor and 10% the ideal upper bound; the shadow week tells you
+  whether to proceed, but it cannot replace the range with a measurement (`shadow-report.mjs`
+  emits four ratios and no total-token denominator).
 
 ## Documentation
 
@@ -418,9 +457,9 @@ These documents live in the **repository**, not in the npm tarball (`files` ship
 either, and the `dist` source maps inline the sources). If you are reading on
 the npm page, open them from the repository.
 
-The source currently lives only on the internal GitLab remote; no public mirror exists yet (the
-previous GitHub repository address 404s), so `package.json` deliberately omits the `repository`
-field and the npm page will show no repository link — fetch the source from the internal GitLab.
+The source and docs live in the repository at
+[github.com/SAXEM1997/dsh-boost](https://github.com/SAXEM1997/dsh-boost); `package.json` points
+`repository`, `homepage`, and `bugs` at it. The document links below are repository-relative.
 
 | Document | Contents |
 |---|---|

@@ -17,7 +17,10 @@ DSH 每次模型请求都会回放全部历史。本机 300 个最长会话的�
 1. **投影**——工具回执进入上下文之前，按工具族保留头尾，把中段换成可检索的落盘句柄；
    原文仍可取回，页脚给出路径。投影按固定阈值确定性执行，不产生逐次决策。
 2. **替换**——计划里重复的只读调用（`read` / `grep` / `glob`）若已有确定性证据满足守卫，
-   直接提交，不再向模型要一次决策；多候选时用一个只允许返回单个标签的选择器。
+   直接提交，不再向模型要一次决策；多候选时用一个单标签选择器——一次独立的辅助请求
+   （`maxTokens` 512，另加其输入）。对替换涉及的三个工具而言，计划里的 `$public` 参数绑定
+   （把上一步回执里的值直接搬进下一步参数）在实践中只对 `glob` 的单 token 输出有效；
+   `read` 与 `grep` 的输出带行号或是裸路径，标识符投影匹配不到，这些调用会退回模型。
 
 v1 的预期收益区间是 **3.5%（保底）– 10.0%（上界）**，按 raw `totalTokens` 计。
 这是设计阶段对一个 300 会话语料做**离线事前估算**得到的区间：不是保证，也不是从交付的
@@ -28,8 +31,8 @@ v1 的预期收益区间是 **3.5%（保底）– 10.0%（上界）**，按 raw 
 
 ## 前置条件
 
-- Node.js `>=24.9.0`，DSH `>=0.2.2-rc.1 <0.3.0-0`（两者都在 `package.json` 的 `engines` 里；
-  Node 下限对齐宿主 `@deepseek-ai/dsh@0.2.2-rc.4`）。
+- Node.js `>=24.9.0`，DSH `0.2.2-rc.4`（精确锁定，不是区间；两者都在 `package.json` 的
+  `engines` 里；Node 下限对齐宿主 `@deepseek-ai/dsh@0.2.2-rc.4`）。
 - **本包不声明任何 peerDependencies**：安装它不会带出任何 `@deepseek-ai/*` 包，模块脱离它们也能
   加载；运行时能力（`tokenMeter`、`spillStore`、估算器、页脚格式化器）由 DSH 宿主进程提供，
   缺失时走降级（见「宿主依赖」）。
@@ -42,8 +45,7 @@ v1 的预期收益区间是 **3.5%（保底）– 10.0%（上界）**，按 raw 
 `dsh plugin` 要求指定 profile，剩下的参数原样转发给该 profile 目录里的 pnpm：
 
 ```bash
-# 已发布到 registry 时：latest 仍指向不兼容的旧 API（0.0.1-rc.1），必须钉版本——
-# 或发布者启用了 next dist-tag 时用 dsh-boost@next
+# 从 registry 安装（0.1.0 是首次发布；发布后 latest 就是它）
 dsh plugin --profile <name> add dsh-boost@^0.1.0
 
 # 或从本地 checkout 安装（先构建；dist/ 不入库）
@@ -71,8 +73,9 @@ bundle，patch 的 `insert` 行落在 profile root 上。**装完必须重启 DS
 { "version": 2, "revision": 0, "mode": "selected", "workspaceIds": [], "shadow": true, "projection": "shadow" }
 ```
 
-`workspaceIds` 为空时没有可见工作区：协议段不注入，投影与替换都原样放行。`boost` 工具本身
-是唯一的 scope 豁免，因此没有工作区时仍然可以调用它来启用。
+`workspaceIds` 为空时没有可见工作区：协议段不注入，投影与替换都原样放行，但每个工具调用
+仍会记一条 `skip:no-scope` 收据。`boost` 工具本身是唯一的 scope 豁免，因此没有工作区时仍然
+可以调用它来启用。
 
 `boost` 是**模型工具，不是 shell 命令**——这个包没有 `bin`，启用全程都要在对话里让模型调用
 它（status、scope-set、shadow 都是工具调用，没有 CLI 等价物）。例如：
@@ -116,7 +119,10 @@ bundle，patch 的 `insert` 行落在 profile root 上。**装完必须重启 DS
 - `ok: true`，`data.scope.workspaceIds` 含刚写入的 id，`data.scope.revision` 变成 `1`（每次写加一）。
 - `data.shadow` 为 `true`，`data.projection` 为 `"shadow"`——正是影子周的状态。
 - `data.degraded` 为空（POSIX、宿主有 token meter 与 spill 后端时）；`estimate_kind` 为
-  `"host"`，`fixedOverheadTokens` 是一个数字，不是 `"unknown"`。
+  `"host"`，`fixedOverheadTokens` 是一个数字，不是 `"unknown"`。若估算包
+  `@deepseek-ai/dsh-token-meter/estimate` 不可达，`fixedOverheadTokens` 会是字符串
+  `"unknown"`（不是 0），`degraded` 带 `ERR_HOST_NO_ESTIMATOR`；此时 `estimate_kind` 仍可能是
+  `"host"`，因为 token meter 服务还在——两件事不要混。
 - `data.counts` 一开始通常为空——但**控制调用自己也计数**：可见工作区为空时，`boost`
   自己的调用同样要过 post-execute 的 scope 门（那里没有 boost 豁免，豁免只在工具注册层），
   每条记一次 `skip:no-scope`。正常工具调用后会累积，例如出现 `projection-shadow` 条目。
@@ -142,11 +148,12 @@ bundle，patch 的 `insert` 行落在 profile root 上。**装完必须重启 DS
 可见工作区，每次各记了一条 `skip:no-scope`（post-execute 的 scope 门不豁免 `boost` 自身）。
 
 `fixedOverheadTokens` 是启动时实测的固定开销**合计**：协议段 379 + `boost` 工具 schema 399 =
-778（本 checkout）。它不是从使用量里推断的。**哪个数字适用于当前请求取决于 scope**：`boost`
-工具 schema（399）只要插件装配就常驻——`boost` 是唯一的 scope 豁免，始终留在工具声明里；
-协议段（379）只在有可见工作区时注入，`selected + []` 下该段文本为空，**每请求固定开销实际是
-399**。`status` 汇报的始终是合计 778，不随 scope 翻转；上面示例里工作区已选中，778 就是当时的
-真实每请求开销。
+778（本 checkout）。它不是从使用量里推断的；估算包不可达时它是字符串 `'unknown'`，不是 778，
+也不是 0，`status.degraded` 同时带 `ERR_HOST_NO_ESTIMATOR`。**哪个数字适用于当前请求取决于
+scope**：`boost` 工具 schema（399）只要插件装配就常驻——`boost` 是唯一的 scope 豁免，始终留在
+工具声明里；协议段（379）只在有可见工作区时注入，`selected + []` 下该段文本为空，**每请求固定
+开销实际是 399**。`status` 汇报的是合计 778（估算包不可达时是 `'unknown'`），不随 scope 翻转；
+上面示例里工作区已选中，778 就是当时的真实每请求开销。
 
 ## 影子周
 
@@ -221,9 +228,9 @@ bundle，patch 的 `insert` 行落在 profile root 上。**装完必须重启 DS
 字符按 Unicode 码点计。错误回执与超过 256 KiB 的回执不投影。
 
 不变量不是 `triggerChars ≥ headChars + tailChars + 1`。真实替换串是 head line + head + 页脚 +
-tail + 3 个换行；页脚由宿主 `formatSpillNotice` 生成，约 190 字符（68 字符 locator、5 位省略
+tail + 3 个换行；页脚由宿主 `formatSpillNotice` 生成，约 196 字符（68 字符 locator、5 位省略
 字节数、宿主固定 retrieval hint）。grep/glob 默认 400+100 时：
-`400 + 100 + 50（head line） + 192（页脚） + 3 = 745 > 700`。于是刚过 700、约 745 以下的回执
+`400 + 100 + 50（head line） + 196（页脚） + 3 = 749 > 700`。于是刚过 700、约 749 以下的回执
 会被 `truncate` 判定“可裁”，但 `projectApply` 组装后并不短于原文，直接返回原文——这是死区，
 不是净亏。运行时的 `assembled.length >= text.length` 检查保证投影绝不会让回执变长；要消除
 死区，把 `triggerChars` 提到至少这个和（例如 grep/glob 用 800），或缩小窗口。页脚长度会随
@@ -277,22 +284,30 @@ plugin manager 才能把运行中的 entry 认成本包的行、通过 profile p
 
 - `scope.json`——暴露面的唯一事实来源（version 2，带 revision）。
 - `scope.lock`——写路径的短锁，正常写入结束后删除。
-- `receipts/<encoded-session>.jsonl`——追加式收据。除元数据外，每行还携带：回执前 256 个
-  码点的 preview（不存 stdout 全文）、**绑定后的参数 `args`（模型所写，截到 2048 个码点，
-  超长会以 `args_truncated` 标记的截断 JSON 落盘——`write` / `edit` 的参数可携带整段文件
-  内容，同样入账）**、计划 goal（≤256 码点）与守卫（≤8 条，各 ≤300 码点）。
+- `receipts/<encoded-session>.jsonl`——追加式收据。每行携带元数据、回执前 256 个码点的
+  preview（不存 stdout 全文）和**绑定后的参数 `args`（模型所写，截到 2048 个码点，超长会以
+  `args_truncated` 标记的截断 JSON 落盘——`write` / `edit` 的参数可携带整段文件内容，同样
+  入账）**。**只有替换类收据**（`substitute` / `substitute-settled` / `shadow`）另外携带计划
+  goal（≤256 码点）与守卫（≤8 条，各 ≤300 码点）；投影与 skip 收据只有 preview 和 args，
+  没有 plan 证据。
+
+`boost status` 的投影账按每条收据自己的 `horizon_steps` 重放；没有该字段的旧收据按当前
+horizon 重放，并计入 `projection_horizon_reestimated`；`projection_horizon_steps` 报告当前
+生效的 horizon（活动会话的最小值；没有历史时回落到 `horizonSteps`）。
 
 `projection: 'on'` 时，完整原文在替换发生**之前**写入宿主的 spill 后端，页脚 locator 可以用
-`read` / `grep` 取回。投影不会丢掉唯一副本；spill 写入失败就不替换（收据记 `spill-failed`，
-页脚失败记 `footer-failed`）。
+`read` / `grep` 取回。投影不会丢掉唯一副本；spill 写入失败就不替换（收据记
+`projection-skipped:spill-failed`，页脚渲染失败记 `projection-skipped:footer-failed`；页脚
+渲染器加载不到则记 `projection-skipped:no-footer`，见「宿主依赖」）。
 
-回滚与停用：
+回滚与停用（下面的 `baseRevision` 按「启用」一节的路径走完是 `3`，第一条执行完是 `4`；
+实际使用时永远取你刚从 `status` 读到的 `data.scope.revision`，不要照抄）：
 
 - **关掉两个行为**（不再投影、不再替换，但仍然可见的工作区——`selected` 下已选的、`global`
   下全部已定义的——会继续注入协议段，替换决策仍写影子收据，固定开销照旧）：
 
   ```json
-  { "cmd": "scope-set", "body": { "projection": "off", "shadow": true }, "baseRevision": 1 }
+  { "cmd": "scope-set", "body": { "projection": "off", "shadow": true }, "baseRevision": 3 }
   ```
 
 - **回到真正惰性**：把 `mode` 设回 `selected` 并清空列表。**注意 `workspaceIds` 只在
@@ -302,7 +317,7 @@ plugin manager 才能把运行中的 entry 认成本包的行、通过 profile p
   在 `global` 下必须同时改 `mode`：
 
   ```json
-  { "cmd": "scope-set", "body": { "mode": "selected", "workspaceIds": [] }, "baseRevision": 2 }
+  { "cmd": "scope-set", "body": { "mode": "selected", "workspaceIds": [] }, "baseRevision": 4 }
   ```
 
   `selected` + 空列表时协议段、投影、替换全部停止（只剩下 `boost` 工具 schema 的常驻开销）。
@@ -313,25 +328,40 @@ plugin manager 才能把运行中的 entry 认成本包的行、通过 profile p
 
 ## 宿主依赖
 
-`inject` 是硬依赖：`tools`、`llm`、`systemPrompt`——缺任一，插件加载失败。
+`inject` 是硬依赖：`tools`、`systemPrompt`——缺任一，插件加载失败。`llm` 是软依赖（只有
+选择器用），缺失时选择器以 `selector-unavailable` 退回，投影与替换的其余部分照常。
 
 | 依赖 | 形态 | 缺失时 |
 |---|---|---|
-| `workspaceRegistry` | 软（`ctx.get('workspaceRegistry')`） | **什么都用不了**：cwd 永远映射不到工作区 id，一切按 fail-closed 视为不可见——协议段不注入、投影与替换全部跳过，只有 `skip:no-scope` 收据在涨；`status.degraded` 带 `ERR_HOST_NO_WORKSPACE_REGISTRY`。这是「装上了却什么都不发生」的唯一解释 |
+| `workspaceRegistry` | 软（`ctx.get('workspaceRegistry')`） | **工作区不可见**：cwd 永远映射不到工作区 id，一切按 fail-closed 视为不可见——协议段不注入、投影与替换全部跳过，只有 `skip:no-scope` 收据在涨；`status.degraded` 带 `ERR_HOST_NO_WORKSPACE_REGISTRY`。这是**工作区本应可见却不可见**时的宿主能力解释，不是「装上了却什么都不发生」的唯一解释：默认 `selected + []` 按设计就是惰性的且不报错；缺 token meter 会拒绝真正的替换；`complete: true` 提示段会压掉协议段 |
 | `tokenMeter` | 软（`ctx.get('tokenMeter')`） | 拒绝替换；投影仍可用，投影账记 `unknown`（不伪造数字）；`status.degraded` 带 `ERR_HOST_NO_TOKENMETER` |
-| `spillStore` | 软（`ctx.get('spillStore')`） | `projection: 'on'` 时超限回执不投影（保住证据），`projection-skipped:no-spill`；`status.degraded` 带 `ERR_HOST_NO_SPILL` |
+| `spillStore` | 软（`ctx.get('spillStore')`） | `projection: 'on'` 时超限回执不投影（保住证据），收据记 `projection-skipped:no-spill`；`status.degraded` 带 `ERR_HOST_NO_SPILL`（实时探测只在 on 模式；历史收据在任何模式下都会让它出现） |
+| `@deepseek-ai/dsh-spill-policy/notice` | 软（动态 import） | spill 后端在，但页脚渲染器 `formatSpillNotice` 加载不到/不存在：apply 模式无法拼页脚，逐条跳过（收据 `projection-skipped:no-footer`），`status.degraded` 带 `ERR_HOST_NO_SPILL_NOTICE`。这与「没有 spill 后端」的 `ERR_HOST_NO_SPILL` 是两件事 |
 | `@deepseek-ai/dsh-token-meter/estimate` | 软（动态 import） | 固定开销无法测量，`fixedOverheadTokens` 为 `'unknown'`；`status.degraded` 带 `ERR_HOST_NO_ESTIMATOR` |
 | `win32` 平台 | 运行时检查 `isPosixOnly()` | 拒绝替换，投影照常；`status.degraded` 带 `ERR_HOST_PLATFORM_UNSUPPORTED` |
-| `tools.resolve` 的步骤级 `when` | 软探测 | 整族（含 `boost` 工具）不注册，`ERR_HOST_NO_STEP_WHEN`；它通常出现在注册警告里，`status` 本身不可用 |
+| 宿主版本线 | 启动时读 `@deepseek-ai/dsh-app-boot` 的版本 | 不是 `0.2.2-rc.4` 时日志警告 `ERR_HOST_VERSION_MISMATCH`，插件照常加载（advisory，不是 `status.degraded` 码）；版本读不到时只记 info，不发码 |
 | 收据分片可读性 | `boost status` 全量扫描（非依赖） | 至少一个收据分片读不出来（EACCES、名为 `x.jsonl` 的目录等）时 `status.degraded` 带 `ERR_RECEIPTS_UNREADABLE`；`status` 仍是**全量聚合**——健康分片照常计数——所以数字可能不完整。查 `$DSH_HOME/boost/receipts/` 的权限与异常条目，修复后重跑并对比计数 |
 | 收据分片数量 | `boost status` 全量扫描（非依赖） | 分片超过 256 个时 `status` 只统计按编码名排序的前 256 个，`status.degraded` 带 `ERR_RECEIPTS_TRUNCATED`，所有计数因此是**下界**；分片永不自动删除，可归档/移走旧会话分片后重跑 `status` |
 | 提示段装配瀑布 | 出站请求探测（非依赖） | 宿主的 `complete: true` 提示段在装配瀑布之后替换了整个系统提示、协议段没有到达请求时，`status.degraded` 带 `ERR_HOST_COMPLETE_SECTION`；受影响请求上替换与投影 fail-closed（工作区明明可见插件却不动作）。找出宿主里覆盖瀑布的 complete 段（通常属于另一个插件）并移除，或接受这些请求上不动作 |
 
+`ERR_HOST_NO_STEP_WHEN` 已不存在：步骤级 `when` 从本包声明的最老宿主线起就在
+`ToolRegistrationOptions` 里，插件不再探测、无条件注册。
+
+注册阶段还有几个只进日志、不进 `status.degraded` 的码：协议段注册抛出**非重复**错误时记
+`ERR_BOOST_SECTION_REGISTER_FAILED`，其余挂载（含 `boost` 工具）继续装配；宿主真正的重复
+注册错误记 `ERR_BOOST_ALREADY_MOUNTED` 并跳过挂载；`boost` 工具自身注册失败记
+`ERR_BOOST_TOOL_REGISTER_FAILED`。
+
 `ERR_HOST_NO_TOKENMETER` 与 `ERR_HOST_NO_ESTIMATOR` 是**两件不同的事**，不要合并：
 前者是宿主服务（`ctx.get('tokenMeter')`）不存在，替换被拒绝；后者是纯估算包
 `@deepseek-ai/dsh-token-meter/estimate` 不可达，只影响固定开销的数字。一个可以存在而另一个
-不存在；合并会把操作者引到错误的宿主上。`ERR_HOST_NO_SPILL` 只在 `projection: 'on'` 时报告，
-影子模式不碰 spill，报它只会制造噪音。
+不存在；合并会把操作者引到错误的宿主上。`ERR_HOST_NO_SPILL`（没有 spill 后端）与
+`ERR_HOST_NO_SPILL_NOTICE`（后端在、页脚渲染器不在）也是两件事，修复方式不同。
+
+`ERR_HOST_NO_SPILL` 有两半：**实时宿主探测**只在 `projection: 'on'` 时报告（影子模式不碰
+spill，报它只会制造噪音）；但**收据通道**不看当前模式——任何一条历史收据带
+`projection-skipped:no-spill`，`status` 都会把它映射成该码，所以把投影切回 `off` 之后，旧收据
+仍会让它出现在 `degraded` 里。
 
 `tokenMeter` 与 `spillStore` 不能写进 `inject`：宿主没有该服务时插件会直接加载失败，
 “拒绝替换、投影照做、保住证据”的降级路径就不可达。
@@ -353,7 +383,8 @@ plugin manager 才能把运行中的 entry 认成本包的行、通过 profile p
 - 不替换、也不接管 DSH 的压缩、剪枝与 spill 决策（设计 N3）；投影只改模型可见 content，
   原文仍借宿主 spill 存放。
 - 不做模型训练或权重改动（N2）；不追求论文里的 87.93%（N4）。
-- 不承诺 10%：3.5% 是保底线，10% 是全程存活的理想上界；影子周实测只用于收窄区间。
+- 不承诺 10%：3.5% 是保底线，10% 是全程存活的理想上界；影子周只告诉你是否继续，不能把
+  区间换成实测值（`shadow-report.mjs` 只有四个比例，没有总 token 分母）。
 
 ## 文档
 
@@ -361,8 +392,8 @@ plugin manager 才能把运行中的 entry 认成本包的行、通过 profile p
 两份 README、`LICENSE`、`NOTICE`；`src/` 也不进包，`dist` 的 sourcemap 内联了源码）。在 npm
 页面上请从仓库读取。
 
-源码目前只存在于内网 GitLab 远端；公开镜像尚不存在（此前的 GitHub 仓库地址 404），因此
-`package.json` 暂不带 `repository` 字段，npm 页面不会显示仓库链接——请从内网 GitLab 取源码。
+源码与文档在仓库 [github.com/SAXEM1997/dsh-boost](https://github.com/SAXEM1997/dsh-boost)；
+`package.json` 的 `repository`、`homepage`、`bugs` 都指向它。下面的文档链接是仓库相对路径。
 
 | 文档 | 内容 |
 |---|---|
