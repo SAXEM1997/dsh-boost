@@ -15,6 +15,12 @@
  * that synthesizes a turn (returns its own iterable without calling `next()`)
  * leaves `nextCalls` at 0.
  *
+ * `llm/stream` is the one **synchronous** waterfall: `next()` returns the
+ * downstream `AsyncIterable` directly, and an `async` listener would hand the
+ * host a `Promise<AsyncIterable>` (appendix §7). `runStream` runs that chain
+ * synchronously; `stream()` uses it and can therefore classify a pass-through
+ * the moment the hook returns.
+ *
  * `stream(sessionId, options?)` is the driver a test uses to simulate a real
  * model request: it runs the registered `llm/stream` waterfall with
  * `{ ...options, sessionId }` and records the resulting iterable for
@@ -134,11 +140,43 @@ export function fakeHost(overrides: Record<string, unknown> = {}): any {
       list.push(handler)
       hooks.set(name, list)
     },
+    /**
+     * Run a waterfall with a synchronous `next()`.
+     *
+     * `llm/stream` is a synchronous waterfall: `next()` returns the downstream
+     * `AsyncIterable` directly, and an `async` listener would hand the host a
+     * `Promise<AsyncIterable>` that `for await` cannot consume (appendix §7).
+     * The generic `callHook` below is async because every other event is; this
+     * runner is what models the model-request contract.
+     */
+    runStream(name: string, args: readonly unknown[], next: () => unknown): unknown {
+      const handlers = hooks.get(name) ?? []
+      const run = (index: number): unknown => {
+        const handler = handlers[index]
+        if (handler === undefined) return next()
+        let resumed = false
+        const resume = (): unknown => {
+          if (resumed) throw new Error(`fakeHost: next() called multiple times for ${name}`)
+          resumed = true
+          return run(index + 1)
+        }
+        return handler(...args, resume)
+      }
+      return run(0)
+    },
     async callHook(
       name: string,
       args: readonly unknown[],
       next: () => unknown,
     ): Promise<unknown> {
+      // `llm/stream` keeps its synchronous `next()` even through this generic
+      // driver, so a listener that expects the real contract sees it.
+      if (name === 'llm/stream') {
+        return host.runStream(name, args, () => {
+          host.nextCalls += 1
+          return next()
+        })
+      }
       const handlers = hooks.get(name) ?? []
       const run = async (index: number): Promise<unknown> => {
         const handler = handlers[index]
@@ -181,23 +219,20 @@ export function fakeHost(overrides: Record<string, unknown> = {}): any {
     stream(sessionId: string, options: Partial<GenerateOptions> = {}): AsyncIterable<StreamChunk> {
       const request = { ...options, sessionId } as GenerateOptions
       let passedThrough = false
-      const result = host.callHook('llm/stream', [request], () => {
+      const result = host.runStream('llm/stream', [request], () => {
         passedThrough = true
+        host.nextCalls += 1
         return host.llm.stream(request)
       })
+      if (typeof (result as AsyncIterable<StreamChunk> | undefined)?.[Symbol.asyncIterator] !== 'function') {
+        throw new Error('fakeHost: an llm/stream listener must return an AsyncIterable synchronously')
+      }
       // A hook that returns without calling `next()` substituted its own
       // turn, so the fake owns the count rather than each test bumping it.
-      void result.then(
-        () => {
-          if (!passedThrough) host.synthesized += 1
-        },
-        () => {},
-      )
-      const iterable = (async function* () {
-        yield* (await result) as AsyncIterable<StreamChunk>
-      })()
-      last = iterable
-      return iterable
+      // The decision is synchronous by contract, so it is known right here.
+      if (!passedThrough) host.synthesized += 1
+      last = result as AsyncIterable<StreamChunk>
+      return last
     },
     lastStream(): AsyncIterable<StreamChunk> | undefined {
       return last

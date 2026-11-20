@@ -16,9 +16,12 @@
  *   (plan §Task 23b). A call with no `exec.agent` is not the plugin's to
  *   inspect: the downstream decision is returned untouched and a
  *   `skip:no-scope` receipt keeps the pass visible (design §5.5).
- * - `llm/stream` lets the plugin's own selector request through before any
- *   synthesis exists; a boundary request is likewise delegated to `next()`
- *   until Task 23c adds the pending-turn branch.
+ * - `llm/stream` is the model-request waterfall. Its body lives in
+ *   `./llm-stream.ts` (Task 23c-1) and is re-exported below: it lets the
+ *   plugin's own selector request through untouched, then answers a pending
+ *   decision with a synthesized turn or delegates to `next()` after the
+ *   turn/anchor checks. The mount is registered here because `registerHooks`
+ *   is the single assembly surface.
  * - `tools/execute` looks the session's pending substitution up with `peek`
  *   (never `take`: the entry must survive to this hook), compares the arriving
  *   `callId` itself. A **differing** `callId` is not tampering: the host assigns
@@ -65,7 +68,6 @@
  *
  * @module dsh-boost/hooks/post-execute
  */
-import type { GenerateOptions, StreamChunk } from '@deepseek-ai/dsh-llm'
 import { worthSubstituting } from '../admission/ledger.js'
 import type { StepBudget } from '../admission/ledger.js'
 import type { UsageLedger } from '../admission/usage.js'
@@ -83,13 +85,21 @@ import type { ReceiptStore } from '../receipts/store.js'
 import { DEFAULT_SCOPE, isVisible } from '../scope/doc.js'
 import type { ScopeDoc } from '../scope/doc.js'
 import type { ScopeStore } from '../scope/store.js'
-import { SELECTOR_PURPOSE } from '../selector/jev.js'
 import type { AgentLike, BoostConfig, PluginContext, ToolFamily } from '../types.js'
 import type { TurnClock } from './clock.js'
 import { rejectIfTampered } from './execute.js'
+import { sessionBudget, sessionClock, sessionUsage, streamHook } from './llm-stream.js'
+import type { SessionRuntime } from './llm-stream.js'
 import { callIdFor } from './pending.js'
 import type { PendingEntry, PendingQueue } from './pending.js'
 import { ReceiptSessionState } from './session-state.js'
+
+/**
+ * The `llm/stream` body lives in its own module (Task 23c-1). It is re-exported
+ * here because `registerHooks` is the assembly surface the rest of the plugin
+ * and the integration tests import; the mount below uses the same function.
+ */
+export { streamHook }
 
 /** The store's append input, without exporting the private alias from T7. */
 type ReceiptInput = Parameters<ReceiptStore['append']>[0]
@@ -129,12 +139,31 @@ export interface HookDeps {
   resolveSession: (sessionId: string) => string | undefined
   /** At most one pending substitution per session; absent means the path is inert. */
   queue?: PendingQueue
-  /** Per-turn substitution budget; absent means no cap is applied. */
+  /**
+   * Per-turn substitution budget; absent means no cap is applied. Used only
+   * when `sessions` is absent, so a shared instance is never preferred over
+   * the per-session runtime.
+   */
   budget?: StepBudget
-  /** Usage pairing for `markSubstituted` and the measured saving (T21/T23c). */
+  /** Usage pairing; the shared fallback when `sessions` is absent (T21/T23c). */
   usage?: UsageLedger
-  /** The host turn/step clock; `step()` is the only source of a call id's step. */
+  /**
+   * The host turn/step clock; `step()` is the only source of a call id's step.
+   * The shared fallback when `sessions` is absent.
+   */
   clock?: TurnClock
+  /**
+   * Per-session clock, budget and usage (Task 23c).
+   *
+   * A shared `clock` lets another session's turn/step stamp this session's
+   * `callId`; a shared `StepBudget` starves a session; a shared `UsageLedger`
+   * pairs one session's substitution with another session's request. When
+   * supplied, this runtime is authoritative and the three single instances
+   * above are only the fallback for a plugin wired without it. 23c-2 constructs
+   * one `SessionRuntime`, drives `onModelRequest` from the host's
+   * `agent/request` payload, and passes it here.
+   */
+  sessions?: SessionRuntime
   /** Parsed plans per session, written by 23c's stream hook. */
   plans?: Map<string, Plan>
   /**
@@ -240,30 +269,14 @@ function protocolText(scope: ScopeStore | undefined, context: { scope?: unknown 
   return scope.judgement(key) ? PROTOCOL_TEXT : ''
 }
 
-/**
- * The `llm/stream` hook body.
- *
- * The selector guard is the first statement by rule: the plugin's own selection
- * request must never be mistaken for a substitution boundary. A boundary
- * request is a pass-through too until Task 23c synthesizes a pending turn, so
- * the two branches are deliberately identical for now.
- */
-function streamHook(
-  options: GenerateOptions | undefined,
-  next: () => AsyncIterable<StreamChunk>,
-): AsyncIterable<StreamChunk> {
-  if (options?.purpose === SELECTOR_PURPOSE) return next()
-  return next()
-}
-
 // ---------------------------------------------------------------------------
 // Defensive readers: every foreign call is wrapped
 // ---------------------------------------------------------------------------
 
-/** The host turn, or 0 when no clock is wired (receipts still carry `ts`). */
-function clockTurnOf(deps: HookDeps): number {
+/** The session's host turn, or 0 when no clock is wired (receipts still carry `ts`). */
+function clockTurnOf(deps: HookDeps, sessionId: string): number {
   try {
-    const turn = deps.clock?.turn()
+    const turn = sessionClock(deps, sessionId)?.turn()
     return typeof turn === 'number' && Number.isFinite(turn) ? turn : 0
   } catch {
     return 0
@@ -276,9 +289,9 @@ function clockTurnOf(deps: HookDeps): number {
  * `undefined` is fail-closed: the decision path refuses to invent a step
  * (a plugin-side counter would collide two substitutions in one turn — T23a).
  */
-function clockStepOf(deps: HookDeps): number | undefined {
+function clockStepOf(deps: HookDeps, sessionId: string): number | undefined {
   try {
-    const step = deps.clock?.step()
+    const step = sessionClock(deps, sessionId)?.step()
     return typeof step === 'number' && Number.isFinite(step) ? step : undefined
   } catch {
     return undefined
@@ -587,9 +600,9 @@ function familyOf(tool: string | undefined): ToolFamily | undefined {
  * interpolation, so admission falls back to the model when it cannot measure
  * (design §5.3: measured, not estimated).
  */
-function savedTokensOf(deps: HookDeps): number {
+function savedTokensOf(deps: HookDeps, sessionId: string): number {
   try {
-    const last = deps.usage?.last()
+    const last = sessionUsage(deps, sessionId)?.last()
     if (last === undefined) return 0
     const { input, cacheRead } = last
     if (!Number.isFinite(input) || !Number.isFinite(cacheRead) || input < 0 || cacheRead < 0) return 0
@@ -609,7 +622,7 @@ function savedTokensOf(deps: HookDeps): number {
  * survives, but it still has to show a net win over the threshold; the
  * conservative direction here is to keep the gate on.
  */
-function admittedFor(deps: HookDeps, plan: Plan): boolean {
+function admittedFor(deps: HookDeps, sessionId: string, plan: Plan): boolean {
   try {
     const threshold = deps.config?.admission?.thresholdTokens
     const thresholdTokens =
@@ -617,7 +630,7 @@ function admittedFor(deps: HookDeps, plan: Plan): boolean {
         ? threshold
         : DEFAULT_CONFIG.admission.thresholdTokens
     return worthSubstituting({
-      savedTokens: savedTokensOf(deps),
+      savedTokens: savedTokensOf(deps, sessionId),
       overheadTokens: 0,
       thresholdTokens,
       deterministicSingle: plan.steps.length === 1,
@@ -628,9 +641,9 @@ function admittedFor(deps: HookDeps, plan: Plan): boolean {
 }
 
 /** Claim one budget step; no budget wired means no cap is applied. */
-function takeBudget(deps: HookDeps): boolean {
+function takeBudget(deps: HookDeps, sessionId: string): boolean {
   try {
-    const budget = deps.budget
+    const budget = sessionBudget(deps, sessionId)
     if (budget == null || typeof budget.take !== 'function') return true
     return budget.take()
   } catch {
@@ -638,10 +651,10 @@ function takeBudget(deps: HookDeps): boolean {
   }
 }
 
-/** Record the substitution for the usage pairing; settlement is Task 23c's. */
-function markSubstituted(deps: HookDeps, candidateId: string): void {
+/** Record the substitution for the usage pairing; the stream hook settles it. */
+function markSubstituted(deps: HookDeps, sessionId: string, candidateId: string): void {
   try {
-    deps.usage?.markSubstituted?.(candidateId)
+    sessionUsage(deps, sessionId)?.markSubstituted(candidateId)
   } catch {
     // A ledger miss costs a measurement, never this call.
   }
@@ -824,7 +837,7 @@ async function decideSubstitution(
       ledgerEntry(ctx, 'shadow', 'ok', {
         decision: 'commit',
         candidateId: decision.candidateId,
-        admitted: admittedFor(deps, plan),
+        admitted: admittedFor(deps, ctx.sessionId, plan),
         whitelisted: SUBSTITUTION_WHITELIST.has(candidate.tool),
         stepId: 'root',
         args: decision.args,
@@ -834,7 +847,7 @@ async function decideSubstitution(
     return { shadowCommitted: true }
   }
 
-  const step = clockStepOf(deps)
+  const step = clockStepOf(deps, ctx.sessionId)
   if (step === undefined) {
     await appendReceipt(
       deps,
@@ -850,12 +863,12 @@ async function decideSubstitution(
     return { shadowCommitted: false }
   }
 
-  if (!admittedFor(deps, plan)) {
+  if (!admittedFor(deps, ctx.sessionId, plan)) {
     await appendReceipt(deps, ledgerEntry(ctx, 'skip', 'not-admitted', { stepId: 'root' }))
     return { shadowCommitted: false }
   }
 
-  if (!takeBudget(deps)) {
+  if (!takeBudget(deps, ctx.sessionId)) {
     // No entry is ours to clear here: this invocation enqueued nothing, so a
     // live entry belongs to another call in the step (review F2).
     await appendReceipt(deps, ledgerEntry(ctx, 'skip', 'steps-exhausted', { stepId: 'root' }))
@@ -890,7 +903,7 @@ async function decideSubstitution(
     return { shadowCommitted: false }
   }
 
-  markSubstituted(deps, decision.candidateId)
+  markSubstituted(deps, ctx.sessionId, decision.candidateId)
   setAnchors(deps, ctx, candidate.args)
   consumePlan(deps, ctx.sessionId, decision.candidateId)
   return { shadowCommitted: false }
@@ -1149,7 +1162,7 @@ async function postExecute(
     // Canonicalise the original receiver, not a downstream replacement: guards
     // and the selector read the receipt as it arrived.
     const receipt = canonicalise(result?.content ?? [], result?.isError === true)
-    const turn = clockTurnOf(deps)
+    const turn = clockTurnOf(deps, sessionId)
 
     // The receipt map is the gate's memory for this turn. `begin` folds the
     // previous turn away (anchors live in the store, receipts and in-flight
@@ -1238,7 +1251,7 @@ async function appendDispatchRejected(
     version: 1,
     ts: new Date().toISOString(),
     sessionId,
-    turn: clockTurnOf(deps),
+    turn: clockTurnOf(deps, sessionId),
     stepId: 'root',
     kind: 'skip',
     code: 'dispatch-rejected',
@@ -1329,7 +1342,12 @@ async function executeHook(
   if (outcome.kind === 'reject') return dispatchFailure(outcome.message)
   if (outcome.kind === 'accept') {
     try {
-      state.recordDispatch(outcome.sessionId, clockTurnOf(deps), outcome.callId, outcome.candidateId)
+      state.recordDispatch(
+        outcome.sessionId,
+        clockTurnOf(deps, outcome.sessionId),
+        outcome.callId,
+        outcome.candidateId,
+      )
     } catch {
       // Losing the mapping costs the candidate receipt, not this call.
     }
@@ -1350,9 +1368,10 @@ function registerPostExecute(
   ctx.on('tools/post-execute', (exec, result, next) => postExecute(deps, state, exec, result, next))
 }
 
-/** Mount the model-request waterfall. */
-function registerLlmStream(ctx: PluginContext): void {
-  ctx.on('llm/stream', (options, next) => streamHook(options, next))
+/** Mount the model-request waterfall; the hook function is built once per registration. */
+function registerLlmStream(ctx: PluginContext, deps: HookDeps): void {
+  const hook = streamHook(deps)
+  ctx.on('llm/stream', (options, next) => hook(options, next))
 }
 
 /** Mount the dispatch waterfall. */
@@ -1393,6 +1412,6 @@ export function registerHooks(ctx: PluginContext, deps: HookDeps): void {
   const state = deps.sessionState ?? new ReceiptSessionState()
   registerProtocolSection(ctx, deps.scope)
   registerPostExecute(ctx, deps, state)
-  registerLlmStream(ctx)
+  registerLlmStream(ctx, deps)
   registerExecute(ctx, deps, state)
 }

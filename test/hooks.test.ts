@@ -97,16 +97,26 @@ test('tools/execute 是直通占位，结果原样穿过（T18 换防篡改）',
 test('llm/stream 对非 selector 请求也透传给 next()（R5）', async () => {
   const { host } = setup()
   let calls = 0
+  // `llm/stream` is synchronous: next() returns the AsyncIterable itself.
+  const realTurn = (async function* () {
+    yield { type: 'finish', reason: { kind: 'stop' } }
+  })()
   const out = await host.callHook(
     'llm/stream',
     [{ messages: [], sessionId: 's1' }],
-    async () => {
+    () => {
       calls += 1
-      return 'REAL-TURN'
+      return realTurn
     },
   )
-  assert.equal(out, 'REAL-TURN')
+  // Task 23c wraps the pass-through so usage and plans can be observed; the
+  // host still consumes an AsyncIterable, and next() is called exactly once.
   assert.equal(calls, 1)
+  assert.equal(typeof out[Symbol.asyncIterator], 'function')
+  const chunks: any[] = []
+  for await (const chunk of out) chunks.push(chunk)
+  assert.deepEqual(chunks, [{ type: 'finish', reason: { kind: 'stop' } }])
+  assert.equal(host.nextCalls, 1)
 })
 
 test('有 agent 时不写 skip 收据，下游 decision 原样返回', async () => {
