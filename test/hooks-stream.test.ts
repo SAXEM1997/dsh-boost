@@ -1134,3 +1134,110 @@ test('没有 per-session runtime 时，共享的 clock/budget/usage 只借给第
   assert.notEqual(sessionUsage(wired, SESSION), sessionUsage(wired, OTHER))
   assert.ok(sessionUsage(wired, OTHER) !== undefined)
 })
+
+test('M26a 共享实例的贷款随属主会话 dispose 释放，后续会话可以借用（行 26）', async () => {
+  const { sessionClock, sessionBudget, sessionUsage } = await import(
+    '../src/hooks/llm-stream.ts'
+  )
+  const clock = { step: () => 1, turn: () => 1 }
+  const budget = { take: () => true }
+  const usage = { markSubstituted: () => undefined }
+  const deps: Any = {
+    config: DEFAULT_CONFIG,
+    clock,
+    budget,
+    usage,
+    logger: { warn: () => undefined },
+  }
+
+  assert.equal(sessionClock(deps, SESSION), clock, 'the first session owns the loan')
+  assert.equal(sessionBudget(deps, SESSION), budget)
+  assert.equal(sessionUsage(deps, SESSION), usage)
+
+  // Disposing a different session must not release someone else's loan.
+  clearSession(deps, OTHER)
+  assert.equal(sessionClock(deps, SESSION), clock, 'a non-owner dispose leaves the loan alone')
+
+  // The owner is disposed: the loan is free again for a later session, instead
+  // of refusing substitution for the rest of the process lifetime.
+  clearSession(deps, SESSION)
+  assert.equal(sessionClock(deps, OTHER), clock, 'a later session may borrow the freed clock')
+  assert.equal(sessionBudget(deps, OTHER), budget, 'a later session may borrow the freed budget')
+  assert.equal(sessionUsage(deps, OTHER), usage, 'a later session may borrow the freed usage')
+})
+
+test('M26b 两个 deps 共享同一组实例时只有一个会话借到，第二个 deps 不重复认领（行 26）', async () => {
+  const { sessionClock, sessionBudget, sessionUsage } = await import(
+    '../src/hooks/llm-stream.ts'
+  )
+  const clock = { step: () => 1, turn: () => 1 }
+  const budget = { take: () => true }
+  const usage = { markSubstituted: () => undefined }
+  const warnings: string[] = []
+  const logger = { warn: (message: string) => warnings.push(message) }
+  // An embedder pattern the fallback exists for: two assemblies over the same
+  // three stateful instances. Ownership belongs to the instance, not to the
+  // deps object, or each assembly claims its own loan and both borrow.
+  const first: Any = { config: DEFAULT_CONFIG, clock, budget, usage, logger }
+  const second: Any = { config: DEFAULT_CONFIG, clock, budget, usage, logger }
+
+  assert.equal(sessionClock(first, SESSION), clock)
+  assert.equal(sessionBudget(first, SESSION), budget)
+  assert.equal(sessionUsage(first, SESSION), usage)
+
+  assert.equal(sessionClock(second, OTHER), undefined, 'the shared clock is already lent')
+  assert.equal(sessionBudget(second, OTHER), undefined, 'the shared budget is already lent')
+  assert.equal(sessionUsage(second, OTHER), undefined, 'the shared usage is already lent')
+  assert.equal(warnings.length, 1, 'the refusal is still warned once per deps object')
+
+  // Per-instance ownership, not a process-wide single loan: an assembly with
+  // its own instances is unaffected.
+  const own: Any = {
+    config: DEFAULT_CONFIG,
+    clock: { step: () => 1, turn: () => 1 },
+    budget: { take: () => true },
+    usage: { markSubstituted: () => undefined },
+  }
+  assert.notEqual(sessionClock(own, OTHER), undefined, 'distinct instances still lend')
+  assert.notEqual(sessionBudget(own, OTHER), undefined)
+  assert.notEqual(sessionUsage(own, OTHER), undefined)
+})
+
+test('M27 上游在 usage 前抛错时仍结算标记并报 unknown，重放不得配给旧标记（行 27）', async () => {
+  const env = setup({ chunks: [{ type: 'text-delta', index: 0, text: 'TRIGGER partial' }] })
+  env.runtime.onModelRequest(SESSION, 1, 0)
+  const ledger = env.runtime.usageFor(SESSION)
+  ledger.markSubstituted('A')
+
+  env.host.llm.stream = async function* () {
+    yield { type: 'text-delta', index: 0, text: 'TRIGGER partial' }
+    throw new Error('provider 500 mid-stream')
+  }
+
+  await assert.rejects(streamOnce(env), /provider 500 mid-stream/)
+
+  const settled = env.receipts.filter((receipt) => receipt.kind === 'substitute-settled')
+  assert.equal(settled.length, 1, 'an errored stream must still settle the pending mark')
+  assert.equal(
+    settled[0]?.saved_input_tokens,
+    'unknown',
+    'an errored stream has no usable sample, so the honest answer is unknown',
+  )
+  assert.equal(settled[0]?.output_tokens, 'unknown')
+  assert.equal(ledger.pendingCandidateId(), undefined, 'the mark must not outlive the error')
+
+  // The next request is strictly larger. Before the fix it paired with the
+  // dead mark and reported the replay's 100000 as a saving.
+  env.host.llm.stream = async function* () {
+    yield { type: 'usage', usage: { inputTokens: 100_000, outputTokens: 10 } }
+    yield { type: 'finish', reason: { kind: 'stop' } }
+  }
+  await streamOnce(env)
+
+  assert.equal(
+    env.receipts.filter((receipt) => receipt.kind === 'substitute-settled').length,
+    1,
+    'the replay must not settle a mark that the errored stream already consumed',
+  )
+  assert.equal(ledger.last()?.input, 100_000, 'the replay was observed as an ordinary request')
+})

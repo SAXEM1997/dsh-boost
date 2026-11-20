@@ -71,14 +71,16 @@
  * (exported here) keys all three by `sessionId`; `HookDeps.sessions` accepts it,
  * and when present it is authoritative for both this hook and Task 23b's
  * helpers. The shipped wiring lives in `wireSessionEvents` (`src/index.ts`)
- * and is deliberately **two** listeners, not one:
+ * and is deliberately **two** clock listeners, not one:
  *
  * ```ts
  * const sessions = new SessionRuntime(cfg.stepsPerTurn)
  * registerHooks(ctx, { ...deps, sessions })
  *
  * // agent/pre-step: the non-deprecated clock seam. It fires once per proposed
- * // step, before prompt assembly, and copies the host turn/step.
+ * // step AFTER prompt assembly (the host assembles at
+ * // `@deepseek-ai/dsh-agent-loop/lib/index.js:692`, then dispatches pre-step
+ * // at `:695`), and copies the host turn/step.
  * ctx.on('agent/pre-step', (payload, next) => {
  *   sessions.onModelRequest(sessionId, payload.turn, payload.step)
  *   horizon.observe(sessionId, payload.turn, payload.step)
@@ -105,8 +107,12 @@
  * that drops the deprecated event still advances turns. Both record the route:
  * `agent/pre-step` from the captured `modelSelection` (the primary source since
  * row 37), and `agent/request` from the resolved config as the fallback for
- * hosts that only populate it there; only `agent/request` warms the scope
- * judgement.
+ * hosts that only populate it there. The visibility warm is owned by the
+ * `system-prompt/assemble` listener (also in `wireSessionEvents`), which the
+ * host runs **before** `agent/pre-step`; `agent/request`'s call is only a
+ * fallback. This hook sees a warm judgement only because of that assemble
+ * listener — a cold-cache read here would reintroduce the D4 prompt
+ * invalidation, so do not move the warm back onto the pre-step seam.
  *
  * `onModelRequest` copies the host turn/step (never a plugin count) and resets
  * that session's budget only when its turn changes. `notePlanTurn` is the
@@ -114,8 +120,8 @@
  * drops the previous turn's plan before a new one can be parsed, so a stale
  * plan cannot drive a substitution in the new turn. `clearSession(deps, id)`
  * is the session-end cleanup: queue, anchors, plans, receipt state, the usage
- * mark and the runtime entry, all dropped together (obligation 10). No map is
- * ever handed out.
+ * mark, the runtime entry and any shared-instance loan it holds, all dropped
+ * together (obligation 10). No map is ever handed out.
  *
  * ## Settlement (obligation 11)
  *
@@ -311,29 +317,37 @@ function sessionIdOf(options: GenerateOptions | undefined): string | undefined {
 }
 
 /**
- * Which session has been lent the shared fallback runtime.
+ * Which session has been lent each shared fallback instance.
  *
  * `apply` always passes `sessions`, so this exists for embedders and tests that
  * hand in one `clock`/`budget`/`usage` instead. Those three carry per-session
  * state — a turn's step counter, a pending usage mark — so lending one to a
  * second session attributes B's tokens to A's candidate. That surfaces as a
  * saving that never happened, which is the one error this plugin must not
- * produce. The first session to arrive keeps the loan; every other session gets
- * `undefined`, which each caller already reads as "no substitution" (fail
- * closed), and the warning is emitted once per deps object rather than per call.
+ * produce. Ownership is keyed by the **instance**, not by the deps object: two
+ * assemblies that share the same three objects (the pattern the fallback exists
+ * for) must agree on the one session they serve, or each claims its own loan
+ * and both borrow. The first session to arrive keeps the loan; every other
+ * session gets `undefined`, which each caller already reads as "no
+ * substitution" (fail closed), and the warning is emitted once per deps object
+ * rather than per call. `clearSession` drops the loans its session holds, so a
+ * disposed owner does not lock the instance for the rest of the process.
  */
-const fallbackOwner = new WeakMap<object, { sessionId: string; warned: boolean }>()
+const fallbackLoans = new WeakMap<object, { sessionId: string }>()
 
-/** Whether the shared fallback runtime may serve this session. */
-function mayBorrowShared(deps: HookDeps, sessionId: string): boolean {
-  const held = fallbackOwner.get(deps)
+/** Deps objects already warned about a refused loan (once each, not per call). */
+const fallbackWarned = new WeakSet<object>()
+
+/** Whether the shared fallback instance may serve this session. */
+function mayBorrowShared(instance: object, deps: HookDeps, sessionId: string): boolean {
+  const held = fallbackLoans.get(instance)
   if (held === undefined) {
-    fallbackOwner.set(deps, { sessionId, warned: false })
+    fallbackLoans.set(instance, { sessionId })
     return true
   }
   if (held.sessionId === sessionId) return true
-  if (!held.warned) {
-    held.warned = true
+  if (!fallbackWarned.has(deps)) {
+    fallbackWarned.add(deps)
     try {
       deps.logger?.warn(
         `dsh-boost: no per-session runtime is wired, and session ${sessionId} is not the one already using the shared clock/budget/usage; substitution stays off for it rather than mixing two sessions' measurements`,
@@ -343,6 +357,14 @@ function mayBorrowShared(deps: HookDeps, sessionId: string): boolean {
     }
   }
   return false
+}
+
+/** Release the shared-instance loans the disposing session holds. */
+function releaseSharedLoans(deps: HookDeps, sessionId: string): void {
+  for (const instance of [deps.clock, deps.budget, deps.usage]) {
+    if (instance === undefined) continue
+    if (fallbackLoans.get(instance)?.sessionId === sessionId) fallbackLoans.delete(instance)
+  }
 }
 
 /**
@@ -360,7 +382,9 @@ export function sessionClock(deps: HookDeps, sessionId: string): TurnClock | und
   } catch {
     // Fall through to the shared instance, subject to the ownership rule.
   }
-  return deps.clock !== undefined && mayBorrowShared(deps, sessionId) ? deps.clock : undefined
+  return deps.clock !== undefined && mayBorrowShared(deps.clock, deps, sessionId)
+    ? deps.clock
+    : undefined
 }
 
 /** The session's turn budget; the same precedence as {@link sessionClock}. */
@@ -371,7 +395,9 @@ export function sessionBudget(deps: HookDeps, sessionId: string): StepBudget | u
   } catch {
     // Fall through to the shared instance, subject to the ownership rule.
   }
-  return deps.budget !== undefined && mayBorrowShared(deps, sessionId) ? deps.budget : undefined
+  return deps.budget !== undefined && mayBorrowShared(deps.budget, deps, sessionId)
+    ? deps.budget
+    : undefined
 }
 
 /** The session's usage ledger; the same precedence as {@link sessionClock}. */
@@ -382,7 +408,9 @@ export function sessionUsage(deps: HookDeps, sessionId: string): UsageLedger | u
   } catch {
     // Fall through to the shared instance, subject to the ownership rule.
   }
-  return deps.usage !== undefined && mayBorrowShared(deps, sessionId) ? deps.usage : undefined
+  return deps.usage !== undefined && mayBorrowShared(deps.usage, deps, sessionId)
+    ? deps.usage
+    : undefined
 }
 
 /** The session's anchors without ever failing the request. */
@@ -1076,9 +1104,13 @@ async function applyAbandon(
  * `next()` has already been called by the hook body, so the upstream iterable
  * exists before the generator starts. Usage is mapped and a pending mark is
  * settled at the `usage` chunk (which the host emits before `finish`); text is
- * accumulated for `parsePlan`. A consumer that cancels the stream never reaches
- * the plan store, because the code after the loop only runs on normal
- * completion.
+ * accumulated for `parsePlan`. Settlement also runs in `finally`: an upstream
+ * that throws before the `usage` chunk (a provider 500 mid-stream) or a
+ * consumer that cancels the stream still ends the request, and a mark left
+ * pending there would pair with the next, unrelated request and report that
+ * request's tokens as a saving. An errored stream has no usable sample, so
+ * `settle()` reports `'unknown'`. The plan store is still reached only on
+ * normal completion, so a partial response never becomes a plan.
  */
 async function* observeBranch(
   deps: HookDeps,
@@ -1086,19 +1118,22 @@ async function* observeBranch(
   upstream: AsyncIterable<StreamChunk>,
 ): AsyncGenerator<StreamChunk> {
   let text = ''
-  for await (const chunk of upstream) {
-    if (chunk?.type === 'text-delta' && typeof chunk.text === 'string') text += chunk.text
-    if (chunk?.type === 'usage' && sessionId !== undefined) {
-      recordUsage(deps, sessionId, chunk.usage)
-      await settlePendingMark(deps, sessionId)
+  try {
+    for await (const chunk of upstream) {
+      if (chunk?.type === 'text-delta' && typeof chunk.text === 'string') text += chunk.text
+      if (chunk?.type === 'usage' && sessionId !== undefined) {
+        recordUsage(deps, sessionId, chunk.usage)
+        await settlePendingMark(deps, sessionId)
+      }
+      yield chunk
     }
-    yield chunk
+  } finally {
+    // The host emits `usage` before `finish`, so this is normally a no-op; a
+    // route that omits the chunk still ends the request, and the mark must be
+    // consumed there rather than attributed to a later request (`'unknown'`,
+    // which status does not count).
+    if (sessionId !== undefined) await settlePendingMark(deps, sessionId)
   }
-  // The host emits `usage` before `finish`, so this is normally a no-op; a
-  // route that omits the chunk still ends the request, and the mark must be
-  // consumed there rather than attributed to a later request (`'unknown'`,
-  // which status does not count).
-  if (sessionId !== undefined) await settlePendingMark(deps, sessionId)
   rememberPlan(deps, sessionId, text)
 }
 
@@ -1262,7 +1297,8 @@ export function streamHook(
  * `clear`, but it does not own the queue, the anchors, the plan map or the
  * per-session runtime, so the caller would otherwise have to know four separate
  * clears. A pending usage mark is settled first so a mark cannot outlive the
- * session it belongs to.
+ * session it belongs to, and the shared-instance loans this session holds are
+ * released so a disposed owner does not refuse every later session forever.
  */
 export function clearSession(deps: HookDeps, sessionId: string): void {
   settleDiscarded(deps, sessionId)
@@ -1287,4 +1323,5 @@ export function clearSession(deps: HookDeps, sessionId: string): void {
   } catch {
     // Same.
   }
+  releaseSharedLoans(deps, sessionId)
 }
