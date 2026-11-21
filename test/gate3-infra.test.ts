@@ -159,6 +159,7 @@ test('C4: hasSpill is a live host fact, not a load-time snapshot', async () => {
   await new ScopeStore(app.root).write(doc => ({ ...doc, mode: 'global', projection: 'on' }), 0)
 
   const before = await status(app.host)
+  assert.equal(before.hasSpill, false)
   assert.ok(before.degraded.includes('ERR_HOST_NO_SPILL'))
 
   services.set('spillStore', {
@@ -167,6 +168,7 @@ test('C4: hasSpill is a live host fact, not a load-time snapshot', async () => {
     },
   })
   const after = await status(app.host)
+  assert.equal(after.hasSpill, true)
   assert.equal(after.degraded.includes('ERR_HOST_NO_SPILL'), false)
 })
 

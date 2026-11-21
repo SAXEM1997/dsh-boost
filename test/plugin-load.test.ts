@@ -274,13 +274,13 @@ test('apply 记录解析到的宿主版本，匹配时只记 info', () => {
   )
 })
 
-test('apply 在未验证的宿主版本上告警 ERR_HOST_VERSION_MISMATCH，但不失败', () => {
+test('apply 在声明范围之外的宿主版本上告警 ERR_HOST_VERSION_MISMATCH，但不失败', () => {
   const infos: string[] = []
   const warnings: string[] = []
   const host = fakeHost({
     get: (name: string) =>
       name === 'pluginPackages'
-        ? { packageOf: () => ({ name: '@deepseek-ai/dsh-app-boot', version: '0.2.2-rc.5' }) }
+        ? { packageOf: () => ({ name: '@deepseek-ai/dsh-app-boot', version: '0.2.3' }) }
         : undefined,
     logger: { info: (msg: string) => infos.push(msg), warn: (msg: string) => warnings.push(msg) },
   })
@@ -288,7 +288,7 @@ test('apply 在未验证的宿主版本上告警 ERR_HOST_VERSION_MISMATCH，但
   assert.doesNotThrow(() => plugin.apply(host as unknown as PluginContext, {}))
   assert.ok(
     warnings.some(
-      msg => msg.includes('ERR_HOST_VERSION_MISMATCH') && msg.includes('0.2.2-rc.5'),
+      msg => msg.includes('ERR_HOST_VERSION_MISMATCH') && msg.includes('0.2.3'),
     ),
     JSON.stringify(warnings),
   )
@@ -543,6 +543,126 @@ test('row 34: build 元数据不触发 ERR_HOST_VERSION_MISMATCH', () => {
     JSON.stringify(warnings),
   )
   assert.ok(infos.some(message => message.includes('0.2.2-rc.4+build.5')), JSON.stringify(infos))
+})
+
+// ---------------------------------------------------------------------------
+// Row 51: the guard follows `engines.dsh`, not exact string equality.
+// ---------------------------------------------------------------------------
+
+/** Apply once against a host that reports `version`; return its log lines. */
+function applyAtVersion(version: string): { warnings: string[]; infos: string[] } {
+  const warnings: string[] = []
+  const infos: string[] = []
+  const host = fakeHost({
+    get: (name: string) =>
+      name === 'pluginPackages'
+        ? { packageOf: () => ({ name: '@deepseek-ai/dsh-app-boot', version }) }
+        : undefined,
+    logger: { info: (message: string) => infos.push(message), warn: (message: string) => warnings.push(message) },
+  })
+  assert.doesNotThrow(() => plugin.apply(host as unknown as PluginContext, {}))
+  return { warnings, infos }
+}
+
+test('row 51: rc.5 and the 0.2.2 release are inside engines.dsh — no mismatch warning', () => {
+  for (const version of ['0.2.2-rc.5', '0.2.2']) {
+    const { warnings, infos } = applyAtVersion(version)
+    assert.equal(
+      warnings.some(message => message.includes('ERR_HOST_VERSION_MISMATCH')),
+      false,
+      `${version}: ${JSON.stringify(warnings)}`,
+    )
+    assert.ok(
+      infos.some(
+        message =>
+          message.includes(version) &&
+          message.includes('not the exact build this was verified against'),
+      ),
+      `${version}: ${JSON.stringify(infos)}`,
+    )
+  }
+})
+
+test('row 51: a host outside engines.dsh still warns, including the upper prerelease bound', () => {
+  // `0.2.3-alpha` is above `<0.2.3-0` because numeric identifiers sort below
+  // alphanumeric ones; it must not be accepted just because its core is 0.2.3.
+  for (const version of ['0.2.2-rc.3', '0.2.3-0', '0.2.3-alpha', '0.3.0']) {
+    const { warnings } = applyAtVersion(version)
+    assert.ok(
+      warnings.some(
+        message => message.includes('ERR_HOST_VERSION_MISMATCH') && message.includes(version),
+      ),
+      `${version}: ${JSON.stringify(warnings)}`,
+    )
+  }
+})
+
+// ---------------------------------------------------------------------------
+// Row 6: a present-but-broken registry must reach `degraded`.
+// ---------------------------------------------------------------------------
+
+test('row 6: a throwing workspace registry is a stable degraded code, not a healthy plugin', async (t) => {
+  const services = new Map<string, unknown>([
+    [
+      'workspaceRegistry',
+      {
+        list: () => {
+          throw new Error('registry boom')
+        },
+      },
+    ],
+  ])
+  const app = await appliedHost(t, { services })
+
+  const status = await statusOf(app.host)
+  // Presence is still true — the operator must not be told the registry is
+  // absent. The broken capability is its own code.
+  assert.equal(status.hasWorkspaceRegistry, true)
+  assert.ok(
+    status.degraded.includes('ERR_HOST_WORKSPACE_REGISTRY_BROKEN'),
+    JSON.stringify(status.degraded),
+  )
+  assert.equal(status.degraded.includes('ERR_HOST_NO_WORKSPACE_REGISTRY'), false)
+
+  // A malformed list is the same failure: every session resolves invisible.
+  services.set('workspaceRegistry', { list: () => null })
+  const malformed = await statusOf(app.host)
+  assert.ok(
+    malformed.degraded.includes('ERR_HOST_WORKSPACE_REGISTRY_BROKEN'),
+    JSON.stringify(malformed.degraded),
+  )
+
+  // The probe is live: a repaired provider clears the code on the next status.
+  services.set('workspaceRegistry', TEST_REGISTRY)
+  const repaired = await statusOf(app.host)
+  assert.equal(repaired.hasWorkspaceRegistry, true)
+  assert.equal(repaired.degraded.includes('ERR_HOST_WORKSPACE_REGISTRY_BROKEN'), false)
+})
+
+// ---------------------------------------------------------------------------
+// Row 50: spill presence is not spill capability.
+// ---------------------------------------------------------------------------
+
+test('row 50: a present spillStore without saveText is visible before the first projection', async (t) => {
+  const services = new Map<string, unknown>([['spillStore', {}]])
+  const app = await appliedHost(t, { services })
+  await new ScopeStore(app.root).write(doc => ({ ...doc, projection: 'on' }), 0)
+
+  const status = await statusOf(app.host)
+  assert.equal(status.hasSpill, true)
+  assert.ok(status.degraded.includes('ERR_HOST_SPILL_UNUSABLE'), JSON.stringify(status.degraded))
+  assert.equal(status.degraded.includes('ERR_HOST_NO_SPILL'), false)
+
+  // The probe re-reads the provider, so a repaired store clears the code
+  // without waiting for the first projection to fail.
+  services.set('spillStore', {
+    async saveText() {
+      return { locator: '/spill/x', bytes: 1, retrievalHint: 'read it' }
+    },
+  })
+  const repaired = await statusOf(app.host)
+  assert.equal(repaired.hasSpill, true)
+  assert.equal(repaired.degraded.includes('ERR_HOST_SPILL_UNUSABLE'), false)
 })
 
 // ---------------------------------------------------------------------------

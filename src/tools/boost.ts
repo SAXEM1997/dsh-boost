@@ -38,8 +38,12 @@
  *   code is mapped to `ERR_HOST_NO_SPILL` (no spill backend),
  *   `ERR_HOST_SPILL_FAILING` (backend present, every write rejected) or
  *   `ERR_HOST_NO_SPILL_NOTICE` (backend present, notice module cannot render
- *   the footer), and a degraded scope read passes its `ERR_SCOPE_*` code
- *   through. The two estimator absences are separate codes:
+ *   the footer), `ERR_HOST_SPILL_UNUSABLE` (backend present but exposes no
+ *   `saveText`), `ERR_HOST_WORKSPACE_REGISTRY_BROKEN` (registry present but
+ *   cannot list), and `ERR_HOST_SELECTOR_UNAVAILABLE` (the LLM seam is absent
+ *   or failing, so multi-candidate plans abstain); and a degraded scope read
+ *   passes its `ERR_SCOPE_*` code through. The two estimator absences are
+ *   separate codes:
  *   `ERR_HOST_NO_TOKENMETER` is the host service probe (`apply` records whether
  *   the synchronous token meter exists), while `ERR_HOST_NO_ESTIMATOR` is the
  *   pure fixed-cost package being unreachable. One can exist without the other,
@@ -132,6 +136,39 @@ const ERR_HOST_NO_TOKENMETER = 'ERR_HOST_NO_TOKENMETER'
 const ERR_HOST_NO_ESTIMATOR = 'ERR_HOST_NO_ESTIMATOR'
 const ERR_HOST_PLATFORM_UNSUPPORTED = 'ERR_HOST_PLATFORM_UNSUPPORTED'
 const ERR_HOST_NO_WORKSPACE_REGISTRY = 'ERR_HOST_NO_WORKSPACE_REGISTRY'
+/**
+ * Stable degradation code: a workspace registry is present but cannot list.
+ *
+ * Presence alone made a throwing `list()` look healthy: the resolver swallowed
+ * the throw per call (the intentional fail-closed path for one invisible
+ * session), every session was judged invisible, and `status` reported a healthy
+ * plugin doing nothing (review row 6). The probe calls `list()` at status time,
+ * exactly as the token meter is probed, so a broken registry is named instead
+ * of being indistinguishable from an absent one.
+ */
+const ERR_HOST_WORKSPACE_REGISTRY_BROKEN = 'ERR_HOST_WORKSPACE_REGISTRY_BROKEN'
+/**
+ * Stable degradation code: `spillStore` is present but exposes no `saveText`.
+ *
+ * `hasSpill` was presence-only, so a `{}` service reported a healthy spill path
+ * until the first projection failed (review row 50). The store is probed at
+ * status time for the one method the projection path calls; the notice module
+ * stays covered by `ERR_HOST_NO_SPILL_NOTICE` / `projection-skipped:no-footer`,
+ * because it is reached by `import()` and has no service to probe.
+ */
+const ERR_HOST_SPILL_UNUSABLE = 'ERR_HOST_SPILL_UNUSABLE'
+/**
+ * Stable degradation code: multi-candidate plans will abstain.
+ *
+ * The selector is the only consumer of the host LLM. Its absence or a failing
+ * call is written as `selector-unavailable` / `selector-error`, but those are
+ * receipt counts: an operator reading `degraded` saw a healthy plugin while
+ * every multi-candidate plan abstained (review row 49). Single-candidate
+ * substitution still works, so this is a warning, not a failure. A
+ * `selector-abstain` is deliberately not mapped: the model declined an
+ * ambiguous plan, which is not a host capability absence.
+ */
+const ERR_HOST_SELECTOR_UNAVAILABLE = 'ERR_HOST_SELECTOR_UNAVAILABLE'
 
 /**
  * Stable degradation code: at least one receipt shard could not be read.
@@ -191,6 +228,12 @@ const ERR_HOST_COMPLETE_SECTION = 'ERR_HOST_COMPLETE_SECTION'
  * failing sends them to the wrong place. `footer-failed` stays with
  * `ERR_HOST_NO_SPILL_NOTICE` because both mean the same thing at the point of
  * use — the footer cannot be produced.
+ *
+ * `selector-unavailable` and `selector-error` are the selector's only two host
+ * failures: no LLM/route, or a call that threw. Both mean "multi-candidate
+ * plans will abstain" while single-candidate substitution keeps working, so
+ * they share one warning code. `selector-abstain` is not a host fact and is not
+ * mapped (review row 49).
  */
 const RECEIPT_DEGRADATION: ReadonlyArray<{ readonly code: string; readonly degraded: string }> = [
   { code: 'projection-skipped:no-spill', degraded: ERR_HOST_NO_SPILL },
@@ -200,6 +243,8 @@ const RECEIPT_DEGRADATION: ReadonlyArray<{ readonly code: string; readonly degra
   // The substitution refusal writes the stable code itself, so a status built
   // without host facts still reports the reason the decision path recorded.
   { code: ERR_HOST_NO_TOKENMETER, degraded: ERR_HOST_NO_TOKENMETER },
+  { code: 'selector-unavailable', degraded: ERR_HOST_SELECTOR_UNAVAILABLE },
+  { code: 'selector-error', degraded: ERR_HOST_SELECTOR_UNAVAILABLE },
 ]
 
 /**
@@ -216,6 +261,15 @@ export interface BoostHostFacts {
   /** Whether `ctx.get('spillStore')` exposed the projection backend. */
   hasSpill?: boolean
   /**
+   * Whether the present spill store exposes the one method projection calls.
+   *
+   * Presence is not capability: a `{}` service resolves, so `hasSpill` is true
+   * while every projection fails at the first `saveText`. The probe is a shape
+   * check only — calling `saveText` would write a spill artifact — and an
+   * absent store leaves this `false` (the absence itself is `hasSpill: false`).
+   */
+  spillUsable?: boolean
+  /**
    * Whether `ctx.get('workspaceRegistry')` ever became available.
    *
    * A missing registry makes every session invisible, which presents to the
@@ -224,6 +278,15 @@ export interface BoostHostFacts {
    * diagnosable from inside the product.
    */
   hasWorkspaceRegistry?: boolean
+  /**
+   * Whether the present registry's `list()` threw or returned a non-array.
+   *
+   * `hasWorkspaceRegistry` only says the service exists. A registry that
+   * cannot list makes every session invisible too, and the per-call resolver
+   * swallows that throw by design, so this fact is the only way the failure
+   * reaches `status` (review row 6).
+   */
+  workspaceRegistryBroken?: boolean
 }
 
 /** The two stores `runBoost` orchestrates, plus the host facts it reports. */
@@ -335,12 +398,27 @@ export interface BoostStatus {
   projection: ProjectionMode
   saved: {
     /**
-     * Σ numeric `saved_input_tokens` over settled substitutions only. The
-     * synth-time `substitute` line predates any measurement (design §5.3 says
-     * the field is measured), so its value is `'unknown'` or absent and never
-     * contributes; `counts` keeps the event count.
+     * **Upper** estimate: Σ numeric `saved_input_tokens` over settled
+     * substitutions only.
+     *
+     * This is the next request's input, which overstates the avoided cost by
+     * the substituted call's own result. The synth-time `substitute` line
+     * predates any measurement (design §5.3 says the field is measured), so its
+     * value is `'unknown'` or absent and never contributes; `counts` keeps the
+     * event count.
      */
     substitution: number
+    /**
+     * **Lower** estimate: Σ numeric `avoided_total_tokens` over settled
+     * substitutions.
+     *
+     * The producer writes the skipped request's own total (`before.input +
+     * before.cacheRead + before.output`), so this is the avoided cost itself
+     * rather than the next request's input. Omitted — never `0` — when no
+     * receipt carries the field: a missing measurement must not read as
+     * "avoided nothing" (review row 7).
+     */
+    substitution_avoided?: number
     /**
      * Σ `saved_projection_tokens` over non-retrieval projections, **replayed**
      * by each receipt's own `horizon_steps`.
@@ -376,6 +454,14 @@ export interface BoostStatus {
    * Absent when no host was probed.
    */
   hasWorkspaceRegistry?: boolean
+  /**
+   * Whether the host exposed a spill store.
+   *
+   * Presence only: {@link degraded} carries `ERR_HOST_SPILL_UNUSABLE` when the
+   * store exists but cannot save, and `ERR_HOST_NO_SPILL` when it is absent.
+   * Absent when no host was probed.
+   */
+  hasSpill?: boolean
   /**
    * The measured per-request fixed cost: protocol section + tool schema.
    *
@@ -524,6 +610,7 @@ async function aggregate(
 ): Promise<{
   counts: Record<string, number>
   substitution: number
+  substitutionAvoided?: number
   projectionGross: number
   projectionGrossReplay: number
   retrievalContentReplay: number
@@ -540,6 +627,8 @@ async function aggregate(
 }> {
   const counts: Record<string, number> = Object.create(null)
   let substitution = 0
+  let substitutionAvoided = 0
+  let avoidedSeen = false
   let projectionGross = 0
   let projectionGrossReplay = 0
   let retrievalContentReplay = 0
@@ -566,6 +655,15 @@ async function aggregate(
     if (receipt.kind === 'substitute-settled') {
       const saved = receipt.saved_input_tokens
       if (typeof saved === 'number' && Number.isFinite(saved)) substitution += saved
+      // The lower estimate is the skipped request's own total. Track presence
+      // separately from the value: a receipt carrying `0` is a measurement,
+      // while no receipt carrying the field means "not measured" and the key
+      // is omitted from `status` rather than reported as zero (review row 7).
+      const avoided = receipt.avoided_total_tokens
+      if (typeof avoided === 'number' && Number.isFinite(avoided)) {
+        substitutionAvoided += avoided
+        avoidedSeen = true
+      }
     }
 
     if (receipt.kind !== 'projection') continue
@@ -639,6 +737,7 @@ async function aggregate(
   return {
     counts,
     substitution,
+    ...(avoidedSeen ? { substitutionAvoided } : {}),
     projectionGross,
     projectionGrossReplay,
     retrievalContentReplay,
@@ -807,8 +906,16 @@ function degradationCodes(
   if (fixedOverhead === 'unknown') codes.push(ERR_HOST_NO_ESTIMATOR)
   // `spillStore` matters only in apply mode; shadow mode never touches it
   // (design §5.4), so reporting it while projection is `shadow` would be noise.
-  if (host?.hasSpill === false && read.doc.projection === 'on') codes.push(ERR_HOST_NO_SPILL)
+  // Presence and capability are separate: an absent store and a present store
+  // without `saveText` need different repairs, so they get different codes.
+  if (read.doc.projection === 'on') {
+    if (host?.hasSpill === false) codes.push(ERR_HOST_NO_SPILL)
+    else if (host?.spillUsable === false) codes.push(ERR_HOST_SPILL_UNUSABLE)
+  }
+  // A present registry that cannot list is not an absent one: the operator is
+  // told which of the two host states to repair (review row 6).
   if (host?.hasWorkspaceRegistry === false) codes.push(ERR_HOST_NO_WORKSPACE_REGISTRY)
+  else if (host?.workspaceRegistryBroken === true) codes.push(ERR_HOST_WORKSPACE_REGISTRY_BROKEN)
   // A missing mount is a wiring failure, not a capability absence: the plugin
   // is loaded but at least one of its four integration points is not, so the
   // ledgers cannot be trusted to describe what it is doing.
@@ -873,6 +980,9 @@ async function statusCommand(deps: BoostDeps): Promise<BoostResult> {
 
   const saved: BoostStatus['saved'] = {
     substitution: totals.substitution,
+    ...(totals.substitutionAvoided === undefined
+      ? {}
+      : { substitution_avoided: totals.substitutionAvoided }),
     projectionGross: grossReplay,
     projectionNet,
     retrievals: totals.retrievals,
@@ -914,6 +1024,7 @@ async function statusCommand(deps: BoostDeps): Promise<BoostResult> {
     ...(deps.host?.hasWorkspaceRegistry === undefined
       ? {}
       : { hasWorkspaceRegistry: deps.host.hasWorkspaceRegistry }),
+    ...(deps.host?.hasSpill === undefined ? {} : { hasSpill: deps.host.hasSpill }),
   }
   return { ok: true, data }
 }

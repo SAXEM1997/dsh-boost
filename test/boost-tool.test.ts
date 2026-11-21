@@ -527,6 +527,56 @@ test('status 同一替换两行都带数字时只计 settle 一行', async () =>
   assert.equal(status.saved.substitution, 500, 'one substitution must be counted once')
 })
 
+test('row 7: status.saved.substitution_avoided 是下界，缺字段时整键省略', async () => {
+  const d = await deps()
+  const ts = new Date().toISOString()
+
+  // No receipt carries the lower estimate yet. Reporting `0` would look like a
+  // measured "avoided nothing", so the key is omitted instead.
+  const empty = await getStatus(d)
+  assert.equal(Object.hasOwn(empty.saved, 'substitution_avoided'), false)
+
+  await d.receipts.append({
+    version: 1,
+    ts,
+    sessionId: 's1',
+    turn: 1,
+    kind: 'substitute-settled',
+    code: 'substitute-settled',
+    saved_input_tokens: 2000,
+    avoided_total_tokens: 1200,
+  })
+  await d.receipts.append({
+    version: 1,
+    ts,
+    sessionId: 's1',
+    turn: 1,
+    kind: 'substitute-settled',
+    code: 'substitute-settled',
+    saved_input_tokens: 900,
+    avoided_total_tokens: 350,
+  })
+  // A malformed value is not a measurement and must not enter the sum.
+  await d.receipts.append({
+    version: 1,
+    ts,
+    sessionId: 's1',
+    turn: 1,
+    kind: 'substitute-settled',
+    code: 'substitute-settled',
+    saved_input_tokens: 100,
+    avoided_total_tokens: 'unknown',
+  })
+  await d.receipts.flush()
+
+  const status = await getStatus(d)
+  // The upper estimate stays the measured next-request input.
+  assert.equal(status.saved.substitution, 3000)
+  // The lower estimate is the avoided request's own total (input + cacheRead +
+  // output), summed only where a producer recorded it.
+  assert.equal(status.saved.substitution_avoided, 1550)
+})
+
 test('status 净额 = 非取回毛额回放 − 取回内容回放 − 取回调用一次', async () => {
   const d = await deps()
   await d.receipts.append({
@@ -970,6 +1020,63 @@ test('status 把 projection-skipped:footer-failed 映射为 ERR_HOST_NO_SPILL_NO
   )
 })
 
+test('row 49: selector-unavailable / selector-error reach degraded as one stable code', async () => {
+  const d = await deps()
+  const ts = new Date().toISOString()
+  await d.receipts.append({
+    version: 1,
+    ts,
+    sessionId: 's1',
+    turn: 1,
+    kind: 'skip',
+    code: 'selector-unavailable',
+  })
+  await d.receipts.append({
+    version: 1,
+    ts,
+    sessionId: 's1',
+    turn: 1,
+    kind: 'skip',
+    code: 'selector-error',
+  })
+  // An abstention is the model declining an ambiguous plan, not a host
+  // capability absence: it must not masquerade as "the LLM is gone".
+  await d.receipts.append({
+    version: 1,
+    ts,
+    sessionId: 's1',
+    turn: 1,
+    kind: 'skip',
+    code: 'selector-abstain',
+  })
+  await d.receipts.flush()
+
+  const status = await getStatus(d)
+  assert.equal(status.counts['selector-unavailable'], 1)
+  assert.equal(status.counts['selector-error'], 1)
+  assert.equal(
+    status.degraded.filter((code) => code === 'ERR_HOST_SELECTOR_UNAVAILABLE').length,
+    1,
+    JSON.stringify(status.degraded),
+  )
+})
+
+test('row 49: a lone selector abstention is not reported as host unavailability', async () => {
+  const d = await deps()
+  await d.receipts.append({
+    version: 1,
+    ts: new Date().toISOString(),
+    sessionId: 's1',
+    turn: 1,
+    kind: 'skip',
+    code: 'selector-abstain',
+  })
+  await d.receipts.flush()
+
+  const status = await getStatus(d)
+  assert.equal(status.degraded.includes('ERR_HOST_SELECTOR_UNAVAILABLE'), false)
+})
+
 test('status 在 scope.json 不可读时报稳定码切仍给出账目', async () => {
   const d = await dirDeps()
   // A directory named scope.json is unreadable as a file on every platform.
@@ -1106,6 +1213,8 @@ test('status 无宿主事实时不输出 hasWorkspaceRegistry 键（undefined �
   if (!r.ok) return
   const status = r.data as BoostStatus
   assert.equal(Object.hasOwn(status, 'hasWorkspaceRegistry'), false)
+  // The spill fact follows the same rule: "not probed" is not "absent".
+  assert.equal(Object.hasOwn(status, 'hasSpill'), false)
   // The value the host boundary receives must survive a lossless JSON round
   // trip: an own key whose value is `undefined` is not a legal JSON value.
   assert.doesNotThrow(() => JSON.stringify(status))

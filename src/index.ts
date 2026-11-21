@@ -98,6 +98,162 @@ function isVerifiedHostVersion(version: string): boolean {
   return core(version) === core(VERIFIED_HOST_VERSION)
 }
 
+/** One parsed semantic version; build metadata is discarded. */
+type SemVer = {
+  major: number
+  minor: number
+  patch: number
+  prerelease: readonly (string | number)[]
+}
+
+/**
+ * Parse the semver subset a declared `engines.dsh` range uses.
+ *
+ * The host's compatibility preflight runs `semver.satisfies(..., {
+ * includePrerelease: true })`. This module cannot import `semver` at runtime
+ * (it is a dev dependency, and the published graph must stay host-free), so the
+ * guard implements only what the manifest's range needs: `major.minor.patch`,
+ * an optional prerelease, and the comparison operators. Anything else is
+ * unparsable, and an unparsable range makes the guard advisory rather than
+ * wrong.
+ */
+function parseSemVer(value: string): SemVer | undefined {
+  const match = /^v?(\d+)\.(\d+)\.(\d+)(?:-([0-9A-Za-z.-]+))?(?:\+[0-9A-Za-z.-]+)?$/.exec(
+    value.trim(),
+  )
+  if (match === null) return undefined
+  const majorText = match[1]
+  const minorText = match[2]
+  const patchText = match[3]
+  if (majorText === undefined || minorText === undefined || patchText === undefined) {
+    return undefined
+  }
+  const major = Number(majorText)
+  const minor = Number(minorText)
+  const patch = Number(patchText)
+  if (!Number.isSafeInteger(major) || !Number.isSafeInteger(minor) || !Number.isSafeInteger(patch)) {
+    return undefined
+  }
+  const prerelease: (string | number)[] = []
+  const prereleaseText = match[4]
+  if (prereleaseText !== undefined) {
+    for (const identifier of prereleaseText.split('.')) {
+      if (/^\d+$/.test(identifier)) {
+        const numeric = Number(identifier)
+        if (!Number.isSafeInteger(numeric)) return undefined
+        prerelease.push(numeric)
+      } else {
+        prerelease.push(identifier)
+      }
+    }
+  }
+  return { major, minor, patch, prerelease }
+}
+
+/** Semver precedence for one prerelease identifier (numeric sorts first). */
+function compareIdentifier(left: string | number, right: string | number): number {
+  if (typeof left === 'number' && typeof right === 'number') return left - right
+  if (typeof left === 'number') return -1
+  if (typeof right === 'number') return 1
+  return left < right ? -1 : left > right ? 1 : 0
+}
+
+/** Semver precedence: negative when `left` is older, positive when newer. */
+function compareSemVer(left: SemVer, right: SemVer): number {
+  for (const key of ['major', 'minor', 'patch'] as const) {
+    const delta = left[key] - right[key]
+    if (delta !== 0) return delta
+  }
+  if (left.prerelease.length === 0 && right.prerelease.length === 0) return 0
+  // A release outranks every prerelease of the same core version.
+  if (left.prerelease.length === 0) return 1
+  if (right.prerelease.length === 0) return -1
+  const length = Math.max(left.prerelease.length, right.prerelease.length)
+  for (let index = 0; index < length; index += 1) {
+    const leftPart = left.prerelease[index]
+    const rightPart = right.prerelease[index]
+    // A shorter identifier list is lower when every shared part is equal.
+    if (leftPart === undefined) return -1
+    if (rightPart === undefined) return 1
+    const delta = compareIdentifier(leftPart, rightPart)
+    if (delta !== 0) return delta
+  }
+  return 0
+}
+
+/**
+ * Whether `version` satisfies `range`, or `undefined` when either cannot be
+ * parsed.
+ *
+ * Supports the space-separated AND comparators (`>=`, `>`, `<=`, `<`, `=`, or
+ * bare) and `||` alternatives. An unevaluable range is not a mismatch: the
+ * guard is advisory, and warning on a range it does not understand would be
+ * worse than staying quiet.
+ */
+function satisfiesRange(version: string, range: string): boolean | undefined {
+  const parsed = parseSemVer(version)
+  if (parsed === undefined) return undefined
+  let evaluable = false
+  for (const alternative of range.split('||')) {
+    const comparators = alternative.trim().split(/\s+/).filter(token => token !== '')
+    if (comparators.length === 0) continue
+    let matched = true
+    let valid = true
+    for (const token of comparators) {
+      const match = /^(>=|<=|>|<|=)?(.+)$/.exec(token)
+      const bound = match === null ? undefined : parseSemVer(match[2] ?? '')
+      if (match === null || bound === undefined) {
+        valid = false
+        break
+      }
+      const order = compareSemVer(parsed, bound)
+      const operator = match[1] ?? '='
+      const satisfied =
+        operator === '>='
+          ? order >= 0
+          : operator === '<='
+            ? order <= 0
+            : operator === '>'
+              ? order > 0
+              : operator === '<'
+                ? order < 0
+                : order === 0
+      if (!satisfied) {
+        matched = false
+        break
+      }
+    }
+    if (!valid) continue
+    evaluable = true
+    if (matched) return true
+  }
+  return evaluable ? false : undefined
+}
+
+/**
+ * The `engines.dsh` range this build declares, read from the package manifest.
+ *
+ * The manifest is the one authority for "hosts this plugin accepts": the host's
+ * preflight reads the same field, so a guard with a hard-coded range would drift
+ * from the declaration it is supposed to enforce (review row 51). Memoised; a
+ * missing or malformed manifest makes the guard advisory.
+ */
+let declaredHostRange: string | undefined | null = null
+
+function declaredHostRangeOf(): string | undefined {
+  if (declaredHostRange !== null) return declaredHostRange
+  try {
+    const manifest = JSON.parse(
+      readFileSync(new URL('../package.json', import.meta.url), 'utf8'),
+    ) as { engines?: { dsh?: unknown } }
+    const range = manifest.engines?.dsh
+    declaredHostRange = typeof range === 'string' && range.trim() !== '' ? range.trim() : undefined
+  } catch {
+    declaredHostRange = undefined
+  }
+  return declaredHostRange
+}
+
 /**
  * Stable host code: the resolved host version is not the verified one.
  *
@@ -191,19 +347,45 @@ function hostVersionOf(ctx: PluginContext): string | undefined {
 }
 
 /**
- * Log the resolved host version once and warn on a mismatch.
+ * Log the resolved host version once, warning only outside `engines.dsh`.
  *
  * The version guard is deliberately advisory. npm does not read `engines.dsh`;
  * the host enforces it only through the managed-install compatibility preflight,
  * which does not run for every composition. A warning here is the only signal
  * an embedded or mixed tree gets, and it must never stop the plugin: a version
  * this build did not verify may still work.
+ *
+ * The check is against the **declared range**, not exact equality (review row
+ * 51): `engines.dsh` is `>=0.2.2-rc.4 <0.2.3-0`, and the host's preflight
+ * accepts rc.5 and the 0.2.2 release. Warning on those told operators to
+ * distrust a host the manifest itself accepts. Inside the range but not the
+ * verified build is an informational note; outside it is the warning.
  */
 function reportHostVersion(ctx: PluginContext): void {
   const version = hostVersionOf(ctx)
+  const range = declaredHostRangeOf()
   if (version === undefined) {
     ctx.logger?.info?.(
-      `dsh-boost: dsh host version unknown (verified against ${VERIFIED_HOST_VERSION}); compatibility cannot be checked`,
+      `dsh-boost: dsh host version unknown (verified against ${VERIFIED_HOST_VERSION}${range === undefined ? '' : `; declared range ${range}`}); compatibility cannot be checked`,
+    )
+    return
+  }
+  if (range === undefined) {
+    ctx.logger?.info?.(
+      `dsh-boost: dsh host ${version}; the package declares no engines.dsh range, so compatibility cannot be checked`,
+    )
+    return
+  }
+  const accepted = satisfiesRange(version, range)
+  if (accepted === undefined) {
+    ctx.logger?.info?.(
+      `dsh-boost: dsh host ${version}; the declared range ${range} is not a semver range this guard understands, so compatibility cannot be checked`,
+    )
+    return
+  }
+  if (!accepted) {
+    ctx.logger?.warn?.(
+      `dsh-boost: ${ERR_HOST_VERSION_MISMATCH}: this build is verified against dsh ${VERIFIED_HOST_VERSION} (declared range ${range}), but the host reports ${version}, which is outside it; continuing, but a renamed host API may make the plugin inert`,
     )
     return
   }
@@ -211,8 +393,10 @@ function reportHostVersion(ctx: PluginContext): void {
     ctx.logger?.info?.(`dsh-boost: dsh host ${version} (verified)`)
     return
   }
-  ctx.logger?.warn?.(
-    `dsh-boost: ${ERR_HOST_VERSION_MISMATCH}: this build is verified against dsh ${VERIFIED_HOST_VERSION}, but the host reports ${version}; continuing, but a renamed host API may make the plugin inert`,
+  // Inside the range the manifest accepts, so this is not a mismatch — just not
+  // the exact build the plugin was exercised against.
+  ctx.logger?.info?.(
+    `dsh-boost: dsh host ${version} is within the declared range ${range}, but not the exact build this was verified against (${VERIFIED_HOST_VERSION}); continuing`,
   )
 }
 
@@ -1348,10 +1532,51 @@ export function apply(ctx: PluginContext, config: unknown): void {
         return meter.kind() === 'host'
       },
       get hasSpill() {
-        return spillService() !== undefined
+        // `refresh`, not the memo: a status call reports the host *now*, so a
+        // provider that was replaced or disposed since the last write must not
+        // keep `hasSpill` true (review rows 6 and 50).
+        return spillService.refresh() !== undefined
+      },
+      get spillUsable() {
+        // Presence is not capability: `{}` resolves, so `hasSpill` alone would
+        // report a healthy projection path until the first `saveText` fails
+        // (review row 50). Probe the method shape, never call it — a status
+        // read must not write a spill artifact. A broken binding is dropped so
+        // a replaced provider is picked up by the next status.
+        try {
+          const backend = spillService.refresh()
+          if (backend === undefined) return false
+          if (typeof backend.saveText === 'function') return true
+          spillService.reset()
+          return false
+        } catch {
+          spillService.reset()
+          return false
+        }
       },
       get hasWorkspaceRegistry() {
-        return registry() !== undefined
+        // Live fact: a registry that appeared, disappeared or was replaced
+        // since `apply` must be reported as it is now.
+        return registry.refresh() !== undefined
+      },
+      get workspaceRegistryBroken() {
+        // `resolve.ts` swallows a throwing `list()` per call by design: one
+        // invisible session must not crash a hook. That swallow is exactly why
+        // the failure needs a status-time probe, or every session is judged
+        // invisible while `degraded` stays empty (review row 6). A non-array is
+        // the same fail-closed answer in the resolver, so it is the same
+        // degradation here. `refresh` re-reads the binding so a repaired
+        // provider clears the code on the very next status.
+        try {
+          const backend = registry.refresh()
+          if (backend === undefined) return false
+          if (Array.isArray(backend.list())) return false
+          registry.reset()
+          return true
+        } catch {
+          registry.reset()
+          return true
+        }
       },
     }
     const fixedOverhead = measureBoostFixedOverhead()
