@@ -58,8 +58,10 @@ replacing the range with measurements needs a denominator statistic that a later
 
 ## Requirements
 
-- Node.js `>=24.9.0` and DSH `0.2.2-rc.4` (an exact pin, not a range; both in `package.json`
-  `engines`; the Node floor matches the host `@deepseek-ai/dsh@0.2.2-rc.4`).
+- Node.js `>=24.9.0` and DSH `>=0.2.2-rc.4 <0.2.3-0` (a **range**, not an exact pin: the host
+  evaluates it with `includePrerelease` semantics and disables the plugin on a miss, while
+  `0.2.2-rc.5` is byte-identical to rc.4 in every host package this plugin touches). Both live in
+  `package.json` `engines`; the Node floor matches the host `@deepseek-ai/dsh@0.2.2-rc.4`.
 - **The package declares no peerDependencies**: installing it pulls in no `@deepseek-ai/*`
   package, and the module loads without any of them; the runtime capabilities (`tokenMeter`,
   `spillStore`, the estimator, the footer formatter) are provided by the DSH host process, and a
@@ -75,8 +77,8 @@ replacing the range with measurements needs a denominator statistic that a later
 directory:
 
 ```bash
-# install from the registry: npmjs has latest = 0.1.1; the npmmirror this
-# repository's .npmrc points at only has 0.1.0 (see below)
+# install from the registry: npmjs has latest = 0.1.1 (this repository's
+# .npmrc and lockfile are pinned to npmjs too — see below)
 dsh plugin --profile <name> add dsh-boost@^0.1.1 --registry=https://registry.npmjs.org/
 
 # or from a local checkout (build first; dist/ is not committed)
@@ -90,8 +92,9 @@ For the web profile: `dsh plugin --profile web add dsh-boost@^0.1.1 --registry=h
 > **The two registries carry different versions, so `^0.1.0` is not a safe pin.**
 > `registry.npmjs.org` has three version records: `0.1.1` (current `latest`), `0.1.0`, and
 > `0.0.0-stage`, a placeholder npm creates on a package's first publish. The
-> `registry.npmmirror.com` this repository's `.npmrc` points at currently has only `0.1.0` (its
-> `latest` is 0.1.0 too). The same `^0.1.0` therefore resolves to 0.1.1 on npmjs and to 0.1.0 on
+> `registry.npmmirror.com` currently has only `0.1.0` (its `latest` is 0.1.0 too) — this
+> repository's `.npmrc` and lockfile are pinned to npmjs, but your global npm config may not be.
+> The same `^0.1.0` therefore resolves to 0.1.1 on npmjs and to 0.1.0 on
 > the mirror — and a mirror user installs a build missing ten of 0.1.1's fixes, several of which
 > repair silent failures. Use `dsh-boost@^0.1.1` (or `@latest`), and pass
 > `--registry=https://registry.npmjs.org/` explicitly when the registry matters; while the mirror

@@ -50,12 +50,13 @@ test('页脚头行逐字格式', () => {
 })
 
 test('不变量与死区：触发阈值 ≥ 头行 + 窗口 + 页脚 + 3；grep/glob 是明知例外', async () => {
-  // 真实页脚由宿主 formatSpillNotice 生成，68 字符 locator + 5 位省略字节数实测 196 字符
+  // 真实页脚由宿主 formatSpillNotice 生成：68 字符 locator + 宿主固定 66 字符 retrieval hint
+  // 下，3 位省略字节数 190 字符、5 位 192 字符（这里取 5 位口径）
   // （不是旧稿按 110 估的值）；
   // 头行 [output N chars; showing first A and last B] 约 47–52 字符，按 50 计，另加 3 个换行。
   // 净收益 > 0 的最小长度 = head + tail + 头行 + 页脚 + 3；触发阈值低于它就存在死区。
   const HEADLINE = 50
-  const FOOTER = 196
+  const FOOTER = 192
   const minNetPositive = (p: ProjectionParams) => p.headChars + p.tailChars + HEADLINE + FOOTER + 3
   const GREP = { triggerChars: 700, headChars: 400, tailChars: 100 }
 
@@ -64,11 +65,11 @@ test('不变量与死区：触发阈值 ≥ 头行 + 窗口 + 页脚 + 3；grep/
   assert.ok(BASH.triggerChars >= minNetPositive(BASH))
   assert.ok(SSH.triggerChars >= minNetPositive(SSH))
 
-  // grep/glob 默认**不**满足：400 + 100 + 50 + 196 + 3 = 749 > 700。死区是明知保留的取舍，
+  // grep/glob 默认**不**满足：400 + 100 + 50 + 192 + 3 = 745 > 700。死区是明知保留的取舍，
   // 不是缺陷：把 triggerChars 提到 800 是配置改动，不在本测试的授权内。死区里绝不增加
   // token——truncate 会裁（它自己的 after 不含页脚），projectApply 组装后不短于原文即
   // 返回原文；浪费的只是一次裁剪与一次无人引用的落盘。
-  assert.ok(minNetPositive(GREP) > GREP.triggerChars) // 749 > 700
+  assert.ok(minNetPositive(GREP) > GREP.triggerChars) // 745 > 700
   const text = 'a'.repeat(701)
   const t = truncate(text, GREP)!
   assert.ok(t.after.length < text.length) // truncate will cut：after = 头行 50 + 窗口 501 + 换行 = 552 < 701

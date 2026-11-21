@@ -42,8 +42,10 @@ v1 的**事前估算**区间是 **3.5%（下界）– 10.0%（理想上界）**�
 
 ## 前置条件
 
-- Node.js `>=24.9.0`，DSH `0.2.2-rc.4`（精确锁定，不是区间；两者都在 `package.json` 的
-  `engines` 里；Node 下限对齐宿主 `@deepseek-ai/dsh@0.2.2-rc.4`）。
+- Node.js `>=24.9.0`，DSH `>=0.2.2-rc.4 <0.2.3-0`（**区间**，不是精确钉法；宿主按
+  `includePrerelease` 语义判定，不满足时会直接停用插件，而 `0.2.2-rc.5` 与本插件触及的宿主包
+  逐字节相同）。两者都在 `package.json` 的 `engines` 里；Node 下限对齐宿主
+  `@deepseek-ai/dsh@0.2.2-rc.4`。
 - **本包不声明任何 peerDependencies**：安装它不会带出任何 `@deepseek-ai/*` 包，模块脱离它们也能
   加载；运行时能力（`tokenMeter`、`spillStore`、估算器、页脚格式化器）由 DSH 宿主进程提供，
   缺失时走降级（见「宿主依赖」）。
@@ -56,8 +58,8 @@ v1 的**事前估算**区间是 **3.5%（下界）– 10.0%（理想上界）**�
 `dsh plugin` 要求指定 profile，剩下的参数原样转发给该 profile 目录里的 pnpm：
 
 ```bash
-# 从 registry 安装：npmjs 上的 latest 是 0.1.1；本仓库 .npmrc 指向的
-# npmmirror 只有 0.1.0（见下）
+# 从 registry 安装：npmjs 上的 latest 是 0.1.1（本仓库 .npmrc 与 lockfile
+# 也已钉在 npmjs，见下）
 dsh plugin --profile <name> add dsh-boost@^0.1.1 --registry=https://registry.npmjs.org/
 
 # 或从本地 checkout 安装（先构建；dist/ 不入库）
@@ -69,8 +71,9 @@ dsh plugin --profile <name> add /absolute/path/to/dsh-boost
 `dsh plugin` 把操作转发给 pnpm，所以 pnpm 必须在 PATH 上。
 
 > **两个 registry 的版本不同，`^0.1.0` 不是安全的钉法。** `registry.npmjs.org` 上有三条版本记录：
-> `0.1.1`（当前 `latest`）、`0.1.0`，以及首次发布时 npm 自动创建的占位版本 `0.0.0-stage`；本仓库
-> `.npmrc` 指向的 `registry.npmmirror.com` 目前只有 `0.1.0`（它的 `latest` 也是 0.1.0）。同一个
+> `0.1.1`（当前 `latest`）、`0.1.0`，以及首次发布时 npm 自动创建的占位版本 `0.0.0-stage`。而
+> `registry.npmmirror.com` 目前只有 `0.1.0`（它的 `latest` 也是 0.1.0）——本仓库已把 `.npmrc`
+> 与 lockfile 改钉 npmjs，但你机器上的全局 npm 配置可能仍指向镜像。同一个
 > `^0.1.0` 在 npmjs 解析到 0.1.1、在镜像解析到 0.1.0——镜像用户会装到缺少 0.1.1 十项修复的
 > 构建，其中几项是静默失效修复。请用 `dsh-boost@^0.1.1`（或 `@latest`），并在意 registry 时
 > 显式传 `--registry=https://registry.npmjs.org/`；镜像尚未同步 0.1.1 时，不带该 flag 的
