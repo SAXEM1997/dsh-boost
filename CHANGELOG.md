@@ -10,6 +10,8 @@ Design rationale lives in `docs/superpowers/specs/`; the release-acceptance proc
 
 ## [Unreleased]
 
+## [0.1.2] - 2026-11-21
+
 ### 修复 Fixed
 
 - **scope 文件不再被静默覆盖。** 坏 JSON / 非对象 / 数组（`ERR_SCOPE_PARSE_FAILED`）以及「版本缺失或非数值、且没有可识别的 v1 字段」（`ERR_SCOPE_UNKNOWN_VERSION`）两种情况下，`scope-set` 与 `shadow` 现在**拒绝写入**并把文件原样留在盘上；此前会以默认文档为基底覆盖它，`workspaceIds` 会变成空数组。带可识别字段的 v1 文件仍按原路升级并保留 `mode` / `global` / `workspaceIds`。
