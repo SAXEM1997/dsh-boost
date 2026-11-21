@@ -3,10 +3,18 @@
 # The repository's live remote is the internal GitLab mirror; this workflow is
 # staged for the public GitHub mirror (see the repository field in
 # package.json). It runs prepublishOnly's two commands explicitly, in order:
-# `npm run ci` (typecheck, tests, clean build) then `npm run verify:package`
-# (exact tarball allowlist, dist/index.js guard, exports targets, install with
-# --ignore-scripts + probe + TypeScript consumer, then a second install with
-# lifecycle scripts enabled).
+# `npm run ci` (typecheck, tests, clean build) then
+# `npm run verify:package -- --prebuilt` (exact tarball allowlist, bundle-patch
+# YAML parse, host-version agreement, dist/index.js guard, exports targets,
+# install with --ignore-scripts + probe + TypeScript consumer, then a second
+# install with lifecycle scripts enabled).
+#
+# `--prebuilt` is load-bearing. Without it verify:package would build again
+# inside its own pack step, so a missing/ghost dist entry introduced after the
+# gate's build would be repaired or hidden instead of reported. The order is
+# one explicit build (`npm run ci`) -> verify the tree it produced -> publish;
+# package.json no longer ships a `prepare` hook, so `npm publish`'s own pack
+# does not rebuild either.
 #
 # This used to be `npm publish --dry-run`, on the theory that the dry-run was
 # the same gate a maintainer runs. It is not: npm runs prepublishOnly first and
@@ -18,11 +26,10 @@
 # It never publishes: there is no npm publish invocation, no registry token,
 # and a `v*` tag does not upload anything. See docs/RELEASE.md §6.
 #
-# The committed lockfile resolves every tarball to registry.npmmirror.com.
-# `--registry` does not override those URLs, so rewrite the runner's copy to
-# npmjs before installing. The trade: CI depends on public npmjs and has no
-# mirror fallback; in exchange it runs on a runner that cannot reach the China
-# mirror, and integrity still verifies every tarball.
+# `.npmrc` and the committed lockfile resolve every tarball to
+# registry.npmjs.org — the same registry `publishConfig` publishes to. The gate
+# below asserts that, so a mirror URL cannot creep back in and make release
+# checks read a stale `latest`.
 name: ci
 
 on:
@@ -44,16 +51,15 @@ jobs:
         with:
           node-version: 24.9.0
           cache: npm
-      - name: Rewrite the runner's lockfile from npmmirror to npmjs
+      - name: Assert the lockfile resolves from npmjs
         run: |
-          sed -i 's#https://registry.npmmirror.com/#https://registry.npmjs.org/#g' package-lock.json
           if grep -q 'registry.npmmirror.com' package-lock.json; then
-            echo 'npmmirror URL left in package-lock.json' >&2
+            echo 'npmmirror URL left in package-lock.json; the release registry is npmjs' >&2
             exit 1
           fi
-          grep -q 'registry.npmjs.org' package-lock.json
+          grep -q 'https://registry.npmjs.org/' package-lock.json
       - run: npm ci --registry=https://registry.npmjs.org/
-      # The same two commands `prepublishOnly` runs. `npm publish --dry-run`
-      # cannot stand in for them: npm rejects the already-published version
-      # after prepublishOnly has done all the work (row 17, round 3 review).
-      - run: npm run ci && npm run verify:package
+      # The same two commands `prepublishOnly` runs, in the same order. The
+      # `--prebuilt` flag is required: it makes the pack step describe the tree
+      # `npm run ci` just built instead of rebuilding it (row 9/31, round 4).
+      - run: npm run ci && npm run verify:package -- --prebuilt

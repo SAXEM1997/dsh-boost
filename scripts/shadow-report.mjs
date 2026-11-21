@@ -36,13 +36,27 @@
  * The script is standalone on purpose: it ships to operators, must run under
  * plain `node`, and cannot import the built package (design §11). It only
  * knows the receipt fields the store writes; a corrupt line or an unfinished
- * tail line is skipped, never fatal. A missing directory is an empty ledger
- * and prints four zeros.
+ * tail line is skipped, never fatal.
  *
- * Usage: `node scripts/shadow-report.mjs --dir <receipts dir>`
+ * A missing directory is *not* silently an empty ledger: an all-zero report
+ * from a typo'd path is indistinguishable from a genuine zero-result week, so
+ * the script warns on stderr and exits 2 unless `--allow-empty` says the empty
+ * report is intentional.
+ *
+ * Usage: `node scripts/shadow-report.mjs --dir <receipts dir> [--allow-empty]`
  */
-import { readdirSync, readFileSync } from 'node:fs'
+import { readdirSync, readFileSync, statSync } from 'node:fs'
 import { join } from 'node:path'
+
+const USAGE = `usage: node scripts/shadow-report.mjs --dir <receipts dir> [--allow-empty]
+
+Reads <dir>/*.jsonl (including rotated .1.jsonl shards) and prints the shadow
+week labels as JSON.
+
+  --dir <path>     receipts directory written by ReceiptStore
+  --allow-empty    print the all-zero report even if <dir> does not exist
+  --help, -h       show this message and exit 0
+`
 
 const FAMILIES = new Set(['read', 'grep', 'glob', 'bash', 'ssh'])
 const MCP_PREFIX = 'mcp__'
@@ -108,10 +122,34 @@ function valueOf(flag) {
   return i >= 0 ? args[i + 1] : undefined
 }
 
+if (args.includes('--help') || args.includes('-h')) {
+  process.stdout.write(USAGE)
+  process.exit(0)
+}
+
+const allowEmpty = args.includes('--allow-empty')
 const dir = valueOf('--dir')
-if (dir === undefined) {
-  console.error('usage: node scripts/shadow-report.mjs --dir <receipts dir>')
+if (dir === undefined || dir === '' || dir.startsWith('--')) {
+  console.error(USAGE)
   process.exit(2)
+}
+
+let directoryExists = false
+try {
+  directoryExists = statSync(dir).isDirectory()
+} catch {
+  directoryExists = false
+}
+if (!directoryExists) {
+  console.error(`shadow-report: receipts directory does not exist or is not a directory: ${dir}`)
+  if (!allowEmpty) {
+    console.error(
+      'shadow-report: refusing to print an all-zero report from a missing directory; ' +
+        'pass --allow-empty if this is intentional',
+    )
+    process.exit(2)
+  }
+  console.error('shadow-report: --allow-empty set; printing the zero report')
 }
 
 let decisions = 0
