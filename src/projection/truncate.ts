@@ -35,6 +35,12 @@ export interface Truncation {
   omittedBytes: number
   /** `before` code points minus the two window sizes. */
   omittedCodePoints: number
+  /**
+   * Marker lines from the cut-away middle that must survive (design §5.4-4):
+   * an exit code or error flag the reader would otherwise lose. Empty for the
+   * overwhelming majority of receipts.
+   */
+  signals: string[]
 }
 
 /** Render the head line of a truncation, with `en-US` thousands separators. */
@@ -51,19 +57,6 @@ function headLine(outputChars: number, firstChars: number, lastChars: number): s
   return `[output ${outputChars.toLocaleString('en-US')} chars; showing first ${firstChars.toLocaleString('en-US')} and last ${lastChars.toLocaleString('en-US')}]`
 }
 
-/**
- * Whether `truncate` would cut `text`.
- *
- * Delegates instead of re-deriving the decision, so the two entry points can
- * never disagree at the edges (the exact cut, the net-gain guard, the byte
- * cap). The cheap pre-filters inside `truncate` keep the common "not worth
- * cutting" path free of code-point allocation.
- */
-export function shouldTruncate(text: string, params: ProjectionParams): boolean {
-  return truncate(text, params) !== null
-}
-
-/** Cut `text` down to its head and tail windows, or `null` when that is not worth it. */
 /** The marker lines the design's §5.4-4 says must survive any projection. */
 const PRESERVED_SIGNAL = /^(?:\[exit code: -?\d+\]|exit_code\s*[:=]\s*-?\d+|is_error\s*[:=]\s*(?:true|false))$/i
 
@@ -84,6 +77,7 @@ function preservedSignals(middle: readonly string[]): string[] {
   return out
 }
 
+/** Cut `text` down to its head and tail windows, or `null` when that is not worth it. */
 export function truncate(text: string, params: ProjectionParams): Truncation | null {
   // UTF-16 length upper-bounds the code-point count: when it does not exceed
   // the trigger, neither can the real count.
@@ -124,5 +118,5 @@ export function truncate(text: string, params: ProjectionParams): Truncation | n
   // original rather than throwing on unvalidated config.
   if (after.length >= text.length) return null
 
-  return { before: text, after, head, tail, omittedBytes, omittedCodePoints }
+  return { before: text, after, head, tail, omittedBytes, omittedCodePoints, signals: preserved }
 }

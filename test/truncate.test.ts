@@ -1,6 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { truncate, shouldTruncate, renderHeadLine } from '../src/projection/truncate.ts'
+import { truncate, renderHeadLine } from '../src/projection/truncate.ts'
 import { projectApply } from '../src/projection/apply.ts'
 import { DEFAULT_CONFIG } from '../src/config.ts'
 import type { ProjectionParams } from '../src/types.ts'
@@ -10,20 +10,20 @@ const BASH = { triggerChars: 4000, headChars: 2000, tailChars: 500 }
 const SSH = { triggerChars: 2000, headChars: 1200, tailChars: 300 }
 
 test('低于触发阈值不裁', () => {
-  assert.equal(shouldTruncate('x'.repeat(2999), READ), false)
+  assert.equal(truncate('x'.repeat(2999), READ), null)
   assert.equal(truncate('x'.repeat(2999), READ), null)
 })
 
 test('阈值按 code point 比较，不按 UTF-16 长度（边界）', () => {
   // 1600 个 emoji：code point 1600 < 3000，UTF-16 units 3200 > 3000
-  assert.equal(shouldTruncate('😀'.repeat(1600), READ), false)
+  assert.equal(truncate('😀'.repeat(1600), READ), null)
   // 若按 text.length 比较会误裁，且头 2000 + 尾 500 会把 1600 个全吃进去，
   // 产出比原文更长的回执与负数的 omitted 计数
   assert.equal(truncate('😀'.repeat(1600), READ), null)
 })
 
 test('空回执不裁（Review Focus #1）', () => {
-  assert.equal(shouldTruncate('', READ), false)
+  assert.equal(truncate('', READ), null)
   assert.equal(truncate('', READ), null)
 })
 
@@ -100,7 +100,7 @@ test('emoji 窗口逐字完整：head/tail 都是整数个 emoji（规则 6）',
 test('code point 触发边界：恰好等于阈值不裁，超过 1 才裁（规则 1）', () => {
   const P = { triggerChars: 2600, headChars: 2000, tailChars: 500 }
   const at = '😀'.repeat(2600) // code point 2600，UTF-16 units 5200
-  assert.equal(shouldTruncate(at, P), false)
+  assert.equal(truncate(at, P), null)
   assert.equal(truncate(at, P), null)
 
   const over = '😀'.repeat(2601)
@@ -113,7 +113,7 @@ test('code point 触发边界：恰好等于阈值不裁，超过 1 才裁（规
 test('窗口吞不下时返回 null，不抛错（规则 8）', () => {
   const P = { triggerChars: 100, headChars: 2000, tailChars: 500 }
   const text = 'a'.repeat(300)
-  assert.equal(shouldTruncate(text, P), false)
+  assert.equal(truncate(text, P), null)
   assert.equal(truncate(text, P), null)
 })
 
@@ -157,14 +157,14 @@ test('256 KiB 上限按 UTF-8 字节，不按 UTF-16 长度（规则 5）', () =
 
   // 超过一个字节：整条不投影
   const over = 'a'.repeat(cap + 1)
-  assert.equal(shouldTruncate(over, READ), false)
+  assert.equal(truncate(over, READ), null)
   assert.equal(truncate(over, READ), null)
 
   // 90,000 个 CJK：text.length（90,000）< 256 KiB，但 UTF-8 是 270,000 字节 > 上限
   const cjk = '中'.repeat(90_000)
   assert.ok(cjk.length < cap)
   assert.ok(Buffer.byteLength(cjk, 'utf8') > cap)
-  assert.equal(shouldTruncate(cjk, READ), false)
+  assert.equal(truncate(cjk, READ), null)
   assert.equal(truncate(cjk, READ), null)
 })
 
@@ -173,26 +173,6 @@ test('页脚头行对首尾窗口也加千位分隔符（规则 7）', () => {
   assert.equal(renderHeadLine(t), '[output 10,000 chars; showing first 2,500 and last 1,500]')
 })
 
-test('shouldTruncate 与 truncate 的判定处处一致（规则 4、5）', () => {
-  const cases: Array<[string, ProjectionParams]> = [
-    ['', READ],
-    ['x'.repeat(2999), READ],
-    ['x'.repeat(3000), READ],
-    ['x'.repeat(3001), READ],
-    ['😀'.repeat(1600), READ],
-    ['😀'.repeat(3001), READ],
-    ['a'.repeat(2501), { triggerChars: 2500, headChars: 2000, tailChars: 500 }],
-    ['a'.repeat(300), { triggerChars: 100, headChars: 2000, tailChars: 500 }],
-    ['中'.repeat(90_000), READ],
-  ]
-  for (const [text, params] of cases) {
-    assert.equal(
-      shouldTruncate(text, params),
-      truncate(text, params) !== null,
-      `text.length=${text.length} trigger=${params.triggerChars}`,
-    )
-  }
-})
 
 test('tailChars: 0 不把整段文本当作 tail 复制（row 69）', () => {
   const text = `${'h'.repeat(5)}${'o'.repeat(95)}`

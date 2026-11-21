@@ -616,8 +616,22 @@ function ownProjectionCarries(body: string, anchor: string): boolean {
   if (headLen + tailLen >= points.length) return false
   const head = headLen > 0 ? points.slice(0, headLen).join('') : ''
   const tail = tailLen > 0 ? points.slice(-tailLen).join('') : ''
-  return body.startsWith(`${match[0]}\n${head}`) && (tailLen === 0 || body.endsWith(tail))
+  if (!body.startsWith(`${match[0]}\n${head}`)) return false
+  if (tailLen === 0) return true
+  // Our own replacement may append rescued marker lines after the tail (design
+  // §5.4-4), so the body does not have to *end* with the tail — it has to
+  // contain it at the position the header implies, followed by nothing but
+  // those markers. A rewritten middle still fails, because the tail must sit
+  // where the two windows put it.
+  const tailAt = body.indexOf(`\n${tail}`)
+  if (tailAt === -1) return false
+  const rest = body.slice(tailAt + 1 + tail.length)
+  if (rest === '') return true
+  return rest.startsWith('\n') && PRESERVED_SIGNAL_LINE.test(rest)
 }
+
+/** One rescued marker line, or several of them, each on its own line. */
+const PRESERVED_SIGNAL_LINE = /^\n(?:\[exit code: -?\d+\]|exit_code\s*[:=]\s*-?\d+|is_error\s*[:=]\s*(?:true|false))(?:\n(?:\[exit code: -?\d+\]|exit_code\s*[:=]\s*-?\d+|is_error\s*[:=]\s*(?:true|false)))*$/i
 
 /**
  * Whether `body` is the anchor rewritten **by the host pruner**, and nothing

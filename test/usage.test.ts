@@ -293,3 +293,26 @@ test('没有后一次请求：upper 侧 unknown，但 avoided 侧仍报 lower es
   assert.equal(r.avoided_total_tokens, 1010)
   assert.equal(r.output_tokens, 'unknown')
 })
+
+test('cod#1 a shrunken context drops the floor instead of inverting the range', () => {
+  // The skipped step would have replayed 9,000 tokens; the next real request
+  // only carried 1,100 because the context shrank. A floor above the ceiling is
+  // not a range.
+  const ledger = new UsageLedger()
+  ledger.request({ input: 1000, cacheRead: 0, output: 8000 })
+  ledger.markSubstituted('A')
+  ledger.request({ input: 1100, cacheRead: 0, output: 200 })
+  const settled = ledger.settle()
+  assert.equal(settled.saved_input_tokens, 1100)
+  assert.equal(settled.avoided_total_tokens, 'unknown')
+})
+
+test('cod#1 a growing context keeps both bounds ordered', () => {
+  const ledger = new UsageLedger()
+  ledger.request({ input: 100, cacheRead: 900, output: 10 })
+  ledger.markSubstituted('A')
+  ledger.request({ input: 200, cacheRead: 1800, output: 40 })
+  const settled = ledger.settle()
+  assert.equal(settled.saved_input_tokens, 2000)
+  assert.equal(settled.avoided_total_tokens, 1010)
+})

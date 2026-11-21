@@ -1,6 +1,6 @@
 # dsh-boost 发布验收
 
-本文是 `dsh-boost` 0.1.2 的发布验收手册（版本以 `package.json` 为准）。它覆盖四件事：
+本文是 `dsh-boost` 0.1.3 的发布验收手册（版本以 `package.json` 为准）。它覆盖四件事：
 
 1. `npm run verify:package` 一条命令的打包与产物验收（§1），以及零 peerDependencies 现状下
    两条降级路径的验收方式（§2）；
@@ -8,8 +8,10 @@
 3. 影子周脚本的跑法、`session-snapshot.json` 的来源与复算方式；
 4. CI 到底做什么、不做什么，lockfile 的 China mirror 怎么处理，以及 npm 的发布旁路（§6）。
 
-> 记录在案的决定：本项目**不附带** 20 任务回放集，也不提供 `test/regression/run.mjs`。用户明确否决了
-> "搭回放集"（2026-11-18）。因此第 3 节只规定过程与判据，**不伪造任务集**。
+> 记录在案的决定：本项目**不附带** 20 任务回放集，也不提供 `test/regression/run.mjs`。用户明确
+> 否决的是"搭回放集"的**语料**部分（2026-11-18）；这条豁免**只免除语料**。冒烟 runner 与
+> locator 取回完整性检查**不需要语料**，不在这条豁免内——当前两者都未交付。因此第 3 节只规定
+> 过程与判据，**不伪造任务集**。
 
 ---
 
@@ -24,6 +26,8 @@ npm run verify:package
 `scripts/verify-package.mjs` 把机械验收一次做完。它不依赖 `npm publish` 或 `prepublishOnly`，
 可以单独跑；前置条件只有一次 `npm ci`（脚本会显式跑 `npm run build`，需要仓库自己的 `tsc`）。
 0.1.2 的发布 commit `3ec82f3` 上实测 exit 0：tarball 78 个条目，回执里 10 条 `checks` 记录。
+这两个数字是 0.1.2 的记录；0.1.3 的 `verify-package.mjs` 增加了断言，发布前请在目标 commit
+上重跑并以其回执为准。
 两个数字都随树的形状变化（条目数随文件集合，`checks` 数随脚本里的断言组），不是版本常量：
 
 1. 脚本显式跑 `npm run build`，再用 `npm pack --ignore-scripts` 打出真实 tarball。
@@ -119,7 +123,7 @@ mkdir -p "$DSH_HOME"
 # 在仓库根目录求版本，tarball 文件名随之变化；手工下载的包直接写绝对路径
 TARBALL="/path/to/dsh-boost-$(node -p "require('./package.json').version").tgz"
 dsh plugin --profile accept add "$TARBALL"
-# 或本地 checkout 目录；从 registry 安装时写 dsh-boost@^0.1.2 --registry=https://registry.npmjs.org/
+# 或本地 checkout 目录；从 registry 安装时写 dsh-boost@^0.1.3 --registry=https://registry.npmjs.org/
 # 确认宿主确实把这一行并入了装配计划：
 dsh --profile accept --dump-config | grep -A2 'id: dsh-boost'
 ```
@@ -153,7 +157,8 @@ for (const [id, w] of Object.entries(s.tables.workspaces)) console.log(id, w.pat
 ```
 
 最后一次 `status` 必须显示 `scope.workspaceIds` 含该 id、`shadow` 为 `true`、`projection` 为
-`"on"`。这三项是后续所有观察的前置条件；只看“我记得设了”不算数。
+`"on"`，且 `hasSpill` 为 `true`（存在性；若 `degraded` 带 `ERR_HOST_SPILL_UNUSABLE`，服务在但
+不可用，投影会逐条跳过）。这几项是后续所有观察的前置条件；只看“我记得设了”不算数。
 
 > 降级验收要在**宿主实际解析依赖的那棵树**里移除包（这一条适用于宿主树里的包，如 spill 后端；
 > 本包自身已无可移除的 peer，§2.4）。用 `dsh plugin --profile accept` 装进 profile
@@ -266,23 +271,27 @@ tarball 会拉进 `dsh-spill-policy@rc.5` 并 `ERESOLVE`（当时实测 exit 1�
   动态 import，从**宿主树**解析——宿主提供它们，解析不到走降级（§2.1、§2.2）；
 - 与宿主的兼容性由 `engines.dsh`（区间 `>=0.2.2-rc.4 <0.2.3-0`，按宿主自己的 `includePrerelease` 语义）声明；`engines.node` 是
   `>=24.9.0`（对齐宿主 `@deepseek-ai/dsh@0.2.2-rc.4` 的 Node 下限）。加载时若解析到的宿主版本
-  不是这条验证线，插件告警 `ERR_HOST_VERSION_MISMATCH` 但**仍然加载**（advisory：版本不符是风险，
-  不是 API 已改的证明；改名仍可能让插件失效）。
+  **落在区间外**，插件告警 `ERR_HOST_VERSION_MISMATCH` 但**仍然加载**（advisory：版本不符是风险，
+  不是 API 已改的证明；改名仍可能让插件失效）。区间内但不是验证过的 `0.2.2-rc.4`（如 `rc.5` /
+  `0.2.2`）只记 info、不发码——`0.2.2-rc.5` 与本插件触及的九个包逐字节相同。
 
-安装规格：**`dsh-boost@^0.1.2`**。registry 上有四条版本记录，其中一条是占位版本，不要把它当成
+安装规格：**`dsh-boost@^0.1.3`**。registry 上有五条版本记录，其中一条是占位版本，不要把它当成
 “更早的 API”：
 
-- `0.1.2` — 当前 `latest`，npmjs 与 npmmirror 都是它（`npm view dsh-boost dist-tags
-  --registry=https://registry.npmjs.org/` 实测 `latest: 0.1.2`）；含 scope 文件写入的修复（§2.5）；
-- `0.1.1` — 上一版，十项修复；
-- `0.1.0` — 首个可用版本，**缺 0.1.1 的十项修复**，其中数项修的是静默失效；
+- `0.1.3` — 当前 `latest`，npmjs 与 npmmirror 都是它（`npm view dsh-boost dist-tags
+  --registry=https://registry.npmjs.org/` 实测 `latest: 0.1.3`）；替换不再在模型看不到的输出上
+  提交，节省改报上下界区间（新增 `avoided_total_tokens`），新增三个宿主能力降级码与
+  `status.hasSpill`；
+- `0.1.2` — 上一版；含 scope 文件写入的修复（§2.5）；
+- `0.1.1` — 十项修复；
+- `0.1.0` — 首个可用版本，**缺 0.1.1 与 0.1.2 的修复**，其中数项修的是静默失效；
 - `0.0.0-stage` — npm 对**全新包**做 staged publish 时自动创建的公开占位版本（`stub: true`，
   描述是 “Temporary package placeholder for staged publishing”；tarball 只有 `package.json` +
   `README.md`，没有 `dist/`）。它装得上，但 `import 'dsh-boost'` 报 `ERR_MODULE_NOT_FOUND`；
   它低于 `0.1.0`，所以 `^0.1.0` **不会**选中它，`latest` 也不是它。
 
-**写成 `^0.1.2` 而不是 `^0.1.0`**：今天两个源都会把 `^0.1.0` 解析到 0.1.2，但 `^0.1.2` 表达的
-是“至少含 0.1.2 的修复”；镜像在发布后短暂滞后时，`^0.1.2` 会解析失败，而不是悄悄装回旧构建。
+**写成 `^0.1.3` 而不是 `^0.1.0`**：今天两个源都会把 `^0.1.0` 解析到 0.1.3，但 `^0.1.3` 表达的
+是“至少含 0.1.3 的修复”；镜像在发布后短暂滞后时，`^0.1.3` 会解析失败，而不是悄悄装回旧构建。
 在意 registry 时显式传 `--registry=https://registry.npmjs.org/`。
 
 本仓库的 `.npmrc` 与 `package-lock.json` 已钉在 `registry.npmjs.org`（与 `publishConfig` 同一个
@@ -291,7 +300,7 @@ tarball 会拉进 `dsh-spill-policy@rc.5` 并 `ERESOLVE`（当时实测 exit 1�
 
 建议（可选，不属于发布门）：给占位版本加一条弃用说明，让误装的人看到原因——
 `npm deprecate dsh-boost@0.0.0-stage "npm first-publish placeholder" --registry=https://registry.npmjs.org/`。
-它只写该版本的 deprecation 元数据，不改 `latest`、不影响 `^0.1.2` 的解析；本文档只建议，
+它只写该版本的 deprecation 元数据，不改 `latest`、不影响 `^0.1.3` 的解析；本文档只建议，
 不代替发布者执行。
 
 本节取代旧版安装矩阵（rc.4 / rc.5 两侧对照、含一行 `ERESOLVE` 失败）：那张表记录的是 **peer
@@ -324,7 +333,7 @@ for p in $pkgs; do diff -r "$d/0.2.2-rc.4/$p/lib" "$d/0.2.2-rc.5/$p/lib" >/dev/n
 是第三类观察面，不是工具返回值。§2.1、§2.2 是可构造的门的验收细则；本表是操作者看到某个码时的
 速查。收据流里的 `projection-skipped:no-spill` / `projection-skipped:no-footer` 是**输入**，
 分别映射成 `ERR_HOST_NO_SPILL` / `ERR_HOST_NO_SPILL_NOTICE`，本身不是稳定码。本表的代码行号以
-0.1.2 的发布 commit `3ec82f3` 为准；源码继续演进时按函数名/命令名定位（行号可能已移动）。
+0.1.3 的发布 commit `1dd93c6` 为准；源码继续演进时按函数名/命令名定位（行号可能已移动）。
 
 | 码 | 观察面 | 可观察症状 | 操作者动作 |
 |---|---|---|---|
@@ -341,7 +350,7 @@ for p in $pkgs; do diff -r "$d/0.2.2-rc.4/$p/lib" "$d/0.2.2-rc.5/$p/lib" >/dev/n
 | `ERR_HOST_COMPLETE_SECTION` | `status.degraded` | 宿主的 `complete: true` 提示段在装配瀑布之后替换了整个系统提示，协议段没有到达出站请求；受影响请求上替换与投影 fail-closed（会话被判不可见），工作区明明可见插件却不动作 | 找出宿主提示配置里覆盖瀑布装配的 complete 段（通常属于另一个插件）；移除它，或接受这些请求上替换/投影不可用 |
 | `ERR_RECEIPTS_TRUNCATED` | `status.degraded` | 收据分片超过 256 个；`status` 只聚合按名排序的前 256 个，`counts` 与两账因此都是**下界**，不是漏算就是少算——方向安全但数字偏小 | 归档或清理旧分片，重跑 `status`；要全量就分批统计 |
 | `ERR_RECEIPTS_UNREADABLE` | `status.degraded` | 至少一个收据分片读不出来（EACCES、名为 `x.jsonl` 的目录等）；`status` 仍是**全量聚合**——健康分片照常计数——并带该码，数字因此可能不完整 | 检查 `<dshHome>/boost/receipts/`（设了 `config.dshHome` 时以它为准，否则 `$DSH_HOME`）的权限与异常条目，修复后重跑 `status`，对比修复前后计数 |
-| `ERR_SCOPE_UNKNOWN_VERSION` | `status.degraded` + `scope-get` 失败 `code`；`shadow` 对两种都拒绝 | scope 文件版本不是 2。分两种：**v1**（带可识别的旧字段，读出的 code 是它且带 `upgrade`）与**无法识别**（version 缺失或非数值，没有 `upgrade`）。读都按 fail-closed 默认 | **v1**：`scope-set` 是文档化的升级路径，会保留 `mode`/`global`/`workspaceIds` 并写成 v2（`src/scope/store.ts:318-345`、`src/tools/boost.ts` 的 `scopeSetCommand`，`3ec82f3` 的 `:1012-1023`）；`shadow` **拒绝** v1，不做隐式升级（`src/tools/boost.ts` 的 `shadowCommand`，`3ec82f3` 的 `:1033-1042`）。**无法识别**：`scope-set` 与 `shadow` **都拒绝**（`src/scope/store.ts:336-341`），必须自己修文件（补 `"version": 2`）或把它移走后重设——插件不会替你覆盖 |
+| `ERR_SCOPE_UNKNOWN_VERSION` | `status.degraded` + `scope-get` 失败 `code`；`shadow` 对两种都拒绝 | scope 文件版本不是 2。分两种：**v1**（带可识别的旧字段，读出的 code 是它且带 `upgrade`）与**无法识别**（version 缺失或非数值，没有 `upgrade`）。读都按 fail-closed 默认 | **v1**：`scope-set` 是文档化的升级路径，会保留 `mode`/`global`/`workspaceIds` 并写成 v2（`src/scope/store.ts:323-345`、`src/tools/boost.ts` 的 `scopeSetCommand`，`1dd93c6` 的 `:1139-1149`）；`shadow` **拒绝** v1，不做隐式升级（`src/tools/boost.ts` 的 `shadowCommand`，`1dd93c6` 的 `:1160-1169`）。**无法识别**：`scope-set` 与 `shadow` **都拒绝**（`src/scope/store.ts:336-341`），必须自己修文件（补 `"version": 2`）或把它移走后重设——插件不会替你覆盖 |
 | `ERR_SCOPE_FUTURE_VERSION` | `status.degraded` + `scope-get` 失败 `code` | scope 文件版本比本插件认识的新；只读 | 升级插件；不要用旧版本覆盖 |
 | `ERR_SCOPE_PARSE_FAILED` | `status.degraded` + `scope-get` 失败 `code` | scope 文件不是合法 scope 文档（坏 JSON、非对象、数组）。读按默认；**写一律拒绝**，`scope-set` / `shadow` 不会覆盖它——文件原样留在盘上 | 修文件或删除后重设。**插件不会替你覆盖**，所以「保留现场」是默认结果，不是需要你额外做的事 |
 | `ERR_SCOPE_READ_FAILED` | `status.degraded` + `scope-get` 失败 `code` | scope 文件存在但**读或写**失败：读它、`writeAtomic` 落盘、或 `ensureDirectory` 建目录任一步出错（权限、磁盘满、IO、目录被占）；fail-closed 默认 | 查文件与目录权限、剩余磁盘空间与异常条目；修好后重试 |

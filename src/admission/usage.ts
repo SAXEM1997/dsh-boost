@@ -161,6 +161,8 @@ export class UsageLedger {
 
     if (after === undefined || !usable(after)) {
       return {
+        // No after-sample means no ceiling; the floor stands alone and the
+        // status sum ignores it unless a ceiling exists for the same receipt.
         saved_input_tokens: 'unknown',
         avoided_total_tokens: avoidedTotal,
         cache_hit_delta: null,
@@ -172,9 +174,18 @@ export class UsageLedger {
     const beforeRate = hitRate(before)
     const delta = afterRate !== null && beforeRate !== null ? afterRate - beforeRate : null
 
+    // The two figures bound different quantities (the skipped step's total vs
+    // the next request's input), so a context that *shrank* between the samples
+    // — a compaction, a rebuilt request, an adapter that does not replay the
+    // whole turn — can push the lower above the upper. A range whose floor is
+    // above its ceiling is not a range: drop the floor rather than print it
+    // (review cod#1).
+    const upper = after.input + after.cacheRead
+    const bounded = avoidedTotal === 'unknown' || avoidedTotal <= upper ? avoidedTotal : ('unknown' as const)
+
     return {
-      saved_input_tokens: after.input + after.cacheRead,
-      avoided_total_tokens: avoidedTotal,
+      saved_input_tokens: upper,
+      avoided_total_tokens: bounded,
       cache_hit_delta: delta !== null && Number.isFinite(delta) ? delta : null,
       output_tokens: after.output,
     }

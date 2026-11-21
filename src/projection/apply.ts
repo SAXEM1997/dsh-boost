@@ -142,7 +142,17 @@ function omissionNote(omittedBytes: number): string {
  * locator text is not known before that write, this is a lower bound.
  */
 function projectedText(truncation: Truncation): string {
-  return `${renderHeadLine(truncation)}\n${truncation.head}\n${omissionNote(truncation.omittedBytes)}\n${truncation.tail}`
+  return `${renderHeadLine(truncation)}\n${truncation.head}\n${omissionNote(truncation.omittedBytes)}\n${truncation.tail}${signalSuffix(truncation)}`
+}
+
+/**
+ * The marker lines `truncate` rescued from the cut-away middle, appended after
+ * the tail so the model still sees an exit code or error flag that would
+ * otherwise be lost (design §5.4-4). Empty for the overwhelming majority.
+ */
+function signalSuffix(truncation: Truncation): string {
+  const signals = truncation.signals ?? []
+  return signals.length === 0 ? '' : `\n${signals.join('\n')}`
 }
 
 /** Price the original and the replacement together, so the pair always agrees. */
@@ -271,7 +281,7 @@ export async function projectApply(
     phase = 'footer'
 
     const footer = formatFooter({ kind: 'exact', count: truncation.omittedBytes }, ref)
-    const assembled = `${renderHeadLine(truncation)}\n${truncation.head}\n${footer}\n${truncation.tail}`
+    const assembled = `${renderHeadLine(truncation)}\n${truncation.head}\n${footer}\n${truncation.tail}${signalSuffix(truncation)}`
 
     // The footer is only known after the write, so this check can only run now.
     // The backend exposes no delete: a spill that reaches this point stays in

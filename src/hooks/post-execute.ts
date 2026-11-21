@@ -527,12 +527,8 @@ function pendingAnchorsOf(deps: HookDeps, sessionId: string): ReceiptAnchors | u
  * (`llm/stream`, 23c), where the compared text is the anchored receipt's current
  * body in the outgoing messages.
  */
-function markerResetOf(
-  pending: ReceiptAnchors,
-  receiptText: string,
-): 'pruned-reset' | undefined {
+function markerResetOf(receiptText: string): 'pruned-reset' | undefined {
   try {
-    if (pending == null) return undefined
     return looksPruned(receiptText) ? 'pruned-reset' : undefined
   } catch {
     return undefined
@@ -2115,6 +2111,13 @@ async function projectDecision(
             before,
             after,
             saved_projection_tokens: before - after,
+            // How much the projection cut, in the units the footer names. Without
+            // it a reader of the ledger cannot tell a 2 KB cut from a 200 KB one
+            // (review cod#3: these fields had no consumer).
+            ...(outcome.omittedBytes === undefined ? {} : { omitted_bytes: outcome.omittedBytes }),
+            ...(outcome.omittedCodePoints === undefined
+              ? {}
+              : { omitted_code_points: outcome.omittedCodePoints }),
             estimate: deps.estimateKind ?? 'unknown',
           }),
         )
@@ -2125,6 +2128,10 @@ async function projectDecision(
             unit: 'raw',
             horizon_steps: projectionHorizonOf(deps, ctx.sessionId),
             ...(ctx.retrievalCall === true ? { call_was_retrieval: true } : {}),
+            ...(outcome.omittedBytes === undefined ? {} : { omitted_bytes: outcome.omittedBytes }),
+            ...(outcome.omittedCodePoints === undefined
+              ? {}
+              : { omitted_code_points: outcome.omittedCodePoints }),
             estimate: 'unknown',
           }),
         )
@@ -2390,7 +2397,7 @@ async function postExecute(
     // `!= null` rather than `!== undefined`: a foreign store can hand back a
     // null, and dereferencing it would throw out of the hook.
     if (pending != null) {
-      const reset = markerResetOf(pending, receipt.text)
+      const reset = markerResetOf(receipt.text)
       if (reset !== undefined) {
         await resetInvalidatedPending(deps, exec, sessionId, turn, pending, reset)
         if (retrieval !== undefined) {

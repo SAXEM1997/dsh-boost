@@ -5,13 +5,14 @@ read-only substitution**.
 
 > **Status: v1 is implemented.** Projection, substitution, and the control surface are all in
 > place; `npm run build` is clean and the full test suite passes. The benefit range is an
-> **ex-ante design estimate** (3.5% lower bound / 10.0% ideal upper bound; ~0.4% honest net
-> floor); nothing in the deliverable can recompute it — see below.
+> **ex-ante design estimate** (3.5% lower bound / 10.0% ideal upper bound; ~0.4% aggregate net
+> on the 300 longest sessions). Both ends are offline estimates, not per-session floors, and
+> nothing in the deliverable can recompute them — see below.
 
 ## What it does
 
 DSH replays the whole history on every model request. Across the 300 longest sessions measured
-locally (`npm run --silent stats` — without `--silent`, npm prints its `> dsh-boost@0.1.2 stats`
+locally (`npm run --silent stats` — without `--silent`, npm prints its `> dsh-boost@0.1.3 stats`
 banner to stdout, so use `--silent` or `node scripts/session-stats.mjs` for machine-readable
 output; snapshot at `2026-11-19T03:13:21Z`): 54,141 steps and 54,088 requests,
 10,575,904,022 raw tokens in total. The mean is 195,340 tokens per step and 195,531 per request
@@ -29,8 +30,9 @@ The plugin does two things:
    decision. With several candidates, a single-label selector — one auxiliary request
    (`maxTokens` 512 plus its input) — picks one. This is a **narrowing** of original requirement
    2.2: the request asked Jev to score each tool result and decide whether it could feed the next
-   tool; v1 only picks one of several candidates on the same receipt, with no per-result scoring
-   (see the 2.2 row and decision 9 in the
+   tool; v1 only picks one of several candidates on the same receipt, with no per-result scoring.
+   That narrowing is the **implementer's scope decision (E2)**, not a user ruling — **no user
+   message ratifies it** (see the 2.2 row and implementer decision E2 in the
    [clarification record](docs/superpowers/clarifications/2026-11-18-dsh-token-efficiency.md)).
    For the three substituted tools, the plan's
    `$public` argument binding (copying a value from an earlier receipt into a later call's
@@ -48,8 +50,11 @@ The plugin does two things:
 The **ex-ante estimate** for v1 is **3.5% (lower bound) to 10.0% (ideal upper bound)** of raw
 `totalTokens`; **3.5% is not a floor** — it is the lower bound of an offline estimate against a
 300-session corpus, and its substitution component (2.70%) is a **ceiling** that must not be
-counted as a floor. The honest net floor is about **0.4%** (projection gross ~0.8% minus ~0.4%
-fixed per-request overhead). It is not a guarantee, and not a figure the shipped
+counted as any floor. Projection's **aggregate net across the 300 longest sessions** is about
+**0.4%** (gross ~0.8% minus ~0.4% fixed per-request overhead, i.e. 778 / 195,531); that is not a
+per-session floor either — long sessions amortise the fixed overhead, **short sessions can be
+net negative**, and the `top-300` corpus contains no ≤5-step session. Both 3.5% and 0.4% are
+offline estimates, not measurements. It is not a guarantee, and not a figure the shipped
 `session-snapshot.json` can recompute: the snapshot stores per-session aggregates plus each
 session's `requestTokens` / `receiptChars` arrays, `valueTransfer` / `whitelist` counts, and
 its per-family `toolChars` totals, but it has **no per-receipt family bytes** — the projection
@@ -80,29 +85,32 @@ denominator statistic that a later version must add.
 directory:
 
 ```bash
-# install from the registry: npmjs has latest = 0.1.2 (this repository's
+# install from the registry: npmjs has latest = 0.1.3 (this repository's
 # .npmrc and lockfile are pinned to npmjs too — see below)
-dsh plugin --profile <name> add dsh-boost@^0.1.2 --registry=https://registry.npmjs.org/
+dsh plugin --profile <name> add dsh-boost@^0.1.3 --registry=https://registry.npmjs.org/
 
 # or from a local checkout (build first; dist/ is not committed)
 npm run build
 dsh plugin --profile <name> add /absolute/path/to/dsh-boost
 ```
 
-For the web profile: `dsh plugin --profile web add dsh-boost@^0.1.2 --registry=https://registry.npmjs.org/`.
+For the web profile: `dsh plugin --profile web add dsh-boost@^0.1.3 --registry=https://registry.npmjs.org/`.
 `dsh plugin` forwards the operation to pnpm, so pnpm must be on `PATH`.
 
-> **Both registries now carry 0.1.2, so `^0.1.2` is a safe pin.**
-> `registry.npmjs.org` and `registry.npmmirror.com` each have four version records: `0.1.2` (the
-> current `latest` on both), `0.1.1`, `0.1.0`, and `0.0.0-stage`, the placeholder npm creates on a
-> package's first publish — **do not install `0.0.0-stage`**; it is not a usable build. 0.1.2
-> carries the scope-overwrite fix: corrupt JSON (including a non-object or an array) and an
-> unrecognizable version are no longer silently overwritten with the default document. Use
-> `dsh-boost@^0.1.2` (or `@latest`). This repository's `.npmrc` and lockfile are pinned to npmjs,
-> but **your machine's global npm config** may still point at a mirror that has not synced 0.1.2:
-> that is local configuration, not this repository's state. Pass
-> `--registry=https://registry.npmjs.org/` explicitly when the registry matters; against a lagging
-> mirror, `@^0.1.2` fails to resolve until the sync lands.
+> **Both registries now carry 0.1.3, so `^0.1.3` is a safe pin.**
+> `registry.npmjs.org` and `registry.npmmirror.com` each have five version records: `0.1.3` (the
+> current `latest` on both), `0.1.2`, `0.1.1`, `0.1.0`, and `0.0.0-stage`, the placeholder npm
+> creates on a package's first publish — **do not install `0.0.0-stage`**; it is not a usable
+> build. 0.1.3 stops a substitution from committing on output the model cannot see (an outer
+> shaper rewrote the content) and reports the saving as a range (adding `avoided_total_tokens`),
+> plus three host-capability degradation codes and `status.hasSpill`; 0.1.2 carries the
+> scope-overwrite fix: corrupt JSON (including a non-object or an array) and an unrecognizable
+> version are no longer silently overwritten with the default document. Use `dsh-boost@^0.1.3`
+> (or `@latest`) — `^0.1.3` means "at least 0.1.3's fixes". This repository's `.npmrc` and
+> lockfile are pinned to npmjs, but **your machine's global npm config** may still point at a
+> mirror that has not synced 0.1.3: that is local configuration, not this repository's state.
+> Pass `--registry=https://registry.npmjs.org/` explicitly when the registry matters; against a
+> lagging mirror, `@^0.1.3` fails to resolve until the sync lands.
 
 The package is ESM (`"type": "module"`) and the `.` entry of `exports` also maps `require` /
 `default`: on Node >= 24.9, `require('dsh-boost')` loads the very same code as `import`. Nothing
@@ -186,6 +194,10 @@ After the write, call `status` again. A healthy result looks like this:
   `@deepseek-ai/dsh-token-meter/estimate` is unreachable, `fixedOverheadTokens` is the string
   `"unknown"` (not 0) and `degraded` carries `ERR_HOST_NO_ESTIMATOR`; `estimate_kind` may still be
   `"host"` because the token-meter service is present — the two are different things.
+- `data.hasSpill` is `true` when the host **provides** a spill service (presence). It does **not**
+  mean the service is usable: a service without `saveText` keeps it `true` while `degraded` carries
+  `ERR_HOST_SPILL_UNUSABLE`. Check both before turning `projection: 'on'`; `hasSpill` alone can
+  mistake an unusable backend for a working one.
 - `data.counts` usually starts empty — but **control calls count too**: while no workspace is
   visible, `boost`'s own calls pass the same post-execute scope gate (there is no boost exemption
   there; the exemption lives at tool registration), each recording one `skip:no-scope` — except PTC inner calls (`exec.parent` set) and cancelled calls, which return before the scope gate and record nothing. It grows
@@ -234,21 +246,28 @@ recommended setup; a multi-candidate plan still makes a **real selector call** (
 auxiliary model request). The shadow week saves no tokens; it produces only the four ratios below.
 Under `selected + []` the protocol section is empty and the fixed cost is still **399**.
 
-Of those ratios, `saveableRatio`, `byFamily`, and `candidateRecall` can decide **whether the
-substitution side is worth turning on**: how many substitution decisions the whitelist could
-actually deliver, which tool families the hits land in, and how high candidate recall is — that
-is, whether substitution would fire at all and where. They **cannot decide release**: v1 ships as
-a normal release and does not gate on shadow-week savings — and that call was the
-**implementer's** decision during design, not a user ruling. The user accepted a one-week shadow
-period; they did not rule on whether shadow results should gate a release. They also **cannot measure savings**: the report has no total-token denominator, and
-`retrievalUpperBound` is structurally `0` during the shadow week (it only counts applied
-`projection:'on'` retrievals), so it cannot even bound projection's retrieval damage. Projection
-is released on the visibility contract alone (the original stays retrievable through the footer),
-not on shadow labels — and **not on post-hoc detection**: v1 has no mis-truncation detector.
-`src/admission/retrieval.ts` only counts exact-locator retrievals, and design §6.1 itself records
-that the damage metric was never delivered and that retrieval counts are not a damage bound. The
-only guard is that the model can retrieve the original; a retrieval being attempted is a signal,
-not proof that nothing was wrongly cut.
+Of those ratios, `saveableRatio`, `byFamily`, and `candidateRecall` are **labels for the
+substitution side; they do not by themselves decide whether to turn it on**: how many substitution
+decisions the whitelist could actually deliver, which tool families the hits land in, and how high
+the commit yield is — that is, whether substitution would fire at all and where. The report has
+**no total-token denominator**, so these labels cannot judge net benefit. They **cannot decide
+release** either: v1 ships as a normal release and does not gate on shadow-week savings — and that
+call was the **implementer's** decision during design, not a user ruling. The user accepted a
+one-week shadow period; they did not rule on whether shadow results should gate a release. They
+also **cannot measure savings**: `retrievalUpperBound` is structurally `0` during the shadow week
+(it only counts applied `projection:'on'` retrievals), so it cannot even bound projection's
+retrieval damage. Projection is released on the visibility contract alone (the original stays
+retrievable through the footer), not on shadow labels — and **not on post-hoc detection**: v1 has
+no mis-truncation detector. `src/admission/retrieval.ts` only counts exact-locator retrievals, and
+design §6.1 itself records that the damage metric was never delivered and that retrieval counts
+are not a damage bound. The only guard is that the model can retrieve the original; a retrieval
+being attempted is a signal, not proof that nothing was wrongly cut.
+
+**An all-zero week cannot distinguish two things.** If the model never writes `<CHISEL_PLAN>`,
+there are no decision receipts at all and all four ratios are `0`; that looks exactly like
+"nothing saveable" — the report does not measure plan emission. When you see all zeros, first
+check whether the receipts contain substitution decisions (`kind:'shadow'` / `kind:'skip'`); do
+not read it directly as "the plugin has no effect".
 `scope.json` has two independent switches:
 
 | Switch | Value | Behaviour |
@@ -272,12 +291,17 @@ The recommended sequence:
    shadow commits over **all** substitution decisions — the denominator is every substitution
    decision, not just the whitelisted calls; shadow mode records every family, so bash/ssh
    potential shows up in `byFamily`), `byFamily` (hit rate per candidate family), `candidateRecall`
-   (recall of the candidate set), and `retrievalUpperBound` (retrieval upper bound; structurally
-   `0` during the shadow week because nothing is projected for real).
+   (**commit yield, not candidate-set recall**: `commits / (commits + no-candidate)`; the script
+   never compares the candidate set to the model's actual next call, so it answers "how many
+   decisions with a candidate committed", not "did the candidate set miss the call the model
+   actually made"), and `retrievalUpperBound` (**a lower bound on the observed retrieval rate, not
+   an upper bound on retrieval damage**; structurally `0` during the shadow week because nothing
+   is projected for real).
 3. **Turn on projection**: projection is not released on shadow labels (its basis is the
    visibility contract — the original stays retrievable through the footer; v1 has no
-   mis-truncation detector); once the host spill backend is available, keep
-   `shadow: true` and set `projection` to `'on'`:
+   mis-truncation detector). First confirm `status.data.hasSpill` is `true` **and** `degraded`
+   does not carry `ERR_HOST_SPILL_UNUSABLE` — the former only proves the host **provides** the
+   service, the latter says it is usable; then keep `shadow: true` and set `projection` to `'on'`:
 
    ```json
    { "cmd": "scope-set", "body": { "projection": "on" }, "baseRevision": 1 }
@@ -285,8 +309,8 @@ The recommended sequence:
 
    `scope-set` patches only the fields you pass; everything else stays as it was. Receipts now get
    replaced, while substitution decisions are still recorded only.
-4. **Turn on substitution**: when the shadow report shows acceptable whitelist hits and candidate
-   recall, just switch the shadow off — **checking before the switch is a no-op**: the shadow
+4. **Turn on substitution**: when the shadow report shows acceptable whitelist hits and commit
+   yield, just switch the shadow off — **checking before the switch is a no-op**: the shadow
    week never synthesizes a turn, so a `content[].thinking` 400 is
    structurally impossible and a check made before switching it off can only ever read "not
    seen". After `shadow` becomes `false`, check for that 400 in the **first genuinely
@@ -321,7 +345,7 @@ cap is 256 KiB, so `300000` prevents the family from triggering at all (there is
 | `projection.glob.*` | 700 / 400 / 100 | `glob` window |
 | `projection.bash.*` | 4000 / 2000 / 500 | `bash` window |
 | `projection.ssh.*` | 2000 / 1200 / 300 | `mcp__ssh__*` (such as `mcp__ssh__execute-command`) window |
-| `admission.thresholdTokens` | 1024 | Minimum net saving per candidate before substitution; a single deterministic candidate is exempt |
+| `admission.thresholdTokens` | 1024 | Minimum net saving per candidate before substitution; **a single-step plan is exempt** (`plan.steps.length === 1`, `src/hooks/post-execute.ts:1052`) — with one step there is no selector to pay, so the threshold does not apply. It is not "deterministic && the only candidate": a multi-step plan that has one candidate left still has to pass the threshold (`src/admission/ledger.ts:150`) |
 | `selector.maxTokens` | 512 | Output budget for the multi-candidate selector (its input plus output bound is deducted from the saving) |
 | `stepsPerTurn` | 8 | Maximum substituted steps per turn |
 | `horizonSteps` | 20 | Remaining-step horizon used when the session average cannot be computed |
@@ -334,7 +358,8 @@ The invariant is **not** `triggerChars >= headChars + tailChars + 1`. The real r
 line + head + footer + tail + 3 newlines; the footer is produced by the host's `formatSpillNotice`.
 With a 68-character locator and the host's fixed 66-character retrieval hint, a 3-digit
 omitted-byte count gives 190 characters and a 5-digit count gives 192. With the grep/glob defaults
-of 400+100: `400 + 100 + 50 (head line) + 190 (footer) + 3 = 743 > 700` (745 with a 5-digit count).
+of 400+100: `400 + 100 + 50 (head line) + 190 (footer) + 3 = 743 > 700` (with a 5-digit count the
+footer is 192 and the head line's numbers each gain a digit, measured 747–749).
 So a receipt just over 700 — up to about 743 — is judged cuttable by `truncate`, but `projectApply` assembles a replacement that is
 not shorter than the original and returns the original. That is a dead band, not a net loss. The
 runtime `assembled.length >= text.length` check guarantees projection never makes a receipt
@@ -397,12 +422,14 @@ set it falls back to `~/.dsh`; the assembly log prints the resolved `root=` (tha
 - `scope.lock` — the short-lived write lock, removed after a normal write.
 - `receipts/<encoded-session>.jsonl` — append-only receipts. **A receipt is written per
   decision, not per call**: a line appears only for a projection, a substitution decision
-  (including skips), or an out-of-scope `skip:no-scope`. A `write` / `edit` with no plan produces
-  **no receipt at all**, so its arguments are never recorded. Every line carries metadata, a
-  preview of the first 256 code points of the receipt (never the full stdout), and that call's
-  bound `args` (model-written: above 2048 code points they are stored as visibly truncated JSON
-  with an `args_truncated` flag; nesting deeper than 64 levels sets `args_depth_truncated` and
-  replaces the deeper subtree with `{ "truncated_depth": 64 }`). **Only substitution receipts**
+  (including skips), a pending substitution abandoned after an external rewrite (`kind:'reset'`,
+  `code` `pruned-reset` / `compaction-reset`), or an out-of-scope `skip:no-scope`. A `write` /
+  `edit` with no plan produces **no receipt at all**, so its arguments are never recorded. Except
+  for `kind:'reset'` and the early `skip:no-scope`, every line carries metadata, a preview of the
+  first 256 code points of the receipt (never the full stdout), and that call's bound `args`
+  (model-written: above 2048 code points they are stored as visibly truncated JSON with an
+  `args_truncated` flag; nesting deeper than 64 levels sets `args_depth_truncated` and replaces
+  the deeper subtree with `{ "truncated_depth": 64 }`). **Only substitution receipts**
   also carry the plan goal (≤256 code points) and guards (≤8, each ≤300 code points):
   `kind:'substitute'`, `kind:'substitute-settled'`, and `kind:'shadow'` with `code:'ok'`.
   `kind:'shadow'` is not substitution-only — projection shadowing also writes `kind:'shadow'`,
@@ -414,7 +441,9 @@ set it falls back to `~/.dsh`; the assembly log prints the resolved `root=` (tha
   carry `locator` plus `retrieval_call_tokens` / `retrieval_content_tokens` / `retrieval_tokens`;
   those three are written only when the retrieval was priced, and an unpriced one has
   `estimate:'unknown'` with the fields omitted. `skip` receipts carry only `preview` and `args`
-  (`skip:no-scope` carries neither — just the tool name).
+  (`skip:no-scope` has two paths: the early no-agent / no-session-id branch carries only the tool
+  name; the mid-call live-visibility branch goes through `ledgerEntry` and still carries `preview`
+  and `args`).
 
   When the current shard exceeds 8 MiB or 20,000 lines, the next write first rotates it to
   `<encoded-session>.1.jsonl`; only the current shard and its predecessor are kept (an older `.1`
@@ -515,7 +544,7 @@ to load. `llm` is soft (only the selector uses it); when absent the selector fal
 | (spill backend present but failing) | — | Every `saveText` is rejected: the receipt records `projection-skipped:spill-failed` and `status.degraded` reports **`ERR_HOST_SPILL_FAILING`**. This is a **third** state — neither "no backend" nor "no footer renderer" — and telling an operator to restore the spill package would send them after a package that is installed and failing |
 | `@deepseek-ai/dsh-token-meter/estimate` | soft (dynamic import) | Fixed overhead cannot be measured, so `fixedOverheadTokens` is `'unknown'`; `status.degraded` reports `ERR_HOST_NO_ESTIMATOR` |
 | `win32` platform | runtime `isPosixOnly()` check | Substitution is refused, projection still works; `status.degraded` reports `ERR_HOST_PLATFORM_UNSUPPORTED` |
-| Host version line | startup check of the `@deepseek-ai/dsh-app-boot` version | A version other than `0.2.2-rc.4` logs `ERR_HOST_VERSION_MISMATCH` and loads anyway — advisory only, not a `status.degraded` code. An undeterminable version logs an info line, no code |
+| Host version line | startup check of the `@deepseek-ai/dsh-app-boot` version | A version **outside the `engines.dsh` range** (`>=0.2.2-rc.4 <0.2.3-0`) logs `ERR_HOST_VERSION_MISMATCH` and loads anyway — advisory only, not a `status.degraded` code. A version inside the range but not the verified `0.2.2-rc.4` (such as `rc.5` / `0.2.2`) logs an info line, no code; an undeterminable version or an unparseable range also logs info only |
 | Receipt shard readability | `boost status` full scan (not a dependency) | When at least one receipt shard cannot be read (EACCES, a directory named `x.jsonl`, …), `status.degraded` carries `ERR_RECEIPTS_UNREADABLE`; `status` stays a **total over the healthy shards** — they are still counted — so the figures may be incomplete. Check permissions and stray entries in `<dshHome>/boost/receipts/`, fix, and re-run `status`, comparing counts |
 | Receipt shard count | `boost status` full scan (not a dependency) | When more than 256 shards exist, `status` counts only the first 256 by encoded name and `status.degraded` carries `ERR_RECEIPTS_TRUNCATED`; every count is therefore a **lower bound**. Shards are never pruned automatically; archive or move old session shards and re-run `status` |
 | Prompt assembly waterfall | outgoing-request probe (not a dependency) | When the host's `complete: true` prompt section replaces the assembled system prompt after the waterfall and the protocol section never reaches the request, `status.degraded` carries `ERR_HOST_COMPLETE_SECTION`; substitution and projection fail closed for the affected requests (the plugin stays inert although the workspace is visible). Find the complete section overriding the waterfall (usually another plugin's) and remove it, or accept the inaction on those requests |
@@ -554,16 +583,33 @@ evidence" degraded path would be unreachable.
 
 - Only two things: **replace tool receipts in place** and **substitute read-only calls** (`read` /
   `grep` / `glob`).
-- **No batched tool execution** (no PTC / `run_code`): this is not a boundary v1 chose for
-  itself but the **narrowed** form of original requirement 2.1 — the request asked for several
-  tool calls at once, and the adjudication excluded it explicitly for a later phase (see the
-  2.1 row and decision 9 in the
+- **No batched tool execution** (no PTC / `run_code`): this is a **narrowing** of original
+  requirement 2.1 and the **implementer's scope decision (E2)**, not a user ruling — **no user
+  message ratifies it**. The reason is scope, not "batch dispatch was shown to be worthless":
+  79.8% of steps carry exactly one tool call, but **20.2% are not single-tool steps** — 16.9% carry
+  ≥2 calls and 3.3% carry none (`clarifications:17`). The user explicitly asked for batch dispatch,
+  and those non-single steps are its surface. PTC is deferred to phase two; the restart condition
+  is shadow-week data on the real share and benefit of batched steps, not "79.8% proves batching is
+  unnecessary" (see the 2.1 row and E2 in the
   [clarification record](docs/superpowers/clarifications/2026-11-18-dsh-token-efficiency.md);
   design N1).
+- **Does not answer "who decides tool-call ordering"**: original requirement 2.3 asked for
+  research on how a composed tool sequence is ordered (does Jev decide, or does the model fix the
+  order up front), and v1 **did not deliver that research** — it is an open gap, **not covered by
+  the PTC deferral**. v1's implementation has the model decide the next call step by step; Jev only
+  picks one of the declared candidates and cannot add steps or reorder them. The research's
+  ReWOO / LLMCompiler evidence for "declare the whole plan, then stop asking the model between
+  steps" was never applied to ordering authority, and no comparison experiment exists
+  (`clarifications:19`, design §9).
 - **No deduplication or merging of tool calls** (design N5) — this was not started at all, and
   v1 ships **no tool that measures duplicate-call rate**: the "shadow-week duplication
   statistic" the design reserved as its restart trigger was never delivered; `shadow-report.mjs`
   does not produce it.
+- **Only four HarnessMM pieces were ported**: the flat candidate bank, the GDR guard, CCS
+  single-candidate commit, and the closed-set selector (Jev). **EDG's graph/chain
+  (`predecessor_id`) was not ported** — this plugin's plan is a flat, one-shot-per-receipt
+  candidate list, and `predecessor_id` appears nowhere in `src/`; **the RSI loop was not ported**
+  either — v1 is a fixed-policy plugin with no training/selection lifecycle (`clarifications:16`).
 - **The shadow week saves no tokens**: it only records (the protocol section is still injected
   and the selector is still called), and the recommended setup still costs 778 per request
   (`selected + []` costs 399); its output is four ratios, not saved tokens.
@@ -586,11 +632,12 @@ evidence" degraded path would be unreachable.
   projection changes only the model-visible content and keeps the original in the host spill.
 - No model training or weight changes (N2); no attempt at the paper's 87.93% (N4).
 - No 10% promise: 3.5% is the **lower bound** of the ex-ante estimate, not a floor; 10% is the
-  ideal upper bound. The honest net floor is about 0.4% (projection gross ~0.8% minus ~0.4%
-  fixed per-request overhead). The shadow week only answers whether the substitution side is
-  worth turning on (candidate coverage and hit rate); it does not decide release, and it cannot
-  replace the range with a measurement (`shadow-report.mjs` emits four ratios and no total-token
-  denominator).
+  ideal upper bound. Projection's aggregate net across the 300 longest sessions is about 0.4%
+  (gross ~0.8% minus ~0.4% fixed per-request overhead); that too is an offline estimate, **not a
+  per-session floor** (short sessions can be net negative). The shadow week only gives labels for
+  the substitution side (candidate coverage and commit yield); it does not by itself decide
+  whether to turn substitution on, does not decide release, and cannot replace the range with a
+  measurement (`shadow-report.mjs` emits four ratios and no total-token denominator).
 
 ## Documentation
 
@@ -613,4 +660,6 @@ The source and docs live in the repository at
 ## License
 
 Apache-2.0. The mechanisms are ported from [HarnessMM](https://github.com/YuhuaJiang2002/HarnessMM)
-(Apache-2.0); a `NOTICE` ships with the package.
+(Apache-2.0): the flat candidate bank, GDR guard, CCS single-candidate commit, and the closed-set
+selector. **EDG's graph/chain (`predecessor_id`) and the RSI loop were not ported.** A `NOTICE`
+ships with the package.
