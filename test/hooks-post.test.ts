@@ -12,6 +12,7 @@ import { fakeHost } from './fakes/host.ts'
 import { AnchorStore, PRUNE_MARKER } from '../src/gate/invalidate.ts'
 import { PendingQueue, callIdFor } from '../src/hooks/pending.ts'
 import { registerHooks, SUBSTITUTION_WHITELIST } from '../src/hooks/post-execute.ts'
+import { rejectIfTampered } from '../src/hooks/execute.ts'
 import type { HookDeps } from '../src/hooks/post-execute.ts'
 import { StepBudget } from '../src/admission/ledger.ts'
 import { RetrievalLedger } from '../src/admission/retrieval.ts'
@@ -1954,4 +1955,26 @@ test('row 36: an aborted exec.signal returns before projection', async () => {
   assert.equal(env.host.nextCalls, 1, 'the waterfall must still have run once')
   assert.equal(saves, 0, 'a cancelled call must not pay the spill write')
   assert.equal(env.receipts.length, 0, 'a cancelled call must not write projection receipts')
+})
+
+test('cod#2 a plan arg of -0 or a non-finite number still dispatches', async () => {
+  // `JSON.stringify` turns `-0` into `0` and `Infinity` into `null`, so the host
+  // hands back a tree that differs from the plan's. Normalising the pending args
+  // through the same round trip keeps `sameLiteral` from calling it tampering,
+  // which would spend the synthesised turn and run nothing.
+  for (const odd of [-0, Number.POSITIVE_INFINITY]) {
+    const args = { file_path: '/x', n: odd }
+    const env = setup()
+    env.plans.set(SESSION, { goal: 'g', steps: [candidate('A', 'TRIGGER', args)] })
+    env.clock.onModelRequest(2, 7)
+
+    await runPost(env.host, 'TRIGGER here')
+
+    const entry = env.queue.peek(SESSION)
+    assert.ok(entry, 'a non-shadow commit must enqueue')
+    // Exactly what the host will hand back after the synthesised turn is parsed.
+    const arrived = JSON.parse(JSON.stringify(entry.args)) as Record<string, unknown>
+    const verdict = rejectIfTampered({ name: entry.name, arguments: arrived }, entry)
+    assert.equal(verdict.reject, false, `n=${String(odd)} must not read as tampering`)
+  }
 })

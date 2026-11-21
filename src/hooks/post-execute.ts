@@ -1551,6 +1551,28 @@ function admissionViewOf(exec: PostExecuteExec | undefined): ((tool: string) => 
 }
 
 /**
+ * The args as they will arrive from the host.
+ *
+ * `JSON.stringify` collapses `-0` to `0` and rewrites non-finite numbers to
+ * `null`, so a pending tree that skipped this round trip would disagree with
+ * its own dispatched call: `sameLiteral` would report tampering and the planned
+ * call would never run (review cod#2).
+ */
+function jsonNormalise(args: Record<string, unknown>): Record<string, unknown> {
+  try {
+    const text = JSON.stringify(args)
+    if (text === undefined) return args
+    const parsed: unknown = JSON.parse(text)
+    if (parsed !== null && typeof parsed === 'object' && !Array.isArray(parsed)) {
+      return parsed as Record<string, unknown>
+    }
+    return args
+  } catch {
+    return args
+  }
+}
+
+/**
  * The substitution decision and its side effects.
  *
  * The fixed order is the plan's: existence of a plan and a receipt first, then
@@ -1796,13 +1818,19 @@ async function decideSubstitution(
   }
 
   const callId = callIdFor(ctx.sessionId, ctx.turn, step, candidateId)
-  const entry: AuditedPendingEntry = {
+const entry: AuditedPendingEntry = {
     callId,
     candidateId,
     // The candidate's tool name identifies the call; the executable args are
     // the *decision's* bound tree, never the plan's `$public` template.
+    //
+    // Normalised through a JSON round trip so the pending tree is byte-for-byte
+    // what the host will hand back. `JSON.stringify` rewrites `-0` to `0` and
+    // `Infinity`/`NaN` to `null`; without this, a legal plan arg of `-0` would
+    // arrive as `0` and `sameLiteral` would report tampering, so the planned
+    // call would never run (review cod#2).
     name: candidate.tool,
-    args: boundArgs,
+    args: jsonNormalise(boundArgs),
     turn: ctx.turn,
     step,
     // The plan is one-shot (cleared above), so the evidence must travel with
