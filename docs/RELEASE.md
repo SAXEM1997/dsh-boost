@@ -359,10 +359,12 @@ for p in $pkgs; do diff -r "$d/0.2.2-rc.4/$p/lib" "$d/0.2.2-rc.5/$p/lib" >/dev/n
 | `ERR_BOOST_TOOL_REGISTER_FAILED` | 加载日志警告 | `boost` 工具注册失败；用户失去控制面 | 查宿主 `tools` 服务与日志；修好后重启 |
 | `ERR_SCOPE_LOCK_TAKEOVER` | 日志警告（**不是**工具失败 `code`） | 锁龄超过 10 分钟，插件按接管处理（即使 pid 仍活）；只记录，不影响本次写入结果 | 无需处置；作为崩溃写者/pid 复用的证据保留 |
 
-#### 收据 `code`：跳过与重置（不进 `degraded`）
+#### 收据 `code`：跳过与重置
 
-这些码写在收据的 `code` 字段里，回答“这次决定为什么没做/为什么重来”；`boost status` 不把它们
-放进 `degraded`（上表才是 `degraded`），但会按 `code` 计入 `counts`。
+这些码写在收据的 `code` 字段里，回答“这次决定为什么没做/为什么重来”；`boost status` 会按
+`code` 计入 `counts`。它们本身不是 `degraded` 数组的成员——少数收据码经
+`src/tools/boost.ts` 的 `RECEIPT_DEGRADATION` 映射成 `ERR_*`（如 `projection-skipped:no-spill`
+→ `ERR_HOST_NO_SPILL`），映射后的码才进 `degraded`。
 
 | `code` | 含义 | 操作者动作 |
 |---|---|---|
@@ -374,7 +376,7 @@ for p in $pkgs; do diff -r "$d/0.2.2-rc.4/$p/lib" "$d/0.2.2-rc.5/$p/lib" >/dev/n
 | `selector-abstain` | 选择器没给出标签或超时，不是调用失败 | 正常弃权；多候选时替换不提交 |
 | `dispatch-rejected` | 合成派发的工具名/参数与决定不符（防篡改检查），该次派发被拒、队列已清 | 到达的调用不是插件决定的那一个；查是否有别的写入者或中间层改了参数 |
 | `pruned-reset` / `compaction-reset` | `llm/stream` 时锚点无法验证：历史被 pruner 裁掉（`pruned-reset`），或锚定回执已不在/被压缩替换（`compaction-reset`）；队列与锚点清空后放行 | 压缩/裁剪后的预期重置；替换在下一回合重新开始 |
-| `projection-skipped:no-owner` | 投影跳过：回执没有 session id，落盘产物无法归属；原文保留 | 属降级面（与 `no-spill`/`no-footer` 同组）；查宿主是否没传 session |
+| `projection-skipped:no-owner` | 投影跳过：回执没有 session id，落盘产物无法归属；原文保留 | 投影的降级类跳过（与 `no-spill`/`no-footer` 同组）；查宿主是否没传 session |
 | `substitute-skipped:no-toolset` | 替换**已提交**，但该步的准入工具集不可得，无法用 `exec.toolSet` 复核；派发照常 | 可见性信号，不是失败；宿主缺 toolSet 时每次替换都会记一条 |
 
 ## 3. 20 任务回归门（人工流程；任务集与 runner 都不随包发布）
