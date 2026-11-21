@@ -93,6 +93,31 @@ export function fakeHost(overrides: Record<string, unknown> = {}): any {
     definitions: registrations,
     tools: { register, resolve, definitions: registrations },
 
+    /**
+     * Cordis's dynamic injection: run `callback` in a child fiber once every
+     * named service exists.
+     *
+     * The fake resolves immediately when the services are present and does
+     * nothing when they are not. The real host would run the callback later,
+     * when the provider's fiber activates; no test at this seam depends on
+     * that timing, and the plugin's own code must tolerate both.
+     */
+    inject(names: string[], callback: (context: Record<string, unknown>) => void): () => void {
+      // Resolved through `get`, exactly as cordis resolves a service name: a
+      // test that supplies a service by overriding `get` must be visible here
+      // too, or the fake would model a lookup the host does not perform.
+      const resolved = names.map(name => host.get(name))
+      if (resolved.some(value => value === undefined)) return () => {}
+      const context: Record<string, unknown> = {}
+      names.forEach((name, index) => { context[name] = resolved[index] })
+      callback(context)
+      return () => {}
+    },
+    /** The un-gated service read: what `ctx.get('webStartup')` does. */
+    get(name: string): unknown {
+      return host[name]
+    },
+
     // --- host services ---
     llm: {
       stream(_options: GenerateOptions): AsyncIterable<StreamChunk> {

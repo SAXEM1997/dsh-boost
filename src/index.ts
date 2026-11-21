@@ -50,7 +50,9 @@ import type { LlmLike } from './selector/jev.js'
 import { resolveWorkspace } from './scope/resolve.js'
 import type { WorkspaceRegistry } from './scope/resolve.js'
 import { ScopeStore } from './scope/store.js'
-import { boostTool } from './tools/boost.js'
+import { boostTool, runBoost } from './tools/boost.js'
+import { registerHttpApi } from './http/mount.js'
+import { listWorkspaces } from './http/state.js'
 import type { BoostDeps, BoostHostFacts } from './tools/boost.js'
 import type { PluginContext } from './types.js'
 
@@ -1673,7 +1675,7 @@ export function apply(ctx: PluginContext, config: unknown): void {
     // does a tool registration failure of its own — neither may be swallowed
     // behind the other's diagnosis.
     try {
-      registerBoostTool(ctx, {
+      const boostDeps: BoostDeps = {
         scope,
         receipts,
         host: hostFacts,
@@ -1695,7 +1697,17 @@ export function apply(ctx: PluginContext, config: unknown): void {
         protocolSuppressed: () => projectionCounters.protocolSuppressions(),
         completeSectionSuppressions: () => projectionCounters.protocolMissings(),
         partialMounts: () => [...missingMounts],
-      })
+      }
+      registerBoostTool(ctx, boostDeps)
+      // The settings page reads through this plugin's own route, and it reads
+      // through `boostDeps` — the same object the tool spreads — so `boost
+      // status` and the page can never disagree about the same workspace.
+      registerHttpApi(ctx, {
+        status: () => runBoost({ ...boostDeps, args: { cmd: 'status' } }),
+        scope: () => runBoost({ ...boostDeps, args: { cmd: 'scope-get' } }),
+        workspaces: () => listWorkspaces(registryBackend()),
+        config: () => cfg,
+      }, message => ctx.logger?.warn?.(message))
     } catch (error) {
       // The tool is the user's only control surface; its failure is reported
       // on its own, never as a hook failure.

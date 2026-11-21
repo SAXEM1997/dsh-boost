@@ -456,6 +456,7 @@ horizon 重放，并计入 `projection_horizon_reestimated`；`projection_horizo
 | `@deepseek-ai/dsh-spill-policy/notice` | 软（动态 import） | spill 后端在，但页脚渲染器 `formatSpillNotice` 加载不到/不存在：apply 模式无法拼页脚，逐条跳过（收据 `projection-skipped:no-footer`；页脚渲染时抛错则记 `projection-skipped:footer-failed`），`status.degraded` 带 `ERR_HOST_NO_SPILL_NOTICE`。这与「没有 spill 后端」的 `ERR_HOST_NO_SPILL` 是两件事 |
 | （spill 后端存在但写失败） | — | 每次 `saveText` 被拒：收据 `projection-skipped:spill-failed`，`status.degraded` 带 **`ERR_HOST_SPILL_FAILING`**。这是**第三种**状态，既不是「没有后端」也不是「没有页脚渲染器」——让操作者去「恢复 spill 包」会把一个已装好却报错的包当成没装 |
 | `@deepseek-ai/dsh-token-meter/estimate` | 软（动态 import） | 固定开销无法测量，`fixedOverheadTokens` 为 `'unknown'`；`status.degraded` 带 `ERR_HOST_NO_ESTIMATOR` |
+| `webServer` | 软（动态注入 `ctx.inject(['webServer'], …)`） | **设置页读不到数据**：路由没挂上，页面显示 `ERR_CLIENT_NETWORK` 并提示去看宿主日志。投影、替换与 `boost` 工具**完全不受影响**——这是唯一一个缺失只影响页面的依赖。挂上之后 `Host` 的受信名单来自 `webStartup.trustedHosts`（读不到就只信 loopback），所以反向代理没透传 `Host` 时页面会被 `ERR_HTTP_FORBIDDEN` 挡住 |
 | `win32` 平台 | 运行时检查 `isPosixOnly()` | 拒绝替换，投影照常；`status.degraded` 带 `ERR_HOST_PLATFORM_UNSUPPORTED` |
 | 宿主版本线 | 启动时读 `@deepseek-ai/dsh-app-boot` 的版本 | 版本**落在 `engines.dsh` 区间外**（`>=0.2.2-rc.4 <0.2.3-0`）时日志警告 `ERR_HOST_VERSION_MISMATCH`，插件照常加载（advisory，不是 `status.degraded` 码）；区间内但不是验证过的 `0.2.2-rc.4`（如 `rc.5` / `0.2.2`）只记 info、不发码；版本读不到或区间无法解析时也只记 info |
 | 收据分片可读性 | `boost status` 全量扫描（非依赖） | 至少一个收据分片读不出来（EACCES、名为 `x.jsonl` 的目录等）时 `status.degraded` 带 `ERR_RECEIPTS_UNREADABLE`；`status` 仍是**全量聚合**——健康分片照常计数——所以数字可能不完整。查 `<dshHome>/boost/receipts/` 的权限与异常条目，修复后重跑并对比计数 |
