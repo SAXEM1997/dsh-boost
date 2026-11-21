@@ -31,11 +31,12 @@ npm run verify:package
 两个数字都随树的形状变化（条目数随文件集合，`checks` 数随脚本里的断言组），不是版本常量：
 
 1. 脚本显式跑 `npm run build`，再用 `npm pack --ignore-scripts` 打出真实 tarball。
-   `--ignore-scripts` 的作用不是挡住重建——`package.json` 里**没有** `prepare`（也没有
-   `prepack`/`postpack`），`npm pack` 本身不构建任何东西。它把 pack 与包内生命周期脚本隔开，
-   让 tarball 只描述上一条 `npm run build` 留下的那棵树；将来若有人加回 `prepare`，这条也不会
-   让它在断言之前悄悄重建（并“修复”）工作树。显式构建后打包，包内容就是这次构建的产物；
-   干净 clone 上即使 `dist/` 不存在也能跑，因为构建发生在打包之前。
+   `--ignore-scripts` 的作用不是挡住重建——`prepare` 现在存在（`scripts/prepare-build.mjs`：
+   只在 `dist/index.js` 缺失时构建，供 git 安装使用；`scripts/` 不进 tarball），但
+   `--ignore-scripts` 会跳过它，所以 tarball 只描述上一条 `npm run build` 留下的那棵树；
+   将来若有人把 `prepare` 改成无条件重建，这条也不会让它在断言之前悄悄重建（并“修复”）工作树。
+   显式构建后打包，包内容就是这次构建的产物；干净 clone 上即使 `dist/` 不存在也能跑，因为构建
+   发生在打包之前。
 2. **exact allowlist**：每一个 tar 条目都必须由四类来源之一解释——固定根文件（`package.json`、
    `LICENSE`、`NOTICE`、两份 README）、`dsh.bundle.patch` 指向的 patch 文件、`locale/*.json`、或
    `src/**/*.ts` 对应的一个 `dist/**.js` + `.js.map`（声明文件只发 `dist/index.d.ts` 与
@@ -101,8 +102,10 @@ test + build）；`--prebuilt` 让 allowlist 描述 `ci` 刚构建的那棵树�
 - `version` 必须存在，否则 `npm pack` 在第一步就报 `Invalid package, must have name and version`。
 - `files` 与实际布局一致：`scripts/`、`test/`、`src/` 是 dev-only，**不**进包（`files` 只带
   `dist`、`locale`、`cordis.patch.yml`、两份 README、`LICENSE`、`NOTICE`）；`dist/` 由
-  `npm run build`（clean + `tsc`）构建，`npm publish` 的 pack 步骤不会重建（无 `prepare`）；
-  sourcemap 以 `inlineSources` 内联源码，装好的包没有 `src/` 也能对上源码。
+  `npm run build`（clean + `tsc`）构建；`prepare`（`scripts/prepare-build.mjs`）只在
+  `dist/index.js` 缺失时构建（git 安装用），`dist` 已存在时是 no-op，所以 `npm publish` 的
+  pack 步骤不会重建已构建的树；sourcemap 以 `inlineSources` 内联源码，装好的包没有 `src/`
+  也能对上源码。
 
 ## 2. 装进宿主（一次性 DSH_HOME）
 

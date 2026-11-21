@@ -21,6 +21,10 @@ Design rationale lives in `docs/superpowers/specs/`; the release-acceptance proc
 - **运行手册按代码校正**：宿主版本守卫只在 `engines.dsh` 区间外告警（区间内的 `rc.5` / `0.2.2` 只记 info）；`ERR_HOST_SELECTOR_UNAVAILABLE` 只由 `selector-unavailable` 映射，`selector-error` 不映射；补记 `kind:'reset'` 收据与 `skip:no-scope` 的两条写入路径；`projection-skipped:no-owner` 标为 hook 不可达；英文 README 的页脚算术改为实测 747–749。
 - **投影开启前先看 `status.hasSpill`**（存在性）与 `degraded` 里的 `ERR_HOST_SPILL_UNUSABLE`，两者都过再开 `projection: 'on'`。
 
+### 变更 Changed
+
+- **`prepare` 钩子恢复（只服务 git 安装）**：`scripts/prepare-build.mjs` 只在 `dist/index.js` 缺失时构建，使 `dsh plugin add github:...` / `npm i git+...` 装上的包有入口；`npm pack --ignore-scripts` 会跳过它，已构建的 checkout 也不会重建。`scripts/` 仍不进 tarball。
+
 ## [0.1.3] - 2026-11-21
 
 ### 修复 Fixed
