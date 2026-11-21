@@ -1978,3 +1978,19 @@ test('cod#2 a plan arg of -0 or a non-finite number still dispatches', async () 
     assert.equal(verdict.reject, false, `n=${String(odd)} must not read as tampering`)
   }
 })
+
+test('qr5#3 an accept carrying its own content does not commit a substitution', async () => {
+  // The plan's guards and literals were checked against `ctx.receipt.text`, but
+  // an `accept` with its own `content` shows the model different text. Committing
+  // would substitute on evidence the model cannot see.
+  const env = setup()
+  env.plans.set(SESSION, { goal: 'g', steps: [candidate('A', 'TRIGGER')] })
+  env.clock.onModelRequest(2, 7)
+
+  // The receipt says "TRIGGER here" (so the guard passes); the model is shown
+  // different text. That difference is the whole point of the test.
+  const decision = { kind: 'accept', content: [{ type: 'text', text: 'TRIGGER replaced' }] }
+  await runPost(env.host, 'TRIGGER here', decision)
+
+  assert.equal(env.queue.peek(SESSION), undefined, 'a rewritten accept must not enqueue')
+})

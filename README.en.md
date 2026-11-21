@@ -442,13 +442,14 @@ in effect (the minimum over live sessions, falling back to `horizonSteps` when n
 - `projection_unknown_families`: calls carrying an `mcp__` prefix that reached projection but
   matched no tool family; `projection_unknown_tools` is the retained unmapped tool names with
   counts (at most 32), for spotting mapper gaps.
-- `hasWorkspaceRegistry`: whether the host provides `workspaceRegistry` **and** can actually list
-  workspaces. The production assembly always supplies the key, so it is **always boolean**: no
-  service is `false` + `ERR_HOST_NO_WORKSPACE_REGISTRY`; a service whose `list()` throws is `true` +
+- `hasWorkspaceRegistry`: whether the host **provides** `workspaceRegistry` (also presence). The
+  production assembly always supplies the key, so it is **always boolean**: no service is `false` +
+  `ERR_HOST_NO_WORKSPACE_REGISTRY`; a service whose `list()` throws is `true` +
   `ERR_HOST_WORKSPACE_REGISTRY_BROKEN`. Both leave every session invisible, but they are fixed
   differently. The key is omitted only when `boost` is constructed directly with no host facts.
-- `hasSpill`: whether the host spill backend is usable. A missing service is `false`
-  (`ERR_HOST_NO_SPILL`); a service without `saveText` is also `false` (`ERR_HOST_SPILL_UNUSABLE`).
+- `hasSpill`: whether the host **provides** a spill backend (presence, not usability). A missing
+  service is `false` + `ERR_HOST_NO_SPILL`; a service without `saveText` keeps it **`true`** and puts
+  `ERR_HOST_SPILL_UNUSABLE` in `degraded` — the capability fact lives in `degraded`, not in this boolean.
 - `saved`: the camelCase ledger object kept for older consumers (`substitution` /
   `substitutionAvoided` / `projectionGross` / `projectionNet` / `retrievals`), derived from the same
   aggregation as the top-level snake_case fields. Legacy projection receipts (pre-T23b) without

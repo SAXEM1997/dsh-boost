@@ -243,8 +243,10 @@ const RECEIPT_DEGRADATION: ReadonlyArray<{ readonly code: string; readonly degra
   // The substitution refusal writes the stable code itself, so a status built
   // without host facts still reports the reason the decision path recorded.
   { code: ERR_HOST_NO_TOKENMETER, degraded: ERR_HOST_NO_TOKENMETER },
+  // Only absence is a capability fact. `selector-error` is a call failure that
+  // may be transient and is summed over all history, so mapping it here would
+  // mark a healthy host degraded forever (review qr5#4).
   { code: 'selector-unavailable', degraded: ERR_HOST_SELECTOR_UNAVAILABLE },
-  { code: 'selector-error', degraded: ERR_HOST_SELECTOR_UNAVAILABLE },
 ]
 
 /**
@@ -663,8 +665,19 @@ async function aggregate(
     // measurement, while no receipt carrying the field means "not measured"
     // and the key is omitted from `status` rather than reported as zero
     // (review row 7).
+    // Pair the two sums on the same receipt: a rollover settlement writes a
+    // numeric lower bound with `saved_input_tokens: 'unknown'`, so summing the
+    // lower over a superset could report a floor above the ceiling
+    // (review qr5#2). A receipt that carries only one side contributes to
+    // neither.
     const avoided = receipt.avoided_total_tokens
-    if (typeof avoided === 'number' && Number.isFinite(avoided)) {
+    const upper = receipt.saved_input_tokens
+    if (
+      typeof avoided === 'number' &&
+      Number.isFinite(avoided) &&
+      typeof upper === 'number' &&
+      Number.isFinite(upper)
+    ) {
       substitutionAvoided += avoided
       avoidedSeen = true
     }

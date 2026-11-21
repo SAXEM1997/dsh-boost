@@ -277,7 +277,7 @@ token，它只产出下一节的四个比例；`selected + []` 下协议段为�
 不变量不是 `triggerChars ≥ headChars + tailChars + 1`。真实替换串是 head line + head + 页脚 +
 tail + 3 个换行；页脚由宿主 `formatSpillNotice` 生成：68 字符 locator 加宿主固定的 66 字符
 retrieval hint 下，3 位省略字节数是 190 字符，5 位是 192 字符。grep/glob 默认 400+100 时：
-`400 + 100 + 50（head line） + 190（页脚） + 3 = 743 > 700`（5 位计数则是 745）。于是刚过 700、
+`400 + 100 + 50（head line） + 190（页脚） + 3 = 743 > 700`（5 位计数时页脚 192、head line 里的数字也各长一位，实测 747–749）。于是刚过 700、
 约 743 以下的回执会被 `truncate` 判定“可裁”，但 `projectApply` 组装后并不短于原文，直接返回
 原文——这是死区，不是净亏。运行时的 `assembled.length >= text.length` 检查保证投影绝不会让
 回执变长；要消除死区，把 `triggerChars` 提到至少这个和（例如 grep/glob 用 800），或缩小窗口。
@@ -371,12 +371,13 @@ horizon 重放，并计入 `projection_horizon_reestimated`；`projection_horizo
 - `projection_unknown_families`：带 `mcp__` 前缀、进入投影阶段但没有匹配到工具族的调用数；
   `projection_unknown_tools` 是其中保留的未映射工具名及次数（最多 32 个），用来发现 mapper
   缺口。
-- `hasWorkspaceRegistry`：宿主是否提供 `workspaceRegistry` **并且**能真的列出工作区。生产装配
-  总是传入这个键，所以它**总是布尔**：宿主没有该服务是 `false` + `ERR_HOST_NO_WORKSPACE_REGISTRY`；
-  服务在但 `list()` 抛错是 `true` + `ERR_HOST_WORKSPACE_REGISTRY_BROKEN`——两种都让每个会话被判
-  不可见，但修法不同。只有直接构造 `boost` 依赖、完全不给宿主事实时该键才省略（测试场景）。
-- `hasSpill`：宿主 spill 后端是否可用。服务缺失是 `false`（`ERR_HOST_NO_SPILL`）；服务在但不提供
-  `saveText` 也是 `false`（`ERR_HOST_SPILL_UNUSABLE`）。
+- `hasWorkspaceRegistry`：宿主是否**提供** `workspaceRegistry`（同样是存在性）。生产装配总是传入
+  这个键，所以它**总是布尔**：宿主没有该服务是 `false` + `ERR_HOST_NO_WORKSPACE_REGISTRY`；服务在但
+  `list()` 抛错是 `true` + `ERR_HOST_WORKSPACE_REGISTRY_BROKEN`——两种都让每个会话被判不可见，但
+  修法不同。只有直接构造 `boost` 依赖、完全不给宿主事实时该键才省略（测试场景）。
+- `hasSpill`：宿主是否**提供** spill 后端（存在性，不是可用性）。服务缺失是 `false` +
+  `ERR_HOST_NO_SPILL`；服务在但不提供 `saveText` 时它**仍是 `true`**，同时 `degraded` 带
+  `ERR_HOST_SPILL_UNUSABLE`——能力事实在 `degraded` 里，不在这个布尔里。
 - `saved`：兼容旧消费者的 camelCase 账目对象（`substitution` / `substitutionAvoided` /
   `projectionGross` / `projectionNet` / `retrievals`），与顶层 snake_case 字段由同一次聚合派生。
   旧投影收据（pre-T23b）没有 `saved_projection_tokens` 时，按收据里的 legacy `saved` 字段回退计价。

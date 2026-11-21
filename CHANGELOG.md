@@ -26,7 +26,7 @@ Design rationale lives in `docs/superpowers/specs/`; the release-acceptance proc
 - **`verify:package` 现在解析 `cordis.patch.yml`**（`insert` 非空、`id`/`name` 等于包名、`config` 是对象），不再只查文件存在；`--prebuilt` 让 allowlist 描述 CI 刚构建的那棵树，而不是重新构建它；`prepare` 已移除，`npm publish` 自己的 pack 也不会重建。
 - **`shadow-report.mjs`**：`--help` 退出 0；目录不存在时以 2 退出，需要空报告要显式 `--allow-empty`。
 - **`.npmrc` 与 lockfile 改钉 `registry.npmjs.org`**，与 `publishConfig` 同源；CI 断言不残留镜像 URL。此前发布校验查的是镜像，镜像的 `latest` 滞后，一次失败的发布可以看起来是成功的。
-- 文档：`^0.1.0` 不是安全的钉法（npmjs 是 0.1.1、镜像是 0.1.0）；页脚 190/192 字符、死区从 743 起；收据按「决定」写，无计划的 `write`/`edit` 不落收据；分片轮转与 256 上限按编码后的会话名计；宿主 home 默认是 `~/.dsh`；20 任务门是人工流程且任务集不随包发布；发布门是**实现者**的决定而非用户裁决。
+- 文档：`^0.1.2` 是安全的钉法（两个 registry 的 `latest` 都是 0.1.2；发布当时的 `^0.1.0` 会因镜像滞后落到 0.1.0）；页脚 190/192 字符、死区从 743 起；收据按「决定」写，无计划的 `write`/`edit` 不落收据；分片轮转与 256 上限按编码后的会话名计；宿主 home 默认是 `~/.dsh`；20 任务门是人工流程且任务集不随包发布；发布门是**实现者**的决定而非用户裁决。
 
 ## [0.1.1] - 2026-11-21
 

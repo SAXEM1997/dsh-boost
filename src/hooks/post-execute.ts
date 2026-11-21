@@ -2184,7 +2184,19 @@ async function applyDecision(
   //
   // Projection below runs for a shadow commit too: the decision side never
   // suppresses the projection ledger.
-  if (projectionTargetOf(decision, ctx.receipt, ctx.result) === undefined) {
+  const visible = projectionTargetOf(decision, ctx.receipt, ctx.result)
+  if (visible === undefined) {
+    clearPlan(deps, ctx.sessionId)
+  } else if (visible !== ctx.receipt.text) {
+    // An `accept` carrying its own `content` shows the model text the plugin
+    // never canonicalised, so every guard and every literal in the plan was
+    // checked against something else. Projection may still run — it rewrites
+    // the visible text deliberately — but a substitution must not commit on
+    // evidence the model cannot see (review qr5#3).
+    //
+    // No receipt: this is the normal outer-shaper path (`dsh-spill-policy`
+    // appends its footer in every session), not a degradation. A receipt here
+    // would be one line per oversized receipt and would read as a failure.
     clearPlan(deps, ctx.sessionId)
   } else {
     await decideSubstitution(deps, ctx)

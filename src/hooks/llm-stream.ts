@@ -680,8 +680,17 @@ function trailingSpillFooterStart(body: string): number {
   if (!body.endsWith(')')) return -1
   const start = body.lastIndexOf('\n\n(')
   if (start === -1) return -1
-  return body.slice(start + 2).includes(SPILL_LOCATION) ? start : -1
+  const notice = body.slice(start + 2)
+  if (!notice.includes(SPILL_LOCATION)) return -1
+  // The notice must also name how much was dropped. A footer carrying only a
+  // locator is not evidence that a shaper rewrote this receipt, and without a
+  // count the only remaining identity check would be "shares the first and last
+  // window" — the edited-then-re-read collision `prunedCarries` rejects.
+  return OMITTED_BYTES.test(notice) ? start : -1
 }
+
+/** An omitted-byte notice: the only in-body evidence a shaper rewrote the middle. */
+const OMITTED_BYTES = /\([^)]*\d[\d,]*\s*(?:bytes|characters)[^)]*\)/i
 
 /**
  * Whether `core` is `anchor` rewritten by a foreign shaper.
@@ -733,7 +742,17 @@ function foreignShaperCarries(
  *
  * Sharing the two probes alone is not identity: a file edited in the middle and
  * re-read produces a full receipt with the same 32-character head and tail but
- * a different body. Accepting it would substitute against content the model no
+ * a different body.
+ *
+ * Residual, accepted: for a foreign shaper's rewrite the middle cannot be
+ * verified from the model-visible body — we keep neither the anchor's byte
+ * length nor a digest of it, and the shaper's own window (120 code points) need
+ * not equal our probe window. What is checked is the shape (head at index 0,
+ * tail at the end, a spill notice naming both a location and an omitted-byte
+ * count) and that the body is longer than the two windows. A re-spilled receipt
+ * that happens to share both probes would be accepted; rejecting every foreign
+ * rewrite instead would discard every spilled receipt, which is the common
+ * case. Fail closed only where the shape does not hold. Accepting it would substitute against content the model no
  * longer holds, so a probe match must be accompanied by the pruner marker, our
  * projection's head line, or a spill footer. Anything else is a lost anchor
  * (fail closed).
