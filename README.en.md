@@ -11,7 +11,7 @@ read-only substitution**.
 ## What it does
 
 DSH replays the whole history on every model request. Across the 300 longest sessions measured
-locally (`npm run --silent stats` — without `--silent`, npm prints its `> dsh-boost@0.1.0 stats`
+locally (`npm run --silent stats` — without `--silent`, npm prints its `> dsh-boost@0.1.1 stats`
 banner to stdout, so use `--silent` or `node scripts/session-stats.mjs` for machine-readable
 output; snapshot at `2026-11-19T03:13:21Z`): 54,141 steps and 54,088 requests,
 10,575,904,022 raw tokens in total. The mean is 195,340 tokens per step and 195,531 per request
@@ -37,6 +37,13 @@ The plugin does two things:
    arguments) is effective in practice only for `glob`'s single-token output; `read` and `grep`
    emit line-numbered or bare-path output that the identifier projection cannot match, so those
    calls fall back to the model.
+
+   The multi-candidate selector **does not read a separate model configuration**: it reuses the
+   **boundary request's** `provider` / `model` / `reasoningEffort` (`rememberRoute` in
+   `src/index.ts`, fed mainly by `agent/pre-step`'s `modelSelection`, with the `agent/request`
+   resolution only as a fallback), so it is not necessarily a cheap model. To move it, either
+   change the model on the boundary session (the host routes per agent) or leave the plan with a
+   single candidate (one candidate never calls the selector).
 
 The **ex-ante estimate** for v1 is **3.5% (lower bound) to 10.0% (ideal upper bound)** of raw
 `totalTokens`; **3.5% is not a floor** — it is the lower bound of an offline estimate against a
@@ -68,16 +75,27 @@ replacing the range with measurements needs a denominator statistic that a later
 directory:
 
 ```bash
-# install from the registry (0.1.0 is the first release and is latest)
-dsh plugin --profile <name> add dsh-boost@^0.1.0
+# install from the registry: npmjs has latest = 0.1.1; the npmmirror this
+# repository's .npmrc points at only has 0.1.0 (see below)
+dsh plugin --profile <name> add dsh-boost@^0.1.1 --registry=https://registry.npmjs.org/
 
 # or from a local checkout (build first; dist/ is not committed)
 npm run build
 dsh plugin --profile <name> add /absolute/path/to/dsh-boost
 ```
 
-For the web profile: `dsh plugin --profile web add dsh-boost@^0.1.0`. `dsh plugin` forwards the operation
-to pnpm, so pnpm must be on `PATH`.
+For the web profile: `dsh plugin --profile web add dsh-boost@^0.1.1 --registry=https://registry.npmjs.org/`.
+`dsh plugin` forwards the operation to pnpm, so pnpm must be on `PATH`.
+
+> **The two registries carry different versions, so `^0.1.0` is not a safe pin.**
+> `registry.npmjs.org` has three version records: `0.1.1` (current `latest`), `0.1.0`, and
+> `0.0.0-stage`, a placeholder npm creates on a package's first publish. The
+> `registry.npmmirror.com` this repository's `.npmrc` points at currently has only `0.1.0` (its
+> `latest` is 0.1.0 too). The same `^0.1.0` therefore resolves to 0.1.1 on npmjs and to 0.1.0 on
+> the mirror — and a mirror user installs a build missing ten of 0.1.1's fixes, several of which
+> repair silent failures. Use `dsh-boost@^0.1.1` (or `@latest`), and pass
+> `--registry=https://registry.npmjs.org/` explicitly when the registry matters; while the mirror
+> has not synced 0.1.1, `@^0.1.1` without that flag fails to resolve.
 
 The package is ESM (`"type": "module"`) and the `.` entry of `exports` also maps `require` /
 `default`: on Node >= 24.9, `require('dsh-boost')` loads the very same code as `import`. Nothing
@@ -136,10 +154,14 @@ Then list the workspace to expose:
 
 - `workspaceIds` are the host's workspace UUIDs, not paths; the host maps the agent's cwd to this
   id through its workspace registry. **Finding the UUID is itself friction**: either ask the
-  host / dig through session records, or read `tables.workspaces` (the id ↔ path table) in
-  `$DSH_HOME/storages/workspace.json` yourself — v1 ships no command that does this for you. If
-  you cannot find the UUID and this is a single-user machine, `"mode": "global"` widens the
-  scope to every *defined* workspace; sessions with no workspace stay invisible.
+  host / dig through session records, or read `tables.workspaces` (the id ↔ path table) in the
+  host's `<hostDshHome>/storages/workspace.json` yourself — v1 ships no command that does this
+  for you. The host resolves its home as "a non-empty `$DSH_HOME` (`~` expands) → `~/.dsh`", so
+  on a default install the file is `~/.dsh/storages/workspace.json`, **not**
+  `$DSH_HOME/storages/workspace.json` (unless `$DSH_HOME` is actually set). Note that
+  `config.dshHome` moves only the plugin's `<dshHome>/boost`, never this host file. If you cannot
+  find the UUID and this is a single-user machine, `"mode": "global"` widens the scope to every
+  *defined* workspace; sessions with no workspace stay invisible.
 - `baseRevision` is `data.scope.revision` from the status you just read (`0` for the first write).
   This is compare-and-swap: a stale revision returns `ERR_SCOPE_REVISION_CONFLICT`; read `status`
   again and retry. When the caller's cancellation signal interrupts the write, the tool returns
@@ -206,9 +228,10 @@ nothing; it produces only the four ratios below.
 Of those ratios, `saveableRatio`, `byFamily`, and `candidateRecall` can decide **whether the
 substitution side is worth turning on**: how many substitution decisions the whitelist could
 actually deliver, which tool families the hits land in, and how high candidate recall is — that
-is, whether substitution would fire at all and where. They **cannot decide release**: that
-decision was fixed during design; v1 ships as a normal release and does not gate on shadow-week
-savings. They also **cannot measure savings**: the report has no total-token denominator, and
+is, whether substitution would fire at all and where. They **cannot decide release**: v1 ships as
+a normal release and does not gate on shadow-week savings — and that call was the
+**implementer's** decision during design, not a user ruling. The user accepted a one-week shadow
+period; they did not rule on whether shadow results should gate a release. They also **cannot measure savings**: the report has no total-token denominator, and
 `retrievalUpperBound` is structurally `0` during the shadow week (it only counts applied
 `projection:'on'` retrievals), so it cannot even bound projection's retrieval damage. Projection
 is released on the visibility contract (the original stays retrievable through the footer) and
@@ -294,11 +317,11 @@ cap is 256 KiB, so `300000` prevents the family from triggering at all (there is
 Characters are Unicode code points. Error receipts and receipts above 256 KiB are never projected.
 
 The invariant is **not** `triggerChars >= headChars + tailChars + 1`. The real replacement is head
-line + head + footer + tail + 3 newlines; the footer is produced by the host's `formatSpillNotice`
-and is about 196 characters (68-character locator, 5-digit omitted-byte count, the host's fixed
-retrieval hint). With the grep/glob defaults of 400+100:
-`400 + 100 + 50 (head line) + 196 (footer) + 3 = 749 > 700`. So a receipt just over 700 — up to
-about 749 — is judged cuttable by `truncate`, but `projectApply` assembles a replacement that is
+line + head + footer + tail + 3 newlines; the footer is produced by the host's `formatSpillNotice`.
+With a 68-character locator and the host's fixed 66-character retrieval hint, a 3-digit
+omitted-byte count gives 190 characters and a 5-digit count gives 192. With the grep/glob defaults
+of 400+100: `400 + 100 + 50 (head line) + 190 (footer) + 3 = 743 > 700` (745 with a 5-digit count).
+So a receipt just over 700 — up to about 743 — is judged cuttable by `truncate`, but `projectApply` assembles a replacement that is
 not shorter than the original and returns the original. That is a dead band, not a net loss. The
 runtime `assembled.length >= text.length` check guarantees projection never makes a receipt
 longer; to remove the dead band, raise `triggerChars` to at least that sum (for example 800 for
@@ -358,22 +381,59 @@ set it falls back to `~/.dsh`; the assembly log prints the resolved `root=` (tha
 
 - `scope.json` — the single source of truth for the exposure surface (version 2, with revision).
 - `scope.lock` — the short-lived write lock, removed after a normal write.
-- `receipts/<encoded-session>.jsonl` — append-only receipts. Every line carries metadata, a
-  preview of the first 256 code points of the receipt (never the full stdout), and **the bound
-  arguments `args` (model-written: above 2048 code points they are stored as visibly truncated
-  JSON with an `args_truncated` flag; nesting deeper than 64 levels sets `args_depth_truncated`
-  and replaces the deeper subtree with `{ "truncated_depth": 64 }` — `write` / `edit` arguments
-  can carry whole file contents and land here too)**. **Only substitution receipts** also carry
-  the plan goal (≤256 code points) and guards (≤8, each ≤300 code points): `kind:'substitute'`,
-  `kind:'substitute-settled'`, and `kind:'shadow'` with `code:'ok'`. `kind:'shadow'` is not
-  substitution-only — projection shadowing also writes `kind:'shadow'`, but with
-  `code:'projection-shadow'`, and that is a projection receipt with no plan evidence; projection
-  and skip receipts carry `preview` and `args` only.
+- `receipts/<encoded-session>.jsonl` — append-only receipts. **A receipt is written per
+  decision, not per call**: a line appears only for a projection, a substitution decision
+  (including skips), or an out-of-scope `skip:no-scope`. A `write` / `edit` with no plan produces
+  **no receipt at all**, so its arguments are never recorded. Every line carries metadata, a
+  preview of the first 256 code points of the receipt (never the full stdout), and that call's
+  bound `args` (model-written: above 2048 code points they are stored as visibly truncated JSON
+  with an `args_truncated` flag; nesting deeper than 64 levels sets `args_depth_truncated` and
+  replaces the deeper subtree with `{ "truncated_depth": 64 }`). **Only substitution receipts**
+  also carry the plan goal (≤256 code points) and guards (≤8, each ≤300 code points):
+  `kind:'substitute'`, `kind:'substitute-settled'`, and `kind:'shadow'` with `code:'ok'`.
+  `kind:'shadow'` is not substitution-only — projection shadowing also writes `kind:'shadow'`,
+  but with `code:'projection-shadow'`, and that is a projection receipt with no plan evidence.
+  **Projection receipts** (`kind:'projection'`, `code:'projected'`, and the projection shadow)
+  carry `before` / `after` / `saved_projection_tokens` / `unit` / `estimate` / `horizon_steps`;
+  without a token meter only `estimate:'unknown'` is written and the three numeric fields are
+  omitted entirely. **Retrieval receipts** (`kind:'projection'`, `code:'projection-retrieval'`)
+  carry `locator` plus `retrieval_call_tokens` / `retrieval_content_tokens` / `retrieval_tokens`;
+  those three are written only when the retrieval was priced, and an unpriced one has
+  `estimate:'unknown'` with the fields omitted. `skip` receipts carry only `preview` and `args`
+  (`skip:no-scope` carries neither — just the tool name).
+
+  When the current shard exceeds 8 MiB or 20,000 lines, the next write first rotates it to
+  `<encoded-session>.1.jsonl`; only the current shard and its predecessor are kept (an older `.1`
+  is overwritten). `boost status` reads `.1` before the current shard. The 256-shard cap counts
+  **encoded session names**: a rotated `.1.jsonl` belongs to the same name and takes no extra
+  slot, though the scan reads both files under that name.
 
 `boost status` replays the projection ledger at each receipt's own `horizon_steps`; a receipt
 written before that field existed is replayed at the current horizon and counted in
 `projection_horizon_reestimated`, while `projection_horizon_steps` reports the horizon currently
 in effect (the minimum over live sessions, falling back to `horizonSteps` when no history exists).
+
+`status.data` also carries several status and ledger fields that never appear in `degraded`:
+
+- `receipts_stopped`: `true` once receipt writes have failed 3 times in a row. Substitution is then
+  refused **entirely** (fail closed — no further selector call or step budget is spent), projection
+  continues, and every ledger figure is the snapshot from before the writes stopped. The count
+  clears and the field returns to `false` after a write succeeds. This is the only place that says
+  "receipts have stopped" — there is no `degraded` code for it.
+- `protocol_suppressed`: how many times the protocol section was dropped at assembly (invisible
+  workspace, a diagnostic assembly with no agent, and a `complete: true` override). Assembly runs
+  per request, so this only counts — it writes no receipt.
+- `projection_locator_evictions`: locators dropped because of the per-session cap (512, oldest
+  first); above 0 means the retrieval ledger has losses.
+- `projection_unknown_families`: calls carrying an `mcp__` prefix that reached projection but
+  matched no tool family; `projection_unknown_tools` is the retained unmapped tool names with
+  counts (at most 32), for spotting mapper gaps.
+- `hasWorkspaceRegistry`: whether the host currently offers `workspaceRegistry`. The key is
+  **omitted** when nothing was probed — it is not `false`.
+- `saved`: a camelCase ledger object for older consumers (`substitution` / `projectionGross` /
+  `projectionNet` / `retrievals`), derived from the same aggregation as the top-level snake_case
+  fields. A projection receipt written before T23b has no `saved_projection_tokens` and is priced
+  from its legacy `saved` field instead.
 
 With `projection: 'on'`, the complete original is written to the host spill backend **before** the
 replacement happens, and the footer locator can be read with `read` / `grep`. Projection never
@@ -426,7 +486,7 @@ to load. `llm` is soft (only the selector uses it); when absent the selector fal
 | `workspaceRegistry` | soft (`ctx.get('workspaceRegistry')`) | **The workspace is invisible**: a cwd can never map to a workspace id, so everything fails closed as invisible — no protocol section, projection and substitution all skipped, only `skip:no-scope` receipts accumulating; `status.degraded` reports `ERR_HOST_NO_WORKSPACE_REGISTRY`. This is the host-capability explanation **when a workspace should be visible**, not the only explanation for "installed but nothing happens": the shipped default `selected + []` is inert by design and reports no error; a missing token meter also refuses real substitution; a `complete: true` section also suppresses the protocol |
 | `tokenMeter` | soft (`ctx.get('tokenMeter')`) | Substitution is refused; projection keeps working and its accounting records `unknown` (never a fabricated number); `status.degraded` reports `ERR_HOST_NO_TOKENMETER` |
 | `spillStore` | soft (`ctx.get('spillStore')`) | With `projection: 'on'`, an over-limit receipt is not projected (evidence preserved) and the receipt records `projection-skipped:no-spill`; `status.degraded` reports `ERR_HOST_NO_SPILL` (the live probe only in on mode; a historical receipt reports it in any mode) |
-| `@deepseek-ai/dsh-spill-policy/notice` | soft (dynamic import) | The spill backend exists but the footer renderer `formatSpillNotice` cannot be loaded/is absent: apply-mode projection cannot build its footer and skips every receipt (`projection-skipped:no-footer`); `status.degraded` reports `ERR_HOST_NO_SPILL_NOTICE`. This is a different absence from `ERR_HOST_NO_SPILL` (no spill backend at all) |
+| `@deepseek-ai/dsh-spill-policy/notice` | soft (dynamic import) | The spill backend exists but the footer renderer `formatSpillNotice` cannot be loaded/is absent: apply-mode projection cannot build its footer and skips every receipt (`projection-skipped:no-footer`; a throw while rendering records `projection-skipped:footer-failed`); `status.degraded` reports `ERR_HOST_NO_SPILL_NOTICE`. This is a different absence from `ERR_HOST_NO_SPILL` (no spill backend at all) |
 | (spill backend present but failing) | — | Every `saveText` is rejected: the receipt records `projection-skipped:spill-failed` and `status.degraded` reports **`ERR_HOST_SPILL_FAILING`**. This is a **third** state — neither "no backend" nor "no footer renderer" — and telling an operator to restore the spill package would send them after a package that is installed and failing |
 | `@deepseek-ai/dsh-token-meter/estimate` | soft (dynamic import) | Fixed overhead cannot be measured, so `fixedOverheadTokens` is `'unknown'`; `status.degraded` reports `ERR_HOST_NO_ESTIMATOR` |
 | `win32` platform | runtime `isPosixOnly()` check | Substitution is refused, projection still works; `status.degraded` reports `ERR_HOST_PLATFORM_UNSUPPORTED` |
@@ -481,7 +541,8 @@ evidence" degraded path would be unreachable.
   does not produce it.
 - **The shadow week saves nothing by design**: it only records (the protocol section is still
   injected and the selector is still called); its output is four ratios, not saved tokens.
-- **v1 does not judge "better results"**: there is a token ledger and a 20-task regression gate,
+- **v1 does not judge "better results"**: there is a token ledger and a **manual** 20-task
+  regression procedure (the task set does not ship with the package; see `docs/RELEASE.md` §3),
   no quality metric; whether substituted outcomes are better is unjudgeable in v1.
 - **Projection is truncation, not refinement**: it keeps the head and tail and drops the middle;
   the before/after token difference in the ledger measures *shorter*, not *more relevant*. The
@@ -518,7 +579,7 @@ The source and docs live in the repository at
 | [Design](docs/superpowers/specs/2026-11-18-dsh-token-efficiency-design.md) | Goals, evidence, architecture, contracts, measurement, risks, release shape |
 | [Host contracts appendix](docs/superpowers/plans/2026-11-18-host-contracts.md) | Interface reference copied line by line from the host sources |
 | [Three-tier delegation research](docs/research/2026-11-18-three-tier-delegation.md) | 25 primary sources on caching, routing thresholds, compression, and verification |
-| [Release acceptance](docs/RELEASE.md) | The one-command `npm run verify:package` acceptance, the zero-peerDependencies state and install spec, the degradation-code matrix, the 20-task regression gate, and the shadow week and stats recompute |
+| [Release acceptance](docs/RELEASE.md) | The one-command `npm run verify:package` acceptance, the zero-peerDependencies state and install spec, the degradation-code matrix, the 20-task regression procedure (manual; the task set does not ship), and the shadow week and stats recompute |
 
 ## License
 
