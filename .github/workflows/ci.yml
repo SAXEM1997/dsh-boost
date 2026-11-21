@@ -28,8 +28,10 @@
 #
 # `.npmrc` and the committed lockfile resolve every tarball to
 # registry.npmjs.org — the same registry `publishConfig` publishes to. The gate
-# below asserts that, so a mirror URL cannot creep back in and make release
-# checks read a stale `latest`.
+# below asserts that every `resolved` URL in the lockfile is exactly
+# `https://registry.npmjs.org/`: a mirror, any other host, or plain `http://`
+# fails, and an empty set fails too (a check that matches nothing must not pass).
+# Without that, a rewritten URL can make release checks read a stale `latest`.
 name: ci
 
 on:
@@ -51,13 +53,45 @@ jobs:
         with:
           node-version: 24.9.0
           cache: npm
-      - name: Assert the lockfile resolves from npmjs
+      - name: Assert every lockfile URL resolves from npmjs over https
         run: |
-          if grep -q 'registry.npmmirror.com' package-lock.json; then
-            echo 'npmmirror URL left in package-lock.json; the release registry is npmjs' >&2
-            exit 1
-          fi
-          grep -q 'https://registry.npmjs.org/' package-lock.json
+          node --input-type=module - <<'NODE'
+          import { readFileSync } from 'node:fs'
+
+          const EXPECTED = 'https://registry.npmjs.org/'
+          const lock = JSON.parse(readFileSync('package-lock.json', 'utf8'))
+          const resolved = []
+
+          const walk = (value, path) => {
+            if (Array.isArray(value)) {
+              value.forEach((item, index) => walk(item, `${path}[${index}]`))
+              return
+            }
+            if (value === null || typeof value !== 'object') return
+            for (const [key, child] of Object.entries(value)) {
+              if (key === 'resolved' && typeof child === 'string') {
+                resolved.push({ path: `${path}.${key}`, url: child })
+              } else {
+                walk(child, `${path}.${key}`)
+              }
+            }
+          }
+
+          walk(lock, '$')
+
+          const bad = resolved.filter(({ url }) => !url.startsWith(EXPECTED))
+          if (bad.length > 0) {
+            console.error(`package-lock.json has ${bad.length} resolved URL(s) outside ${EXPECTED}:`)
+            for (const { path, url } of bad) console.error(`  ${path}: ${url}`)
+            console.error('The release registry is npmjs over https; a mirror, another host, or http:// must not ship.')
+            process.exit(1)
+          }
+          if (resolved.length === 0) {
+            console.error('package-lock.json has no `resolved` URLs; refusing to pass a vacuous registry check.')
+            process.exit(1)
+          }
+          console.log(`package-lock.json: all ${resolved.length} resolved URLs are ${EXPECTED}`)
+          NODE
       - run: npm ci --registry=https://registry.npmjs.org/
       # The same two commands `prepublishOnly` runs, in the same order. The
       # `--prebuilt` flag is required: it makes the pack step describe the tree

@@ -28,7 +28,11 @@
  *      is probed: `import` (ESM), `require` (Node's require(esm)), and both
  *      `locale/en.json` and `locale/zh.json`;
  *   8. a tiny TypeScript consumer compiles with `tsc --noEmit` against the
- *      installed package, so a missing or widened declaration fails;
+ *      installed package twice: once with stubs standing in for the host
+ *      packages a real host has, and once with no stubs, no `@deepseek-ai/*`
+ *      in the consumer tree, and no `paths` mapping, so a shipped declaration
+ *      that reaches for a host type fails instead of being masked by the
+ *      stubbed pass;
  *   9. it installs a *second* time without `--ignore-scripts`, and that
  *      install is probed too. This is the only check that catches a
  *      `postinstall` that breaks every real user.
@@ -354,7 +358,14 @@ function collectExportTargets(value, out) {
 
 /** Every string target in `exports` (plus `main`/`types`) must exist on disk. */
 function assertDeclaredTargets(installed, installedPkg) {
-  for (const [subpath, value] of Object.entries(installedPkg.exports ?? {})) {
+  // A missing `exports` map would make every loop below a no-op, so the check
+  // would pass on a package whose subpaths no longer resolve. The map is
+  // required: consumers import `dsh-boost/package.json` and `dsh-boost/locale/*.json`.
+  const exportsMap = installedPkg.exports
+  if (exportsMap === null || typeof exportsMap !== 'object' || Array.isArray(exportsMap)) {
+    throw new Error('package.json has no `exports` map; subpath imports would not resolve')
+  }
+  for (const [subpath, value] of Object.entries(exportsMap)) {
     for (const target of collectExportTargets(value, [])) {
       if (subpath.includes('*')) {
         if (!target.includes('*')) {
@@ -446,8 +457,11 @@ function assertDeclarationsDoNotImportHostTypes(tarball, listed) {
   if (declarations.length === 0) throw new Error('tarball has no .d.ts files')
   for (const entry of declarations) {
     const text = run('tar', ['-xOzf', tarball, entry], { cwd: root })
+    // `[^\n]*` stopped at the first newline, so an import written across lines
+    // (`import type {\n  JsonSchemaNode,\n} from '@deepseek-ai/dsh-tools'`) slipped
+    // past. Match across lines instead, and also catch `export * from`.
     const importPattern =
-      /^\s*(?:import|export)\b[^\n]*['"]@deepseek-ai\/|^\s*import\(\s*['"]@deepseek-ai\/|^\s*\/\/\/\s*<reference\s+types=["']@deepseek-ai\//m
+      /(?:^|\n)\s*(?:import|export)\b[\s\S]{0,400}?['"]@deepseek-ai\/|(?:^|\n)\s*import\(\s*['"]@deepseek-ai\/|(?:^|\n)\s*\/\/\/\s*<reference\s+types=["']@deepseek-ai\//
     if (importPattern.test(text)) {
       throw new Error(
         `${entry} imports a host type from @deepseek-ai/*; host packages are devDependencies, ` +
@@ -544,7 +558,62 @@ const TYPECHECK_TSCONFIG = {
     types: [],
     lib: ['ES2023', 'DOM'],
   },
-  include: ['consumer.ts', 'host-stubs.d.ts'],
+}
+
+/**
+ * The stub-free project must be at least as strict as the stubbed one. If a
+ * later edit relaxes `skipLibCheck`, pulls ambient `@types` back in, or adds a
+ * `paths` mapping, this check could pass without the host tree and stop
+ * proving anything. Assert the discipline instead of trusting the constant.
+ */
+function assertNoStubDiscipline(options, label) {
+  if (options.skipLibCheck !== false) throw new Error(`${label}: skipLibCheck must be false`)
+  if (!Array.isArray(options.types) || options.types.length !== 0) {
+    throw new Error(`${label}: types must be an empty array`)
+  }
+  if (options.paths !== undefined) {
+    throw new Error(`${label}: a paths mapping could resolve @deepseek-ai/* without the host tree`)
+  }
+}
+
+/** Write one consumer project; `hostStubs` decides whether the stubs are part of it. */
+function writeTypecheckProject(dir, { hostStubs }) {
+  mkdirSync(dir, { recursive: true })
+  writeFileSync(join(dir, 'consumer.ts'), TYPECHECK_CONSUMER)
+  const include = ['consumer.ts']
+  if (hostStubs) {
+    writeFileSync(join(dir, 'host-stubs.d.ts'), HOST_STUBS)
+    include.push('host-stubs.d.ts')
+  } else {
+    assertNoStubDiscipline(TYPECHECK_TSCONFIG.compilerOptions, 'no-stub typecheck')
+  }
+  writeFileSync(
+    join(dir, 'tsconfig.json'),
+    `${JSON.stringify({ ...TYPECHECK_TSCONFIG, include }, null, 2)}\n`,
+  )
+}
+
+/** The stub-free pass only means something if no host package is installed. */
+function assertNoHostPackages(consumer) {
+  const hostScope = join(consumer, 'node_modules', '@deepseek-ai')
+  if (existsSync(hostScope)) {
+    throw new Error(
+      `consumer node_modules contains ${hostScope}; the no-stub typecheck would resolve host ` +
+        'types from the install instead of failing',
+    )
+  }
+}
+
+function tscProject(tsc, project, label, install) {
+  try {
+    run(process.execPath, [tsc, '--noEmit', '-p', join(project, 'tsconfig.json')], {
+      cwd: project,
+      stdio: ['ignore', 'pipe', 'pipe'],
+    })
+  } catch (error) {
+    const detail = `${error?.stdout ?? ''}${error?.stderr ?? ''}`.trim()
+    throw new Error(`${label} failed (${install} install)${detail ? `:\n${detail}` : ''}`)
+  }
 }
 
 function writeConsumerPackage(dir) {
@@ -589,22 +658,24 @@ function runTypecheck(consumer, install, checks) {
   if (!existsSync(tsc)) {
     throw new Error(`TypeScript is not installed at ${tsc}; run \`npm ci\` before verify:package`)
   }
-  writeFileSync(join(consumer, 'consumer.ts'), TYPECHECK_CONSUMER)
-  writeFileSync(join(consumer, 'host-stubs.d.ts'), HOST_STUBS)
-  writeFileSync(
-    join(consumer, 'tsconfig.json'),
-    `${JSON.stringify(TYPECHECK_TSCONFIG, null, 2)}\n`,
-  )
-  try {
-    run(process.execPath, [tsc, '--noEmit', '-p', join(consumer, 'tsconfig.json')], {
-      cwd: consumer,
-      stdio: ['ignore', 'pipe', 'pipe'],
-    })
-  } catch (error) {
-    const detail = `${error?.stdout ?? ''}${error?.stderr ?? ''}`.trim()
-    throw new Error(`consumer type check failed (${install} install)${detail ? `:\n${detail}` : ''}`)
-  }
+
+  // 1. A real DSH host has the @deepseek-ai tree, so this pass models the
+  //    consumer that does. The stubs stand in only for packages the published
+  //    manifest does not declare.
+  const stubbed = join(consumer, 'typecheck-host-stubs')
+  writeTypecheckProject(stubbed, { hostStubs: true })
+  tscProject(tsc, stubbed, 'consumer type check with host stubs', install)
   checks.push({ name: 'typecheck', install })
+
+  // 2. The same consumer with no stubs, no host packages, and no `paths`
+  //    mapping. A shipped declaration that reaches for a host type must fail
+  //    here; without this pass the stubs above mask exactly that defect, and
+  //    the regex scan would be the only guard against it.
+  assertNoHostPackages(consumer)
+  const bare = join(consumer, 'typecheck-no-host-stubs')
+  writeTypecheckProject(bare, { hostStubs: false })
+  tscProject(tsc, bare, 'consumer type check without host stubs', install)
+  checks.push({ name: 'typecheck-no-host-stubs', install })
 }
 
 function verify({ tarball, tarballName, packed, prebuilt }) {
