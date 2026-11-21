@@ -10,6 +10,21 @@ Design rationale lives in `docs/superpowers/specs/`; the release-acceptance proc
 
 ## [Unreleased]
 
+## [0.1.3] - 2026-11-21
+
+### 修复 Fixed
+
+- **替换不再在模型看不到的输出上提交**：`accept` 自带 `content`（外层 shaper 改写过的正文）时清空计划、不替换；此前守卫与字面量校验读的是原始回执，而模型看到的是改写后的文本。
+- **节省改报区间**：`saved_input_tokens` 是上界（后一次请求的输入，含被替换调用自己的结果），新增 `avoided_total_tokens` 是下界（计划那一次请求的 `input + cacheRead + output`）；`status.saved.substitution` / `substitution_avoided` 成对求和，任一收据缺一侧则两侧都不计，避免下界超过上界。
+- **计划参数按 JSON 往返归一**：`-0` 与 `1e400` 这类合法 JSON 值此前会被防篡改检查判为篡改，合成回合花掉而工具从未执行。
+- **决策阶段抛错留痕**：新增收据码 `substitute-skipped:gate-error`。
+- **外层 shaper 的页脚必须同时写明位置与省略字节数**，否则不算同一条回执的改写（此前只要尾部像页脚就接受）。
+- **三个新的宿主能力码**：`ERR_HOST_WORKSPACE_REGISTRY_BROKEN`（服务在但 `list()` 抛错）、`ERR_HOST_SPILL_UNUSABLE`（服务在但没有 `saveText`）、`ERR_HOST_SELECTOR_UNAVAILABLE`（LLM 软依赖缺失）。此前这三种都是「看起来健康的插件什么都不做」。`status` 新增 `hasSpill`。
+- **版本守卫按 `engines.dsh` 区间判断**：rc.5 / 0.2.2 不再告警。
+- **测试门不再可能空跑通过**：`npm test` 改为 `scripts/run-tests.mjs`，测试文件少于 20 个直接失败（此前 glob 匹配不到任何文件时 Node 以 0 退出）。
+- **发布门补两道**：`verify:package` 在无宿主 stub 的消费方树里再跑一次类型检查；CI 要求 lockfile 里每条 `resolved` 都是 npmjs。
+- 文档与设计稿按本轮审计结果更正（registry 事实、`hasSpill`/`hasWorkspaceRegistry` 的存在性语义、页脚算术、影子报告的能力边界、需求收窄的记录与出处）。
+
 ## [0.1.2] - 2026-11-21
 
 ### 修复 Fixed
