@@ -1,7 +1,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { execFile } from 'node:child_process'
-import { mkdtemp, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -27,9 +27,26 @@ const fresh = () => mkdtemp(join(tmpdir(), 'boost-scripts-'))
 // shadow-report.mjs
 // ---------------------------------------------------------------------------
 
-test('shadow-report 对空收据目录输出四项零值，不抛错', async () => {
+test('shadow-report 对存在但为空的收据目录输出四项零值，不抛错', async () => {
   const dir = join(await fresh(), 'receipts')
+  await mkdir(dir, { recursive: true })
   const out = await runScript('shadow-report.mjs', ['--dir', dir])
+  assert.deepEqual(out, {
+    saveableRatio: 0,
+    byFamily: {},
+    candidateRecall: 0,
+    retrievalUpperBound: 0,
+  })
+})
+
+test('shadow-report 拒绝把不存在的目录报成零结果，除非显式 --allow-empty', async () => {
+  const dir = join(await fresh(), 'receipts')
+  // A typo in the path must not look like a genuine zero-result shadow week.
+  await assert.rejects(
+    () => runScript('shadow-report.mjs', ['--dir', dir]),
+    /missing directory|--allow-empty/,
+  )
+  const out = await runScript('shadow-report.mjs', ['--dir', dir, '--allow-empty'])
   assert.deepEqual(out, {
     saveableRatio: 0,
     byFamily: {},
