@@ -8,6 +8,7 @@
  * cordis can tie it to the plugin's lifecycle.
  */
 import { App } from './App'
+import { TITLE } from './copy'
 import styles from './styles.css?inline'
 
 /** The slot a settings page registers into, per the shell's settings contract. */
@@ -55,15 +56,17 @@ export function apply(ctx: ClientContext): void {
     return
   }
 
-  ctx.slots.inject(SETTINGS_SLOT, () =>
-    ctx.slots!.register(
+  // Narrowed once, so the closure below carries no non-null assertion.
+  const slots = ctx.slots
+  slots.inject(SETTINGS_SLOT, () =>
+    slots.register(
       {
         name: SETTINGS_SLOT,
         id: SETTINGS_NAMESPACE,
         order: 50,
         // A thunk, not a string: the shell re-reads it when the locale changes,
         // so the nav item follows the language without this plugin subscribing.
-        label: () => 'Token 效率',
+        label: () => TITLE,
         inject: () => ({}),
       },
       App,

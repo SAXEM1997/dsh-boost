@@ -305,6 +305,11 @@ function clientBundleOf(manifest, label) {
   if (declared === undefined) {
     throw new Error(`${label}: exports["./client"] is declared but dsh.client is not`)
   }
+  if (declared === null || typeof declared !== 'object') {
+    // `null`/`false` would otherwise read as "declared" and slip past the pair
+    // check below, so a malformed field is named rather than inferred around.
+    throw new Error(`${label}: dsh.client must be an object, got ${JSON.stringify(declared)}`)
+  }
   if (target === undefined) {
     throw new Error(`${label}: dsh.client is declared but exports["./client"] is not`)
   }

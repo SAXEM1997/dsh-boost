@@ -20,6 +20,11 @@ import vm from 'node:vm'
 
 const root = new URL('..', import.meta.url).pathname
 
+/** Specifiers that must resolve through the host's frozen module table. */
+function isReactSpecifier(specifier: string): boolean {
+  return specifier === 'react' || specifier.startsWith('react/') || specifier.startsWith('react-dom')
+}
+
 /** What the host's loader hands a bundle: `{ id, chunk, factory }`. */
 interface Registration {
   id: string
@@ -94,16 +99,21 @@ function loadBundle(bundle: string): {
   const registration = registrations[0]!
   const loaded = registration.factory((specifier: string) => {
     requested.push(specifier)
-    if (specifier === 'react' || specifier.startsWith('react/')) return {}
+    if (isReactSpecifier(specifier)) return {}
     throw new Error(`Cannot find module '${specifier}'`)
   })
   return { registration, requested, exports: loaded }
 }
 
 test('client bundle registers under the package name the host expects', async () => {
-  const { registration } = loadBundle(await buildBundle())
-  // `id` must match the graph row being executed, which is the package name.
-  assert.equal(registration.id, 'dsh-boost')
+  const bundle = await buildBundle()
+  const { registration } = loadBundle(bundle)
+  // `id` must match the graph row being executed, which is the package name —
+  // so it is read from `package.json` rather than restated here. The build's own
+  // copy of the name lives in `ui/vite.config.ts`; a rename that misses it fails
+  // this assertion instead of passing silently.
+  const manifest = JSON.parse(await readFile(join(root, 'package.json'), 'utf8')) as { name: string }
+  assert.equal(registration.id, manifest.name)
 })
 
 test('client bundle exposes apply and inject to cordis', async () => {
@@ -122,7 +132,7 @@ test('client bundle loads React through the host module table, never inlined', a
   // The host's frozen module table is the ONLY place React comes from; a second
   // copy inside this file is a different React instance and breaks hooks.
   assert.ok(
-    requested.some((specifier) => specifier === 'react' || specifier.startsWith('react/')),
+    requested.some(isReactSpecifier),
     `the bundle never asked the host for React (asked for: ${requested.join(', ') || 'nothing'})`,
   )
   // React's own source defines these symbols; externalised, nothing here does.
