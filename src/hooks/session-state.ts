@@ -48,6 +48,11 @@ import type { ReceiptAnchors } from '../gate/invalidate.js'
 import type { ReceiptStore } from '../receipts/store.js'
 import type { CanonicalReceipt } from '../projection/canonicalise.js'
 import type { TurnClock } from './clock.js'
+// `sessionClock` is the single owner of the shared-instance loan rule. Importing
+// it here keeps `clockTurnOf` from growing a second, disagreeing copy of that
+// rule; the cycle is type/function-only (neither module calls the other at
+// evaluation time).
+import { sessionClock } from './llm-stream.js'
 import type { PendingEntry, PendingQueue } from './pending.js'
 
 /** One session's receipts and in-flight dispatches for the current turn. */
@@ -166,12 +171,15 @@ export interface SessionPlumbing {
 /**
  * The session's host turn, or `undefined` when no clock can answer a real turn.
  *
- * The per-session runtime wins over the shared fallback, exactly as in
- * `sessionClock`. A clock that throws, a missing clock and a non-finite or
- * non-positive turn all mean "no host turn": `TurnClock` reports 0 before the
- * first `agent/request`, and real host turns start at 1. Callers that need a
- * number for a receipt field write `?? 0`; callers that decide turn validity
- * keep the `undefined` distinction.
+ * The clock is resolved through `sessionClock`, never by reading `deps.clock`
+ * directly: that function owns the shared-instance loan rule. When no
+ * per-session runtime is wired, one shared clock may only be read by the
+ * session it was lent to; a second session gets `undefined` instead of another
+ * session's turn (review row 20). A clock that throws, a missing clock and a
+ * non-finite or non-positive turn all mean "no host turn": `TurnClock` reports
+ * 0 before the first `agent/request`, and real host turns start at 1. Callers
+ * that need a number for a receipt field write `?? 0`; callers that decide
+ * turn validity keep the `undefined` distinction.
  */
 export function clockTurnOf(
   deps: SessionPlumbing,
@@ -179,9 +187,11 @@ export function clockTurnOf(
 ): number | undefined {
   let clock: TurnClock | undefined
   try {
-    clock = deps.sessions?.clockFor(sessionId) ?? deps.clock
+    // `SessionPlumbing` is the structural subset `sessionClock` reads; the
+    // cast only widens it to the full `HookDeps` the hook modules pass.
+    clock = sessionClock(deps as unknown as Parameters<typeof sessionClock>[0], sessionId)
   } catch {
-    clock = deps.clock
+    clock = undefined
   }
   try {
     const turn = clock?.turn()

@@ -61,6 +61,7 @@ type Assembly = {
   host: Any
   dir: string
   spill: Any
+  warnings: string[]
   setChunks: (chunks: readonly StreamChunk[]) => void
   setScopeDoc: (doc: Any) => Promise<void>
   status: () => Promise<Any>
@@ -86,7 +87,7 @@ async function collect(iterable: AsyncIterable<StreamChunk>): Promise<StreamChun
  * No hook body is called here with hand-built `HookDeps`: every assertion goes
  * through what the shipped plugin does with the host it was actually given.
  */
-async function createAssembly(options: { spill?: Any; tokenMeter?: Any; scope?: Any } = {}): Promise<Assembly> {
+async function createAssembly(options: { spill?: Any; tokenMeter?: Any; scope?: Any; llm?: Any } = {}): Promise<Assembly> {
   const dir = await mkdtemp(join(tmpdir(), 'dsh-boost-host-'))
   const root = join(dir, 'boost')
   await mkdir(root, { recursive: true })
@@ -96,18 +97,26 @@ async function createAssembly(options: { spill?: Any; tokenMeter?: Any; scope?: 
   process.env.DSH_HOME = dir
 
   let chunks: readonly StreamChunk[] = []
+  const warnings: string[] = []
   const host = fakeHost({
     get(name: string) {
       if (name === 'workspaceRegistry') return { list: () => [{ id: WORKSPACE, path: CWD }] }
       if (name === 'spillStore') return options.spill
       if (name === 'tokenMeter') return options.tokenMeter
+      if (name === 'llm') return options.llm
       return undefined
     },
-    llm: {
-      stream(_options: GenerateOptions): AsyncIterable<StreamChunk> {
-        return streamOf(chunks)
-      },
+    logger: {
+      info: () => {},
+      warn: (message: string) => warnings.push(message),
     },
+    llm:
+      options.llm ??
+      {
+        stream(_options: GenerateOptions): AsyncIterable<StreamChunk> {
+          return streamOf(chunks)
+        },
+      },
   })
   plugin.apply(host, {})
 
@@ -115,6 +124,7 @@ async function createAssembly(options: { spill?: Any; tokenMeter?: Any; scope?: 
     host,
     dir,
     spill: options.spill,
+    warnings,
     setChunks(next): void {
       chunks = next
     },
@@ -1030,4 +1040,115 @@ test('real apply counts a tool with no configured family and names it in status'
   const status = await a.status()
   assert.equal(status.data.projection_unknown_families, 1)
   assert.equal(status.data.projection_unknown_tools['mcp__custom__do-thing'], 1)
+})
+
+// ---------------------------------------------------------------------------
+// Round 4: clock loans and the deprecated request event.
+// ---------------------------------------------------------------------------
+
+test('row 20: clockTurnOf refuses a shared clock lent to another session', async () => {
+  const { TurnClock } = await import('../src/hooks/clock.ts')
+  const { clockTurnOf } = await import('../src/hooks/session-state.ts')
+  const { sessionClock } = await import('../src/hooks/llm-stream.ts')
+  const clock = new TurnClock()
+  clock.onModelRequest(1, 0)
+  const warnings: string[] = []
+  const deps: Any = { clock, logger: { warn: (message: string) => warnings.push(message) } }
+
+  // Session A borrows the only clock; the per-session runtime is absent.
+  assert.equal(sessionClock(deps, 'a'), clock)
+  assert.equal(clockTurnOf(deps, 'a'), 1)
+  // B must not read A's turn: a stale turn is how one session's pending
+  // substitution is stamped with another session's number.
+  assert.equal(clockTurnOf(deps, 'b'), undefined)
+  assert.equal(warnings.length, 1, 'the refusal is still warned once')
+})
+
+test('row 22: agent/request only fills a route pre-step did not provide, and warns once', async (t) => {
+  const a = await createAssembly({ spill: recordingSpill(), tokenMeter })
+  t.after(() => a.dispose())
+
+  // The non-deprecated seam carries no modelSelection, so the deprecated
+  // event is the only route source: that is the compatibility path.
+  await a.host.callHook(
+    'agent/pre-step',
+    [{ agent, turn: 1, step: 0, signal: new AbortController().signal }],
+    async () => ({ kind: 'enter' }),
+  )
+  await agentRequest(a.host)
+  await agentRequest(a.host)
+
+  const warnings = a.warnings.filter(message => message.includes('ERR_HOST_NO_MODEL_SELECTION'))
+  assert.equal(warnings.length, 1, JSON.stringify(a.warnings))
+})
+
+test('row 22: the pre-step modelSelection wins over the deprecated resolved config', async (t) => {
+  const state: { main: StreamChunk[]; selectorRequests: Any[] } = { main: [], selectorRequests: [] }
+  const llm = {
+    stream(options: GenerateOptions): AsyncIterable<StreamChunk> {
+      if (options.purpose === 'boost-selector') {
+        state.selectorRequests.push(options)
+        return streamOf([
+          { type: 'text-delta', index: 0, text: 'B' },
+          { type: 'finish', reason: { kind: 'stop' } },
+        ])
+      }
+      return streamOf(state.main)
+    },
+  }
+  const a = await createAssembly({ spill: recordingSpill(), tokenMeter, llm })
+  t.after(() => a.dispose())
+
+  await a.host.callHook(
+    'agent/pre-step',
+    [
+      {
+        agent,
+        turn: 1,
+        step: 0,
+        signal: new AbortController().signal,
+        modelSelection: { provider: 'pre-step-provider', model: 'pre-step-model' },
+      },
+    ],
+    async () => ({ kind: 'enter' }),
+  )
+  // The deprecated event resolves a different route; it must not overwrite the
+  // non-deprecated capture.
+  await a.host.callHook(
+    'agent/request',
+    [{ agent, turn: 1, step: 0, signal: new AbortController().signal }],
+    async () => ({ provider: 'request-provider', model: 'request-model' }),
+  )
+
+  const plan = {
+    goal: 'g',
+    steps: [
+      { id: 'A', tool: 'read', args: { file_path: '/a' }, guards: [{ text_not_contains: 'B-RECEIPT' }] },
+      {
+        id: 'B',
+        tool: 'read',
+        args: { file_path: { $public: { after: 'root', field: '$scalar' } } },
+        guards: [{ text_contains: 'BOUND' }],
+      },
+    ],
+  }
+  state.main = [
+    { type: 'text-delta', index: 0, text: `<CHISEL_PLAN>${JSON.stringify(plan)}</CHISEL_PLAN>` },
+    {
+      type: 'usage',
+      usage: { inputTokens: 100_000, cacheReadTokens: 100_000, outputTokens: 1 },
+    },
+    { type: 'finish', reason: { kind: 'stop' } },
+  ]
+  await collect(a.host.stream(SESSION, {}))
+  await postExecute(a.host, { text: 'BOUND-VALUE', arguments: { path: '/a' }, callId: 'root' })
+
+  assert.equal(state.selectorRequests.length, 1, 'the two-candidate plan must reach the selector')
+  assert.equal(state.selectorRequests[0].provider, 'pre-step-provider')
+  assert.equal(state.selectorRequests[0].model, 'pre-step-model')
+  assert.equal(
+    a.warnings.some(message => message.includes('ERR_HOST_NO_MODEL_SELECTION')),
+    false,
+    'the compatibility path must not run when pre-step supplied the route',
+  )
 })

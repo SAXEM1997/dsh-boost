@@ -244,9 +244,11 @@ test('tools.register 抛错时独立告警带稳定码，不冒充 hook 注册�
 // Finding 3: the verified host line is declared and checked at runtime.
 // ---------------------------------------------------------------------------
 
-test('engines.dsh pins the verified host line, not an unverified range', async () => {
+test('engines.dsh declares the verified host range, not a bare pin (row 2)', async () => {
   const pkg = JSON.parse(await readFile(new URL('../package.json', import.meta.url), 'utf8'))
-  assert.equal(pkg.engines.dsh, '0.2.2-rc.4')
+  // The host's compatibility preflight runs `semver.satisfies(..., {includePrerelease:true})`,
+  // so the range must admit rc.5 (byte-identical host packages) without admitting 0.2.3.
+  assert.equal(pkg.engines.dsh, '>=0.2.2-rc.4 <0.2.3-0')
 })
 
 test('apply 记录解析到的宿主版本，匹配时只记 info', () => {
@@ -563,4 +565,278 @@ test('公开 types 模块只含结构化宿主类型，模块增强留在发布�
   // file that tsc consumes but never emits.
   const augment = await readFile(new URL('../src/host-augment.d.ts', import.meta.url), 'utf8')
   assert.match(augment, /declare module '@deepseek-ai\/dsh-llm\/types'/)
+})
+
+// ---------------------------------------------------------------------------
+// Round 4: per-listener attribution, service invalidation, event absence,
+// foreign section ownership.
+// ---------------------------------------------------------------------------
+
+/** Replace `host.on` so one named mount throws, as a disposed cordis ctx would. */
+function failMount(host: any, event: string): void {
+  const on = host.on.bind(host)
+  host.on = (name: string, handler: (...args: any[]) => unknown, options?: unknown) => {
+    if (name === event) throw new Error('cordis: context is not active')
+    return on(name, handler, options as never)
+  }
+}
+
+/** The seven session listeners this plugin owns. */
+const SESSION_EVENTS = [
+  'system-prompt/assemble',
+  'agent/pre-step',
+  'agent/request',
+  'llm/stream',
+  'session/event',
+  'session/flush',
+  'session/disposed',
+] as const
+
+test('row 4: the first session listener failing does not drop the other six', async (t) => {
+  const app = await appliedHost(t, {
+    beforeApply: (host) => failMount(host, 'system-prompt/assemble'),
+  })
+
+  assert.equal(app.host.hookCount('system-prompt/assemble'), 0)
+  for (const event of SESSION_EVENTS) {
+    if (event === 'system-prompt/assemble') continue
+    assert.ok(app.host.hookCount(event) > 0, `${event} must still be mounted`)
+  }
+  assert.ok(
+    app.warnings.some(
+      message => message.includes('ERR_BOOST_PARTIAL_MOUNT') && message.includes('system-prompt/assemble'),
+    ),
+    JSON.stringify(app.warnings),
+  )
+  const status = await statusOf(app.host)
+  assert.ok(status.degraded.includes('ERR_BOOST_PARTIAL_MOUNT'), JSON.stringify(status.degraded))
+})
+
+test('row 4: a middle session listener failing names itself and keeps the rest', async (t) => {
+  const app = await appliedHost(t, {
+    beforeApply: (host) => failMount(host, 'agent/request'),
+  })
+
+  assert.equal(app.host.hookCount('agent/request'), 0)
+  for (const event of SESSION_EVENTS) {
+    if (event === 'agent/request') continue
+    assert.ok(app.host.hookCount(event) > 0, `${event} must still be mounted`)
+  }
+  // The drift detector and the synthesizer both live on llm/stream; neither
+  // may be lost because a different listener failed.
+  assert.equal(app.host.hookCount('llm/stream'), 2)
+  assert.ok(
+    app.warnings.some(
+      message => message.includes('ERR_BOOST_PARTIAL_MOUNT') && message.includes('agent/request'),
+    ),
+    JSON.stringify(app.warnings),
+  )
+  const status = await statusOf(app.host)
+  assert.ok(status.degraded.includes('ERR_BOOST_PARTIAL_MOUNT'), JSON.stringify(status.degraded))
+})
+
+/** Assemble with one protocol section, as the host does before a step. */
+async function assembleSection(host: any, agent: TestAgent): Promise<any> {
+  const assembly = {
+    sections: [{ name: 'dsh-boost', text: 'seed' }],
+    contexts: [],
+    variables: {},
+  }
+  return host.callHook(
+    'system-prompt/assemble',
+    [assembly, { agent, scope: agent }],
+    () => assembly,
+  )
+}
+
+test('row 6: a failing workspaceRegistry is re-resolved after the provider is replaced', async (t) => {
+  const broken = {
+    list: () => {
+      throw new Error('the registry fiber was disposed')
+    },
+    resolveByPath: async () => {
+      throw new Error('the registry fiber was disposed')
+    },
+  }
+  const services = new Map<string, unknown>([['workspaceRegistry', broken]])
+  const app = await appliedHost(t, { services })
+  await new ScopeStore(app.root).write(doc => ({ ...doc, mode: 'global' }), 0)
+  const agent: TestAgent = { session: { header: { id: 's1', cwd: '/real/w/a' } } }
+
+  const first = await assembleSection(app.host, agent)
+  assert.equal(first.sections[0].text, '', 'a broken registry is invisible')
+
+  // The provider is replaced by a healthy one. A memo that trusted its first
+  // success would keep the dead binding for the process lifetime.
+  services.set('workspaceRegistry', TEST_REGISTRY)
+  const second = await assembleSection(app.host, agent)
+  assert.match(second.sections[0].text, /<CHISEL_PLAN>/)
+})
+
+test('row 6: ctx.effect cleanup invalidates the soft service bindings', async (t) => {
+  const services = new Map<string, unknown>([['workspaceRegistry', TEST_REGISTRY]])
+  let cleanup: (() => void) | undefined
+  const app = await appliedHost(t, {
+    services,
+    beforeApply: (host) => {
+      host.effect = (run: () => () => void) => {
+        cleanup = run()
+      }
+    },
+  })
+  await new ScopeStore(app.root).write(doc => ({ ...doc, mode: 'global' }), 0)
+  const agent: TestAgent = { session: { header: { id: 's1', cwd: '/real/w/a' } } }
+
+  const first = await assembleSection(app.host, agent)
+  assert.match(first.sections[0].text, /<CHISEL_PLAN>/)
+  assert.equal(typeof cleanup, 'function', 'apply must register a disposal effect')
+
+  services.set('workspaceRegistry', { list: () => [], resolveByPath: async () => undefined })
+  cleanup?.()
+  const second = await assembleSection(app.host, agent)
+  assert.equal(second.sections[0].text, '')
+})
+
+test('row 6: a spill write re-confirms the binding instead of trusting the memo', async (t) => {
+  const firstSpill = {
+    saved: [] as string[],
+    async saveText(input: any) {
+      firstSpill.saved.push(input.content)
+      return { locator: '/spill/first.txt', bytes: input.content.length, retrievalHint: 'read it' }
+    },
+  }
+  const secondSpill = {
+    saved: [] as string[],
+    async saveText(input: any) {
+      secondSpill.saved.push(input.content)
+      return { locator: '/spill/second.txt', bytes: input.content.length, retrievalHint: 'read it' }
+    },
+  }
+  const services = new Map<string, unknown>([
+    ['workspaceRegistry', TEST_REGISTRY],
+    ['tokenMeter', { estimateMessage: () => 7 }],
+    ['spillStore', firstSpill],
+  ])
+  const app = await appliedHost(t, { services })
+  await new ScopeStore(app.root).write(
+    doc => ({ ...doc, mode: 'global', projection: 'on', shadow: false }),
+    0,
+  )
+  const agent: TestAgent = { session: { header: { id: 's1', cwd: '/real/w/a' } } }
+  await assembleWarm(app.host, agent)
+
+  const big = 'x'.repeat(5000)
+  const exec = (callId: string) => ({
+    name: 'read',
+    callId,
+    agent,
+    arguments: { file_path: '/real/w/a/f' },
+  })
+  const result = { content: [{ type: 'text', text: big }] }
+
+  await app.host.callHook('tools/post-execute', [exec('c1'), result], () => ({ kind: 'accept' }))
+  assert.equal(firstSpill.saved.length, 1)
+
+  services.set('spillStore', secondSpill)
+  await app.host.callHook('tools/post-execute', [exec('c2'), result], () => ({ kind: 'accept' }))
+  assert.equal(secondSpill.saved.length, 1, 'the replaced spill store must receive the next write')
+})
+
+test('row 8: a never-observed system-prompt/assemble warns once at the first pre-step', async (t) => {
+  const app = await appliedHost(t)
+  const agent: TestAgent = { session: { header: { id: 's1', cwd: '/real/w/a' } } }
+  const preStep = () =>
+    app.host.callHook(
+      'agent/pre-step',
+      [{ agent, turn: 1, step: 0, signal: new AbortController().signal }],
+      async () => ({ kind: 'enter' }),
+    )
+
+  await preStep()
+  await preStep()
+
+  const warnings = app.warnings.filter(message => message.includes('ERR_HOST_NO_SYSTEM_PROMPT_ASSEMBLE'))
+  assert.equal(warnings.length, 1, JSON.stringify(app.warnings))
+  const status = await statusOf(app.host)
+  assert.ok(status.degraded.includes('ERR_BOOST_PARTIAL_MOUNT'), JSON.stringify(status.degraded))
+})
+
+test('row 8: a never-observed agent/pre-step warns once at the first main request', async (t) => {
+  const app = await appliedHost(t)
+
+  // Auxiliary streams carry their own purpose and need no step clock: they
+  // must not raise the warning.
+  app.host.stream('s1', { purpose: 'session-title' })
+  assert.equal(
+    app.warnings.some(message => message.includes('ERR_HOST_NO_AGENT_PRE_STEP')),
+    false,
+    'an auxiliary stream is not evidence that the step seam is missing',
+  )
+
+  app.host.stream('s1', {})
+  app.host.stream('s1', {})
+
+  const warnings = app.warnings.filter(message => message.includes('ERR_HOST_NO_AGENT_PRE_STEP'))
+  assert.equal(warnings.length, 1, JSON.stringify(app.warnings))
+  const status = await statusOf(app.host)
+  assert.ok(status.degraded.includes('ERR_BOOST_PARTIAL_MOUNT'), JSON.stringify(status.degraded))
+})
+
+test('row 32: a foreign owner of the section name does not skip this plugin', async (t) => {
+  const app = await appliedHost(t, {
+    beforeApply: (host) => {
+      // Another plugin registered the same section name first. The host's
+      // duplicate message is generic, so it is not proof that OUR previous
+      // apply ran.
+      host.systemPrompt.section({ name: 'dsh-boost', order: 100, text: 'foreign' })
+    },
+  })
+
+  // Every mount this plugin owns must still exist; only the section is lost.
+  assert.equal(app.host.hookCount('tools/post-execute'), 1)
+  assert.equal(app.host.hookCount('tools/execute'), 1)
+  assert.equal(app.host.hookCount('llm/stream'), 2)
+  assert.equal(app.host.tools.definitions.length, 1)
+  assert.equal(
+    app.warnings.some(message => message.includes('ERR_BOOST_ALREADY_MOUNTED')),
+    false,
+    'a foreign section must not be misdiagnosed as our own duplicate apply',
+  )
+  assert.ok(
+    app.warnings.some(message => message.includes('ERR_BOOST_SECTION_REGISTER_FAILED')),
+    JSON.stringify(app.warnings),
+  )
+  const status = await statusOf(app.host)
+  assert.ok(status.degraded.includes('ERR_BOOST_PARTIAL_MOUNT'), JSON.stringify(status.degraded))
+
+  // The foreign section is not ours to rewrite.
+  const agent: TestAgent = { session: { header: { id: 's1', cwd: '/real/w/a' } } }
+  const assembly = {
+    sections: [{ name: 'dsh-boost', text: 'foreign' }],
+    contexts: [],
+    variables: {},
+  }
+  const patched = await app.host.callHook(
+    'system-prompt/assemble',
+    [assembly, { agent, scope: agent }],
+    () => assembly,
+  )
+  assert.equal(patched.sections[0].text, 'foreign')
+})
+
+test('row 32: a second apply over a foreign-section host does not double-mount', async (t) => {
+  const app = await appliedHost(t, {
+    beforeApply: (host) => {
+      host.systemPrompt.section({ name: 'dsh-boost', order: 100, text: 'foreign' })
+    },
+  })
+  const hooksBefore = app.host.hookCount('tools/post-execute')
+  const toolsBefore = app.host.tools.definitions.length
+
+  // The first apply mounted the hooks despite the foreign section; the second
+  // must recognise its own mounts through the marker, not the generic message.
+  plugin.apply(app.host as unknown as PluginContext, {})
+
+  assert.equal(app.host.hookCount('tools/post-execute'), hooksBefore)
+  assert.equal(app.host.tools.definitions.length, toolsBefore)
 })

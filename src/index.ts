@@ -108,6 +108,45 @@ function isVerifiedHostVersion(version: string): boolean {
  */
 const ERR_HOST_VERSION_MISMATCH = 'ERR_HOST_VERSION_MISMATCH'
 
+/**
+ * Stable host code: `system-prompt/assemble` was never observed.
+ *
+ * `ctx.on` accepts any string, so a renamed event registers successfully and
+ * then never fires. This module needs assemble to warm the visibility cache
+ * before section text resolves (design D4). The host runs assemble before
+ * `agent/pre-step`, so the first pre-step without a single observed assemble is
+ * proof the seam is gone. Raised once per process, on the first step that
+ * needed it; the only signal is "never fired", so the event name also joins
+ * `missingMounts`, and `status.degraded` reports `ERR_BOOST_PARTIAL_MOUNT`
+ * (the per-event code is carried by the warning and the mount list, which is
+ * the reachable status channel without a new status-side mapping).
+ */
+const ERR_HOST_NO_SYSTEM_PROMPT_ASSEMBLE = 'ERR_HOST_NO_SYSTEM_PROMPT_ASSEMBLE'
+
+/**
+ * Stable host code: `agent/pre-step` was never observed.
+ *
+ * Raised once, on the first main `llm/stream` request for a session whose step
+ * clock was never driven. Without pre-step the turn is unknown, so every
+ * pending substitution is abandoned; the warning says why instead of leaving
+ * `status` healthy. Auxiliary (`purpose`-tagged) streams do not need the clock
+ * and do not raise it. As with assemble, the event name joins `missingMounts`
+ * and the per-event code is carried by the one-shot warning.
+ */
+const ERR_HOST_NO_AGENT_PRE_STEP = 'ERR_HOST_NO_AGENT_PRE_STEP'
+
+/**
+ * Stable host code: the selector route had to come from `agent/request`.
+ *
+ * `agent/pre-step` carries `modelSelection` and is the non-deprecated source.
+ * When a host leaves it empty, the deprecated `agent/request` resolved config
+ * is the only route left; the selector can still run, but the dependency is
+ * reported once because that event is marked `@deprecated`. Absence of
+ * `agent/request` itself is non-fatal and is reported separately by
+ * `ERR_HOST_NO_AGENT_REQUEST`.
+ */
+const ERR_HOST_NO_MODEL_SELECTION = 'ERR_HOST_NO_MODEL_SELECTION'
+
 /** The app-boot package whose version IS the dsh runtime version. */
 const HOST_VERSION_PACKAGE = '@deepseek-ai/dsh-app-boot'
 
@@ -194,10 +233,12 @@ let duplicateMountAttempts = 0
  *
  * `dsh-system-prompt` builds a plain `Error` whose message starts with
  * `prompt section "<name>" is already registered` (global and scoped variants
- * both start that way) and exposes no code. Matching that prefix for our own
- * section is the only duplicate evidence available; a future wording change
- * falls through to the generic branch, which warns with the raw error and keeps
- * the control tool mountable instead of silently disabling everything.
+ * both start that way) and exposes no code. The message alone proves only that
+ * *some* plugin owns the name — another plugin using `dsh-boost` produces the
+ * same text — so it is combined with {@link ownSectionRegistries}, the mount
+ * marker this module owns (review row 32). A duplicate from a foreign owner is
+ * a section-mount failure, not "this plugin is already wired": the remaining
+ * hooks and the control tool must still mount.
  */
 function isDuplicateSectionError(error: unknown): boolean {
   return (
@@ -225,7 +266,7 @@ function serviceOf<T>(ctx: PluginContext, name: string): T | undefined {
 }
 
 /**
- * A memoising, retrying service getter with an explicit reset.
+ * A memoising, retrying service getter with explicit invalidation.
  *
  * `ctx.get(name, strict=true)` answers `undefined` until the provider fiber is
  * ACTIVE, and cordis starts sibling plugin entries concurrently, so a service
@@ -234,12 +275,20 @@ function serviceOf<T>(ctx: PluginContext, name: string): T | undefined {
  * later. Every call site reads the getter, so the plugin recovers on the next
  * request instead of staying inert for the process lifetime.
  *
- * `reset()` drops the memo. It exists for a service that resolved but then
- * failed at the point of use (a spill store whose `saveText` rejects): the
- * provider may have been replaced or restarted, and a getter that trusted its
- * first success forever would keep calling a dead backend (review row 31).
+ * A first success is not a permanent binding (review row 6). `reset()` drops
+ * the memo, and `refresh()` re-reads `ctx.get` and replaces the memo with the
+ * current binding. Callers use `reset()` after a point-of-use failure (a
+ * spill store whose `saveText` rejects, a registry whose `list()` throws, an
+ * LLM whose stream fails); `refresh()` is the pre-write re-confirmation the
+ * spill path needs, because a provider can be replaced between the decision
+ * that resolved it and the write that uses it. `apply` also drops all three
+ * memos when the owning cordis fiber unloads.
  */
-type LazyService<T> = (() => T | undefined) & { reset(): void }
+type LazyService<T> = (() => T | undefined) & {
+  reset(): void
+  /** Re-read `ctx.get` and replace the memo with the current binding. */
+  refresh(): T | undefined
+}
 
 function lazyService<T>(ctx: PluginContext, name: string): LazyService<T> {
   let resolved: T | undefined
@@ -251,7 +300,42 @@ function lazyService<T>(ctx: PluginContext, name: string): LazyService<T> {
   get.reset = () => {
     resolved = undefined
   }
+  get.refresh = () => {
+    resolved = serviceOf<T>(ctx, name)
+    return resolved
+  }
   return get
+}
+
+/**
+ * The cordis disposal seam (`ctx.effect`), optional for structural fake hosts.
+ *
+ * Cordis has no `dispose` event; a plugin owns its fiber and `ctx.effect`
+ * registers a disposer that runs when that fiber unloads (`fiber.ts`: effects
+ * are collected and run in reverse order on unload). The real context exposes
+ * it on the proxy, but `PluginContext` stays the narrower structural host this
+ * package can type without a cordis dependency, so the read is optional.
+ */
+type EffectContext = {
+  effect?: (execute: () => () => void, label?: string) => unknown
+}
+
+/**
+ * Run `invalidate` when the owning fiber unloads.
+ *
+ * Used for the three soft-service memos: a disposed provider must not leave a
+ * stale binding behind for a later provider that reuses the same name (review
+ * row 6). A host without the effect seam is not a failure: the point-of-use
+ * resets still recover, only the disposal edge is missed.
+ */
+function onDispose(ctx: PluginContext, invalidate: () => void): void {
+  try {
+    const effect = (ctx as PluginContext & EffectContext).effect
+    if (typeof effect !== 'function') return
+    effect.call(ctx, () => invalidate, 'dsh-boost: soft service bindings')
+  } catch {
+    // A host that rejects the effect still gets the per-use resets.
+  }
 }
 
 /**
@@ -535,11 +619,38 @@ function systemTextOf(options: unknown): string | undefined {
  *
  * `agent/pre-step` is the non-deprecated clock seam (`agent/request` is
  * marked `@deprecated`); it fires once per proposed step with the host
- * `turn`/`step`. `agent/request` is kept for the selector route, which only
- * its resolved config carries, and as a clock/visibility fallback. A model
+ * `turn`/`step`, and it already carries the captured `modelSelection`. The
+ * selector route is read from there first; `agent/request`'s resolved config
+ * is only the compatibility path for a host whose pre-step does not populate
+ * `modelSelection`, and it warns once when it is used. The visibility warm
+ * stays at `assemble` (D4); `agent/pre-step` warms only when `assemble` never
+ * fired, so no session's visibility depends on the deprecated event. A model
  * request that reaches `llm/stream` without any observed `agent/request` is
- * reported once with `ERR_HOST_NO_AGENT_REQUEST` instead of silently losing
- * the route.
+ * still reported once with `ERR_HOST_NO_AGENT_REQUEST`; the route itself does
+ * not depend on it.
+ *
+ * ## Every mount is attributed
+ *
+ * `ctx.on` accepts any string (`cordis/src/events.ts`), so a renamed host
+ * event registers successfully and then never fires. Registration failures and
+ * "never observed" are therefore different signals, and both must reach the
+ * operator:
+ *
+ * - Each listener is mounted in its own try/catch. A throw names that event in
+ *   `missingMounts`, and the remaining listeners still mount. Before this, one
+ *   bare catch around the whole wiring left `status.degraded` empty and lost
+ *   `session/disposed` (per-session state leaked for the process lifetime).
+ * - `ERR_HOST_NO_SYSTEM_PROMPT_ASSEMBLE` is raised once when the first
+ *   `agent/pre-step` arrives without a single observed assemble. The host
+ *   order guarantees assemble first, so its absence is a renamed/removed
+ *   event. Its only evidence is "never observed"; the event name also joins
+ *   `missingMounts`, so `status.degraded` reports `ERR_BOOST_PARTIAL_MOUNT`
+ *   (the per-event code exists in the warning and the mount list).
+ * - `ERR_HOST_NO_AGENT_PRE_STEP` is raised once when the first main
+ *   `llm/stream` request arrives without any observed pre-step for that
+ *   session. The step clock cannot advance without it, so substitution is
+ *   impossible; auxiliary (`purpose`-tagged) streams do not need it and do not
+ *   raise the warning.
  *
  * `session/event` (`turn/end`), `session/flush` and `session/disposed` call
  * `ReceiptStore.flush()` so the turn-end durability the design promises is
@@ -556,16 +667,49 @@ function wireSessionEvents(
   workspaces: Map<string, string>,
   routes: Map<string, SelectorRoute>,
   counters: ProjectionCounters,
+  missing: Set<string>,
+  ownsSection: boolean,
 ): void {
   /** Session ids seen at `agent/pre-step`; a `llm/stream` without a request is drift. */
   const preStepSeen = new Set<string>()
   /** Session ids observed on `agent/request`. */
   const requestSeen = new Set<string>()
+  let assembleSeen = false
   let warnedMissingRequest = false
-  /** Warn once per process about a prompt that swallowed the protocol section. */
   let warnedCompleteSection = false
+  let warnedNoAssemble = false
+  let warnedNoPreStep = false
+  let warnedRouteFallback = false
 
-  ctx.on('system-prompt/assemble', async (_assembly: unknown, context: unknown, next: () => unknown) => {
+  /**
+   * Mount one listener in its own try/catch.
+   *
+   * A failure names the event and is recorded in `missingMounts`; it never
+   * stops the next listener. `true` means the registration itself succeeded,
+   * which is not proof the host ever emits the event (see the never-observed
+   * warnings below).
+   */
+  const mount = (
+    event: string,
+    handler: (...args: any[]) => unknown,
+    options?: { prepend?: boolean },
+  ): boolean => {
+    try {
+      ctx.on(event, handler, options)
+      return true
+    } catch (error) {
+      missing.add(event)
+      ctx.logger?.warn?.(
+        `dsh-boost: ERR_BOOST_PARTIAL_MOUNT: ${event} mount failed (${messageOf(error)})`,
+      )
+      return false
+    }
+  }
+
+  // `system-prompt/assemble` stays first: it is the seam that resolves the
+  // section text every later step sees (design D4).
+  const assembleMounted = mount('system-prompt/assemble', async (_assembly: unknown, context: unknown, next: () => unknown) => {
+    assembleSeen = true
     const resolved = await next()
     try {
       // `dsh-agent` augments `AssembleContext` with the real `Agent`; `scope`
@@ -581,10 +725,13 @@ function wireSessionEvents(
         // into an assembly with no agent. Count the decision, not the
         // section's presence — design §5.5:378 asks for every assembly to be
         // judged.
-        counters.protocolSuppressed()
-        return patchProtocolSection(resolved, false)
+        if (ownsSection) counters.protocolSuppressed()
+        return ownsSection ? patchProtocolSection(resolved, false) : resolved
       }
       const visible = await warmVisibility(scope, registry, agent, sessionId, workspaces)
+      // A foreign plugin owns the section name (row 32): warm the judgement the
+      // decision path needs, but never rewrite another plugin's text.
+      if (!ownsSection) return resolved
       // Same rule for an invisible workspace: the section is suppressed for
       // this assembly, so the operator gets a live signal in `boost status`.
       // A visible one never increments, so the count stays a failure count.
@@ -595,11 +742,21 @@ function wireSessionEvents(
     }
   })
 
-  ctx.on('agent/pre-step', async (payload: unknown, next: () => unknown) => {
+  const preStepMounted = mount('agent/pre-step', async (payload: unknown, next: () => unknown) => {
     const request = (payload ?? {}) as RequestPayload
     const sessionId = sessionIdOf(request.agent)
     if (sessionId !== undefined) {
       preStepSeen.add(sessionId)
+      // Row 8: assemble runs before pre-step in the host's own order. If it
+      // has never run by the first step, the event was renamed or removed and
+      // the protocol section cannot be warmed or patched.
+      if (!assembleSeen && !warnedNoAssemble && assembleMounted) {
+        warnedNoAssemble = true
+        missing.add('system-prompt/assemble')
+        ctx.logger?.warn?.(
+          `${ERR_HOST_NO_SYSTEM_PROMPT_ASSEMBLE}: system-prompt/assemble was not observed before the first agent/pre-step; the protocol section cannot be warmed or patched (the event may have been renamed or removed)`,
+        )
+      }
       try {
         sessions.onModelRequest(
           sessionId,
@@ -620,47 +777,74 @@ function wireSessionEvents(
       }
       // `agent/pre-step` already carries the captured step selection. It is
       // the non-deprecated source for the selector route; `agent/request`'s
-      // resolved config remains a fallback for hosts that only populate it
-      // there (review row 37). A later request overwrites with the same route.
+      // resolved config remains a compatibility fallback for hosts that only
+      // populate it there. A later request overwrites with the same route.
       rememberRoute(routes, sessionId, request.modelSelection)
+      // The warm belongs to `system-prompt/assemble` (D4). This is the
+      // fallback for a host that skipped or renamed assemble: pre-step is the
+      // non-deprecated seam, so visibility no longer depends on the
+      // deprecated `agent/request` event.
+      if (!assembleSeen) {
+        await warmVisibility(scope, registry, request.agent, sessionId, workspaces)
+      }
     }
     return next()
   })
 
-  ctx.on('agent/request', async (payload: unknown, next: () => unknown) => {
+  mount('agent/request', async (payload: unknown, next: () => unknown) => {
     const request = (payload ?? {}) as RequestPayload
     const sessionId = sessionIdOf(request.agent)
     if (sessionId !== undefined) {
       requestSeen.add(sessionId)
-      try {
-        sessions.onModelRequest(
-          sessionId,
-          typeof request.turn === 'number' ? request.turn : Number(request.turn),
-          typeof request.step === 'number' ? request.step : undefined,
-        )
-      } catch {
-        // A clock that cannot be driven must not break the model request.
+      // Compatibility only: when pre-step is present it already drove the
+      // clock and the horizon. This branch exists for a host that still emits
+      // the deprecated event but not the non-deprecated one.
+      if (!preStepSeen.has(sessionId)) {
+        try {
+          sessions.onModelRequest(
+            sessionId,
+            typeof request.turn === 'number' ? request.turn : Number(request.turn),
+            typeof request.step === 'number' ? request.step : undefined,
+          )
+        } catch {
+          // A clock that cannot be driven must not break the model request.
+        }
+        try {
+          horizon.observe(
+            sessionId,
+            typeof request.turn === 'number' ? request.turn : Number(request.turn),
+            typeof request.step === 'number' ? request.step : Number(request.step),
+          )
+        } catch {
+          // Same as the pre-step observation: history is an estimate.
+        }
+        if (!assembleSeen) {
+          await warmVisibility(scope, registry, request.agent, sessionId, workspaces)
+        }
       }
-      try {
-        horizon.observe(
-          sessionId,
-          typeof request.turn === 'number' ? request.turn : Number(request.turn),
-          typeof request.step === 'number' ? request.step : Number(request.step),
-        )
-      } catch {
-        // Same as the pre-step observation: history is an estimate.
-      }
-      await warmVisibility(scope, registry, request.agent, sessionId, workspaces)
     }
     const config = await next()
-    if (sessionId !== undefined) rememberRoute(routes, sessionId, config)
+    // Capability check (row 22): the non-deprecated pre-step carries
+    // `modelSelection`; when it did, this event must not overwrite the route.
+    // When it did not, the resolved config is the only source left, and the
+    // deprecated path warns once.
+    if (sessionId !== undefined && routes.get(sessionId) === undefined) {
+      rememberRoute(routes, sessionId, config)
+      if (routes.get(sessionId) !== undefined && !warnedRouteFallback) {
+        warnedRouteFallback = true
+        ctx.logger?.warn?.(
+          `${ERR_HOST_NO_MODEL_SELECTION}: agent/pre-step carried no modelSelection; the selector route came from the deprecated agent/request event, which may be removed`,
+        )
+      }
+    }
     return config
   })
 
   // The deprecated event's disappearance would otherwise disable the selector
   // route silently. A session that reached `llm/stream` after a pre-step but
   // never saw `agent/request` is proof enough; the model request itself is
-  // passed through untouched.
+  // passed through untouched. The route now comes from pre-step, so this is a
+  // compatibility warning, not a correctness dependency.
   //
   // This listener is also the complete-section detector, and it MUST be
   // outermost: the synthesizer mounted by `registerHooks` consumes a queued
@@ -669,12 +853,28 @@ function wireSessionEvents(
   // substituted. Cordis runs the first-registered listener outermost
   // (`events.ts` unshifts on `prepend`), so `prepend: true` is what puts the
   // detector before the synthesizer regardless of mount order (finding 4).
-  ctx.on(
+  mount(
     'llm/stream',
     (options: unknown, next: () => unknown) => {
       try {
         const request = (options ?? {}) as { sessionId?: unknown; purpose?: unknown }
         const sessionId = request.sessionId
+        // Row 8: a main request needs the step clock, which only pre-step
+        // drives. An auxiliary (`purpose`) stream carries its own prompt and
+        // never needs it, so it is not evidence the seam is missing.
+        if (
+          !warnedNoPreStep &&
+          preStepMounted &&
+          request.purpose === undefined &&
+          typeof sessionId === 'string' &&
+          !preStepSeen.has(sessionId)
+        ) {
+          warnedNoPreStep = true
+          missing.add('agent/pre-step')
+          ctx.logger?.warn?.(
+            `${ERR_HOST_NO_AGENT_PRE_STEP}: agent/pre-step was not observed before the first main llm/stream request; the step clock cannot advance (the event may have been renamed or removed)`,
+          )
+        }
         if (
           !warnedMissingRequest &&
           typeof sessionId === 'string' &&
@@ -683,7 +883,7 @@ function wireSessionEvents(
         ) {
           warnedMissingRequest = true
           ctx.logger?.warn?.(
-            'ERR_HOST_NO_AGENT_REQUEST: agent/request was not observed before llm/stream; the selector route cannot be captured (the event is deprecated and may have been removed)',
+            'ERR_HOST_NO_AGENT_REQUEST: agent/request was not observed before llm/stream; the deprecated event may have been removed (the selector route is captured from agent/pre-step modelSelection)',
           )
         }
 
@@ -739,7 +939,7 @@ function wireSessionEvents(
   // persistence contract rests on, and `session/disposed` flushes again after
   // the last hook for the id. Receipts are evidence, so an early flush that
   // does not happen costs latency, never correctness.
-  ctx.on('session/event', (_session: unknown, event: unknown) => {
+  mount('session/event', (_session: unknown, event: unknown) => {
     const type = (event as { type?: unknown } | undefined)?.type
     if (type === 'turn/end') {
       // Fire-and-forget on the real host; `flush()` never rejects.
@@ -748,9 +948,9 @@ function wireSessionEvents(
     return undefined
   })
 
-  ctx.on('session/flush', () => deps.receipts.flush())
+  mount('session/flush', () => deps.receipts.flush())
 
-  ctx.on('session/disposed', async (session: unknown) => {
+  mount('session/disposed', async (session: unknown) => {
     const sessionId = sessionIdOf(session)
     if (sessionId === undefined) return
     try {
@@ -774,6 +974,12 @@ function wireSessionEvents(
     }
     deps.receipts.disposeSession(sessionId)
   })
+
+  if (missing.size > 0) {
+    ctx.logger?.warn?.(
+      `dsh-boost: ERR_BOOST_PARTIAL_MOUNT: missing mount(s): ${[...missing].join(', ')}; the plugin is partially wired and boost status reports this code`,
+    )
+  }
 }
 
 /**
@@ -802,6 +1008,37 @@ function registerBoostTool(ctx: PluginContext, deps: BoostDeps): void {
   ctx.tools.register(definition, { when: () => true })
 }
 
+/**
+ * Section registries this module successfully registered into.
+ *
+ * The mount marker this module owns (review row 32). The host's duplicate
+ * message is generic: another plugin registering `dsh-boost` produces exactly
+ * the same text. A duplicate therefore counts as "this plugin is already
+ * wired" only when the same prompt registry object received this module's
+ * section earlier in the process. A foreign owner is a section-mount failure:
+ * the remaining hooks and the control tool still mount, and the foreign text
+ * is never rewritten.
+ */
+const ownSectionRegistries = new WeakSet<object>()
+
+/**
+ * Prompt registries this module already mounted its hooks and tool against.
+ *
+ * Separate from {@link ownSectionRegistries}: a foreign section owner means
+ * this module does not own the section text, but a second apply over the same
+ * registry must still not mount the hooks twice. Marked once a non-duplicate
+ * apply has finished mounting, and consulted only for the duplicate decision.
+ */
+const mountedRegistries = new WeakSet<object>()
+
+/** What {@link mountHooks} established about the section and the other mounts. */
+type MountOutcome = {
+  /** A previous apply of this plugin owns the mounts; register nothing else. */
+  alreadyMounted: boolean
+  /** This apply registered the prompt section (so its text may be patched). */
+  ownsSection: boolean
+}
+
 /** The mount label the prompt section reports when it cannot be registered. */
 const MOUNT_SECTION = 'systemPrompt.section'
 
@@ -825,10 +1062,13 @@ type DeferredMount = {
  * still describes the three event mounts, and those are then mounted one by one
  * so a failure names the mount that failed and lands in `missing`.
  *
- * Returns `true` when the section error is the host's duplicate-registration
- * error: a previous apply owns every mount and this one must register nothing.
+ * Returns `alreadyMounted` only when the section error is the host's
+ * duplicate-registration error AND this module registered that same registry
+ * earlier (the mount marker): a previous apply owns every mount and this one
+ * must register nothing. A duplicate from another plugin is a section-mount
+ * failure, so the remaining mounts still happen (review row 32).
  */
-function mountHooks(ctx: PluginContext, deps: HookDeps, missing: Set<string>): boolean {
+function mountHooks(ctx: PluginContext, deps: HookDeps, missing: Set<string>): MountOutcome {
   const deferred: DeferredMount[] = []
   let sectionError: unknown
   let registrationError: unknown
@@ -861,26 +1101,45 @@ function mountHooks(ctx: PluginContext, deps: HookDeps, missing: Set<string>): b
     registrationError = error
   }
 
+  let ownsSection = false
+  const registry = ctx.systemPrompt as object | undefined
   if (sectionError !== undefined && isDuplicateSectionError(sectionError)) {
-    duplicateMountAttempts += 1
+    if (registry !== undefined && mountedRegistries.has(registry)) {
+      duplicateMountAttempts += 1
+      ctx.logger?.warn?.(
+        `dsh-boost: ERR_BOOST_ALREADY_MOUNTED: duplicate apply #${duplicateMountAttempts} found an existing mount; registration skipped (${messageOf(sectionError)})`,
+      )
+      return {
+        alreadyMounted: true,
+        ownsSection: registry !== undefined && ownSectionRegistries.has(registry),
+      }
+    }
+    // The name is taken, but not by this module: the message alone cannot tell
+    // our previous apply from another plugin using the same section name.
+    missing.add(MOUNT_SECTION)
     ctx.logger?.warn?.(
-      `dsh-boost: ERR_BOOST_ALREADY_MOUNTED: duplicate apply #${duplicateMountAttempts} found an existing mount; registration skipped (${messageOf(sectionError)})`,
+      `dsh-boost: ERR_BOOST_SECTION_REGISTER_FAILED: prompt section "${PROTOCOL_NAME}" is registered by another plugin; mounting the remaining hooks independently (${messageOf(sectionError)})`,
     )
-    return true
-  }
-
-  if (sectionError !== undefined) {
+  } else if (sectionError !== undefined) {
     missing.add(MOUNT_SECTION)
     ctx.logger?.warn?.(
       `dsh-boost: ERR_BOOST_SECTION_REGISTER_FAILED: prompt section registration failed; mounting the remaining hooks independently (${messageOf(sectionError)})`,
     )
-  } else if (registrationError !== undefined) {
-    // The section did not throw, so this is an assembly bug: an unknown mount
-    // is missing even though no specific one can be named.
-    missing.add('hooks')
-    ctx.logger?.warn?.(
-      `dsh-boost: ERR_BOOST_PARTIAL_MOUNT: hook assembly failed (${messageOf(registrationError)})`,
-    )
+  } else {
+    ownsSection = true
+    // Record the marker only after the host accepted the section: this is the
+    // one registry object a later duplicate may be attributed to.
+    if (ctx.systemPrompt !== undefined && typeof ctx.systemPrompt === 'object') {
+      ownSectionRegistries.add(ctx.systemPrompt)
+    }
+    if (registrationError !== undefined) {
+      // The section did not throw, so this is an assembly bug: an unknown mount
+      // is missing even though no specific one can be named.
+      missing.add('hooks')
+      ctx.logger?.warn?.(
+        `dsh-boost: ERR_BOOST_PARTIAL_MOUNT: hook assembly failed (${messageOf(registrationError)})`,
+      )
+    }
   }
 
   for (const mount of deferred) {
@@ -899,7 +1158,10 @@ function mountHooks(ctx: PluginContext, deps: HookDeps, missing: Set<string>): b
       `dsh-boost: ERR_BOOST_PARTIAL_MOUNT: missing mount(s): ${[...missing].join(', ')}; the plugin is partially wired and boost status reports this code`,
     )
   }
-  return false
+  // A later apply over this registry is a duplicate even when the section name
+  // belonged to another plugin: the hooks and the tool are ours either way.
+  if (registry !== undefined) mountedRegistries.add(registry)
+  return { alreadyMounted: false, ownsSection }
 }
 
 export function apply(ctx: PluginContext, config: unknown): void {
@@ -958,26 +1220,73 @@ export function apply(ctx: PluginContext, config: unknown): void {
     // these getters retry until the provider fiber is ACTIVE; an absence is
     // never memoised. The workspace registry is the `resolveByPath`/`list()`
     // seam; the spill store is the projection backend; the token meter prices
-    // projections and admission.
+    // projections and admission. A first success is not a permanent binding:
+    // each point of use resets the memo on failure, and the plugin's fiber
+    // disposal drops all three (review row 6).
     const registry = lazyService<WorkspaceRegistry>(ctx, 'workspaceRegistry')
     const spillService = lazyService<SpillBackend>(ctx, 'spillStore')
+    // `llm` is soft (see `inject`): projection and admission never need it, and
+    // the selector checks it at call time. A getter keeps a provider that
+    // becomes active after `apply` reachable on the next decision.
+    const llm = lazyService<LlmLike>(ctx, 'llm')
+
     /**
-     * The spill backend the decision path uses, with a failure re-probe.
+     * The workspace registry the visibility warm uses, with a failure re-probe.
      *
-     * A store that resolved is not a store that works: `saveText` rejecting is
-     * the only evidence the projection path gets (`projection-skipped:spill-failed`),
-     * and memoising that first success forever would keep every later
-     * projection pointed at a dead backend while `hasSpill` stayed true. A
-     * rejection therefore drops the memo; the next decision asks `ctx.get`
-     * again, which cordis answers from the provider fiber's live state.
+     * `list()` and `resolveByPath()` are total in the resolver (they swallow
+     * their own throws), so this wrapper is the only place a replaced or
+     * disposed provider is observable. A throw drops the memo; the next warm
+     * asks `ctx.get` again and picks up the live binding.
+     */
+    const registryBackend = (): WorkspaceRegistry | undefined => {
+      const backend = registry()
+      if (backend === undefined) return undefined
+      const resolveByPath = backend.resolveByPath
+      const wrapper: WorkspaceRegistry = {
+        list: () => {
+          try {
+            return backend.list()
+          } catch (error) {
+            registry.reset()
+            throw error
+          }
+        },
+      }
+      if (typeof resolveByPath === 'function') {
+        wrapper.resolveByPath = async (path) => {
+          try {
+            return await resolveByPath.call(backend, path)
+          } catch (error) {
+            registry.reset()
+            throw error
+          }
+        }
+      }
+      return wrapper
+    }
+
+    /**
+     * The spill backend the decision path uses, with a pre-write re-confirmation.
+     *
+     * A store that resolved is not a store that still exists: the provider may
+     * be replaced or disposed between the decision that resolved it and the
+     * write. Every write re-reads `ctx.get` through `refresh()` and uses the
+     * current binding. A rejection drops the memo too, so a dead backend cannot
+     * keep every later projection pointed at it while `hasSpill` stays true
+     * (review rows 6 and 31).
      */
     const spillBackend = (): SpillBackend | undefined => {
-      const backend = spillService()
-      if (backend === undefined) return undefined
+      if (spillService() === undefined) return undefined
       return {
         saveText: async (input) => {
+          const current = spillService.refresh()
+          if (current === undefined) {
+            // The store disappeared mid-turn: the projection path records this
+            // as `projection-skipped:spill-failed`, not as a crash.
+            throw new Error('spillStore disappeared before the write')
+          }
           try {
-            return await backend.saveText(input)
+            return await current.saveText(input)
           } catch (error) {
             spillService.reset()
             throw error
@@ -985,10 +1294,47 @@ export function apply(ctx: PluginContext, config: unknown): void {
         },
       }
     }
-    // `llm` is soft (see `inject`): projection and admission never need it, and
-    // the selector checks it at call time. A getter keeps a provider that
-    // becomes active after `apply` reachable on the next decision.
-    const llm = lazyService<LlmLike>(ctx, 'llm')
+
+    /**
+     * The LLM seam the selector uses, with a failure re-probe.
+     *
+     * The selector turns any failure into an abstention, so a provider that is
+     * replaced after one successful call would otherwise be used for the rest
+     * of the process. A synchronous throw or a throw while the stream is
+     * consumed drops the memo; the next selection asks `ctx.get` again.
+     */
+    const llmBackend = (): LlmLike | undefined => {
+      const backend = llm()
+      if (backend === undefined) return undefined
+      return {
+        stream: (options) => {
+          try {
+            const stream = backend.stream(options)
+            return (async function* () {
+              try {
+                yield* stream
+              } catch (error) {
+                llm.reset()
+                throw error
+              }
+            })()
+          } catch (error) {
+            llm.reset()
+            throw error
+          }
+        },
+      }
+    }
+
+    // A disposed provider must not leave a stale binding behind for a later
+    // provider that reuses the name. Cordis has no `dispose` event; the effect
+    // seam is the fiber-unload hook (see `onDispose`).
+    onDispose(ctx, () => {
+      registry.reset()
+      spillService.reset()
+      llm.reset()
+    })
+
     const meter = meterSeamOf(ctx)
     const projectionCounters = new ProjectionCounters()
 
@@ -1056,7 +1402,7 @@ export function apply(ctx: PluginContext, config: unknown): void {
       // the mirror instead of leaking one entry per disposed session.
       clearAcceptedDispatch: (sessionId) => clearAcceptedDispatch(deps, sessionId),
       get llm() {
-        return llm()
+        return llmBackend()
       },
       selectorRoute: (sessionId) => routes.get(sessionId),
     }
@@ -1066,14 +1412,35 @@ export function apply(ctx: PluginContext, config: unknown): void {
     // not take the other three mounts (or the control tool) down with it, and
     // must be visible in `status` as `ERR_BOOST_PARTIAL_MOUNT` (review row 2).
     const missingMounts = new Set<string>()
-    if (mountHooks(ctx, deps, missingMounts)) return
+    const mounts = mountHooks(ctx, deps, missingMounts)
+    if (mounts.alreadyMounted) return
 
     // The clock/visibility warm and the session-end cleanup. Wired separately
     // so a host that cannot accept these events still gets the tool below.
+    // `wireSessionEvents` mounts each listener in its own try/catch: a throw at
+    // the first one cannot drop the other six (in particular
+    // `session/disposed`, whose loss leaks per-session state for the process
+    // lifetime), and every failure is named in `missingMounts`.
     try {
-      wireSessionEvents(ctx, deps, scope, registry, sessions, horizon, workspaces, routes, projectionCounters)
+      wireSessionEvents(
+        ctx,
+        deps,
+        scope,
+        registryBackend,
+        sessions,
+        horizon,
+        workspaces,
+        routes,
+        projectionCounters,
+        missingMounts,
+        mounts.ownsSection,
+      )
     } catch (error) {
-      ctx.logger?.warn?.(`dsh-boost: session wiring failed: ${messageOf(error)}`)
+      // Only an assembly bug reaches here; each listener mount is contained.
+      missingMounts.add('session-events')
+      ctx.logger?.warn?.(
+        `dsh-boost: ERR_BOOST_PARTIAL_MOUNT: session wiring failed (${messageOf(error)})`,
+      )
     }
 
     // After the hooks: a genuine duplicate aborts above before it can register
