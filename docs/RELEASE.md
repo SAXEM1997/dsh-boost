@@ -345,7 +345,7 @@ for p in $pkgs; do diff -r "$d/0.2.2-rc.4/$p/lib" "$d/0.2.2-rc.5/$p/lib" >/dev/n
 | `ERR_HOST_SPILL_FAILING` | `status.degraded`（收据映射） | spill 后端**在**，但 `saveText` 每次都被拒；投影全部跳过，收据 `projection-skipped:spill-failed`，原文保留。与 `ERR_HOST_NO_SPILL`（后端缺失）是两种状态，修法不同 | 查后端写权限/磁盘/路径；`ERR_HOST_NO_SPILL` 那条的处置会把人引向「重装 spill 包」，在这里是错的 |
 | `ERR_HOST_WORKSPACE_REGISTRY_BROKEN` | `status.degraded` | registry 服务在，但 `list()` 抛错或返回的不是数组：每个会话都被判不可见，投影与替换全部跳过，而 `hasWorkspaceRegistry` 仍是 `true`——没有这个码，`status` 看起来是健康的 | 查宿主 workspace 存储（`~/.dsh/storages/workspace.json` 或宿主自身日志）；这不是"没装服务"，重装无用 |
 | `ERR_HOST_SPILL_UNUSABLE` | `status.degraded` | spill 后端服务在，但不提供 `saveText`（例如只注入了一个 `{}`）：apply 模式的投影无法落盘，`hasSpill` 仍为 `true` | 查宿主注入的 spill 服务是不是真后端（`dsh-spill-local`，§2.2）；与 `ERR_HOST_NO_SPILL`（服务缺失）是两种状态 |
-| `ERR_HOST_SELECTOR_UNAVAILABLE` | `status.degraded`（由 `selector-unavailable` / `selector-error` 收据映射） | LLM 软依赖不可用或调用失败：多候选计划永远弃权，单候选替换不受影响 | 查 LLM 路由；`selector-abstain` 不映射到本码——那是正常弃权，不是能力缺失 |
+| `ERR_HOST_SELECTOR_UNAVAILABLE` | `status.degraded`（只由 `selector-unavailable` 收据映射） | LLM 软依赖不可用：多候选计划永远弃权，单候选替换不受影响。`selector-error` **不映射**——它是可能瞬时的调用失败，按历史求和会把健康宿主永久标成降级（`src/tools/boost.ts:239-250`） | 查 LLM 路由；`selector-abstain` 与 `selector-error` 都不映射到本码，前者是正常弃权，后者看收据计数 |
 | `ERR_HOST_PLATFORM_UNSUPPORTED` | `status.degraded` | win32 上替换拒绝，投影不受影响 | 平台限制，无需处置 |
 | `ERR_HOST_COMPLETE_SECTION` | `status.degraded` | 宿主的 `complete: true` 提示段在装配瀑布之后替换了整个系统提示，协议段没有到达出站请求；受影响请求上替换与投影 fail-closed（会话被判不可见），工作区明明可见插件却不动作 | 找出宿主提示配置里覆盖瀑布装配的 complete 段（通常属于另一个插件）；移除它，或接受这些请求上替换/投影不可用 |
 | `ERR_RECEIPTS_TRUNCATED` | `status.degraded` | 收据分片超过 256 个；`status` 只聚合按名排序的前 256 个，`counts` 与两账因此都是**下界**，不是漏算就是少算——方向安全但数字偏小 | 归档或清理旧分片，重跑 `status`；要全量就分批统计 |
@@ -361,7 +361,7 @@ for p in $pkgs; do diff -r "$d/0.2.2-rc.4/$p/lib" "$d/0.2.2-rc.5/$p/lib" >/dev/n
 | `ERR_BOOST_INVALID_ARGS` | `boost` 工具失败 `code` | `baseRevision` 缺失或不是非负整数（`scope-set` / `shadow`） | 从 `status` 取整数 revision 再传 |
 | `ERR_BOOST_INVALID_BODY` | `boost` 工具失败 `code` | `body` 形状/类型不对；`scope-set` 带了保留字段 `version` / `revision`；`shadow` 的 body 不是布尔 | 按工具 schema 重写 body |
 | `ERR_BOOST_INTERNAL` | `boost` 工具失败 `code` | 未预期的内部失败（工具仍以值返回，不抛出） | 记录 `status` 与日志，按 bug 上报 |
-| `ERR_HOST_VERSION_MISMATCH` | 加载日志警告 | 解析到的宿主版本不是验证线 `0.2.2-rc.4`；插件**仍然加载**，改名 API 仍可能让它失效 | 核对 `engines.dsh` 与宿主版本；换回验证线或接受风险 |
+| `ERR_HOST_VERSION_MISMATCH` | 加载日志警告 | 解析到的宿主版本**落在 `engines.dsh` 区间外**（`<0.2.2-rc.4` 或 `>=0.2.3-0`）；插件**仍然加载**，改名 API 仍可能让它失效。区间内的 `rc.5` / `0.2.2` 只记 info，不发码 | 核对 `engines.dsh` 与宿主版本；换回区间内或接受风险 |
 | `ERR_HOST_NO_AGENT_REQUEST` | 加载日志警告（一次） | `llm/stream` 前没观察到 `agent/request`；selector 路由捕获不到，多候选替换会 fail-closed | 宿主事件已废弃/移除；升级宿主，或只用单候选替换 |
 | `ERR_HOST_NO_SYSTEM_PROMPT_ASSEMBLE` | 加载日志警告（一次） | 首个 `agent/pre-step` 到达前从未观察到 `system-prompt/assemble`：协议段无法预热/打补丁（事件可能被改名或移除）。事件名同时进 `missingMounts`，所以 `status.degraded` 里看到的是 `ERR_BOOST_PARTIAL_MOUNT` | 核对宿主提示装配事件；升级宿主，或接受协议段不可用 |
 | `ERR_HOST_NO_AGENT_PRE_STEP` | 加载日志警告（一次） | 首个**主** `llm/stream` 前没有该会话的 `agent/pre-step`：步进时钟无法推进，替换不可能（带 `purpose` 的辅助请求不触发）。同样进 `missingMounts` | 升级宿主；此宿主上替换不可用，投影仍可用 |
@@ -388,8 +388,8 @@ for p in $pkgs; do diff -r "$d/0.2.2-rc.4/$p/lib" "$d/0.2.2-rc.5/$p/lib" >/dev/n
 | `selector-error` | 选择器调用失败（派发错误）而弃权 | 查 LLM 路由与日志；与“选择器正常但没标签”区分 |
 | `selector-abstain` | 选择器没给出标签或超时，不是调用失败 | 正常弃权；多候选时替换不提交 |
 | `dispatch-rejected` | 合成派发的工具名/参数与决定不符（防篡改检查），该次派发被拒、队列已清 | 到达的调用不是插件决定的那一个；查是否有别的写入者或中间层改了参数 |
-| `pruned-reset` / `compaction-reset` | `llm/stream` 时锚点无法验证：历史被 pruner 裁掉（`pruned-reset`），或锚定回执已不在/被压缩替换（`compaction-reset`）；队列与锚点清空后放行 | 压缩/裁剪后的预期重置；替换在下一回合重新开始 |
-| `projection-skipped:no-owner` | 投影跳过：回执没有 session id，落盘产物无法归属；原文保留 | 投影的降级类跳过（与 `no-spill`/`no-footer` 同组）；查宿主是否没传 session |
+| `pruned-reset` / `compaction-reset` | `llm/stream` 或 `tools/post-execute` 时锚点无法验证：历史被 pruner 裁掉（`pruned-reset`），或锚定回执已不在/被压缩替换（`compaction-reset`）；写一条 `kind:'reset'` 收据，队列与锚点清空后放行 | 压缩/裁剪后的预期重置；替换在下一回合重新开始 |
+| `projection-skipped:no-owner` | **hook 不可达**：`projectApply` 的直接调用契约在 session id 为空时返回它（`src/projection/apply.ts` 的 `!sessionId` 分支），但 `tools/post-execute` 在无 agent / 无 session id 时更早返回并记 `skip:no-scope`，生产调用总是传字符串（设计 §5.4 已记为不可达） | 无需处置。若真看到它，来源是直接调用 `projectApply` 的代码路径（测试或未来调用方），不是宿主漏传 session |
 | `substitute-skipped:gate-error` | 决策阶段抛错（计划形状过了 `safePlan` 但绑定/守卫抛，或回执映射异常），该步替换被丢弃且没有别的收据能说明原因 | 记录 `status` 与日志，按 bug 上报——正常输入不应让决策层抛 |
 | `substitute-skipped:no-toolset` | 替换**已提交**，但该步的准入工具集不可得，无法用 `exec.toolSet` 复核；派发照常 | 可见性信号，不是失败；宿主缺 toolSet 时每次替换都会记一条 |
 
@@ -486,9 +486,14 @@ node scripts/shadow-report.mjs --dir "${BOOST_ROOT:-$DSH_HOME}/boost/receipts"  
 | 字段 | 含义 |
 |---|---|
 | `saveableRatio` | 只读白名单真正能兑现的替换比例：`whitelisted` 影子提交 / 全部替换决策 |
-| `byFamily` | 按**候选工具族**的命中率：`commits / decisions`。键是收据里的 `candidateTool`（门决定的族），不是刚执行的 `tool`；老收据没有该字段时回退到 `tool`。**例外**：`code:'no-candidate'` 的 skip 收据本来就没有 `candidateTool`（`src/hooks/post-execute.ts` 的 `decideSubstitution` containment 分支，`3ec82f3` 的 `:1719`），脚本按同一回退把它归到刚执行的 `tool` 的族——这些决策没有候选，`commits` 恒为 0，只抬高该族的 `decisions` 分母，所以读命中率时要知道分母含无候选决策。影子期绕过白名单，所以 bash/ssh 的潜力也计入 |
-| `candidateRecall` | 候选集召回：`commits / (commits + no-candidate)`，分母是**到达绑定/守卫判定的替换决策数**（`commit` 与 `no-candidate` 两种结局各计一次，一次决策一条，**不是**候选条数——同一决策可有多个候选）；`guard-trivial` 不提出候选，不进分母 |
-| `retrievalUpperBound` | 取回率上界：取回调用数 / 已应用投影回执数（取回回执本身不计入分母）。**只在 `projection: 'on'` 成立**：影子期只写 `kind:'shadow'` / `code:'projection-shadow'`，没有 `kind:'projection'` 回执，所以影子账上它按结构恒为 `0`，不能用它约束影子期取回损害 |
+| `byFamily` | 按**候选工具族**的命中率：`commits / decisions`。键是收据里的 `candidateTool`（门决定的族），不是刚执行的 `tool`；老收据没有该字段时回退到 `tool`。**例外**：`code:'no-candidate'` 的 skip 收据本来就没有 `candidateTool`（`src/hooks/post-execute.ts` 的 `decideSubstitution` containment 分支，`1dd93c6` 的 `:1759`），脚本按同一回退把它归到刚执行的 `tool` 的族——这些决策没有候选，`commits` 恒为 0，只抬高该族的 `decisions` 分母，所以读命中率时要知道分母含无候选决策。影子期绕过白名单，所以 bash/ssh 的潜力也计入 |
+| `candidateRecall` | **提交产出率，不是候选集召回**：`commits / (commits + noCandidate)`，分母是**到达绑定/守卫判定的替换决策数**（`commit` 与 `no-candidate` 两种结局各计一次，一次决策一条，**不是**候选条数——同一决策可有多个候选）；`guard-trivial` 不提出候选，不进分母。脚本从不拿候选集比对模型实际的下一调，所以它不能回答「候选集有没有漏掉模型真正要做的调用」 |
+| `retrievalUpperBound` | **已观测取回率的下界，不是取回损害的上界**：取回调用数 / 已应用投影回执数（取回回执本身不计入分母）。**只在 `projection: 'on'` 成立**：影子期只写 `kind:'shadow'` / `code:'projection-shadow'`，没有 `kind:'projection'` 回执，所以影子账上它按结构恒为 `0`，不能用它约束影子期取回损害；`0` 只说明没有观测到精确 locator 取回，不说明没有取回 |
+
+**全零报告不能区分两件事。** 如果模型整周没有写 `<CHISEL_PLAN>`，`safePlan` 直接返回，一条
+决策收据都没有，四个比例全是 `0`；这与「没有可省项」在报告里无法区分——报告不测 plan 发射率。
+看到全零时先查收据里有没有替换决策（`kind:'shadow'` / `kind:'skip'`），不要直接读成
+「插件没有效果」。影子报告只提供标签：它不单独决定是否开启替换，也不决定发布。
 
 脚本读的是 `ReceiptStore` 写的同一套字段，只读完整行；尾部半行与坏行跳过；`kind:'projection'`
 但缺 `unit:'raw'` 的 pre-schema 回执也会跳过，并在 stderr 打印跳过计数。它不需要 `src/` 或构建产物。
@@ -513,7 +518,7 @@ node scripts/shadow-report.mjs --dir "${BOOST_ROOT:-$DSH_HOME}/boost/receipts"  
 
 复算（手工可重复，不碰会话目录；CI 只做发布门 `ci` + `verify:package`，不跑统计复算，见 §6.1）。
 机器可读的管道用下面两种之一：不带 `--silent` 的 `npm run stats` 会把 npm 的
-`> dsh-boost@0.1.2 stats` 横幅打进 **stdout**（stderr 重定向拦不住），直接接 `jq` 之类会破：
+`> dsh-boost@0.1.3 stats` 横幅打进 **stdout**（stderr 重定向拦不住），直接接 `jq` 之类会破：
 
 ```bash
 npm run --silent stats
@@ -581,7 +586,7 @@ DSH 宿主后的行为、§3 的 20 任务回退流程（人工）、§5 的统�
 
 `--ignore-scripts` and `npm publish <tgz>` skip the gate entirely; the only defence is running
 `npm run verify:package` on the commit you tag. 具体地，`npm publish --ignore-scripts` 不跑
-`prepublishOnly`，`npm publish ./dsh-boost-0.1.2.tgz` 对 tarball 发布也不跑包内任何脚本；两者都能
+`prepublishOnly`，`npm publish ./dsh-boost-0.1.3.tgz` 对 tarball 发布也不跑包内任何脚本；两者都能
 把没有 `dist/index.js` 的 8 文件空包推到 registry（本机 npm 11.19.1 实测：无 `dist/` 的干净 clone
 上 `npm publish --dry-run --ignore-scripts` exit 0，8 files / 29,532 字节，约 29.5 kB；该数是按
 0.1.1 的载荷量的，0.1.2 改了两份 README 与版本号，数字会略有出入）。`prepublishOnly` 只保护
@@ -599,14 +604,14 @@ DSH 宿主后的行为、§3 的 20 任务回退流程（人工）、§5 的统�
 - [ ] 该 commit 的 `git status --short` 为空；`verify:package` 只证明工作树或给定 tarball，不证明 commit 状态
 - [ ] `prepublishOnly`（`npm run ci && npm run verify:package -- --prebuilt`）在发布前整体跑过一遍；明确知道 `npm publish --ignore-scripts` 和 `npm publish <tgz>` 会绕过它（§6.3）
 - [ ] CI 在同一个 commit 上绿；明确知道它只跑 `ci` + `verify:package`、不跑 `npm publish`，`v*` tag 不会上传（§6.1）
-- [ ] `dsh plugin --profile <name> add dsh-boost@^0.1.2 --registry=https://registry.npmjs.org/`（或本地路径/tarball）成功，`--dump-config` 里有 `id: dsh-boost` 行
+- [ ] `dsh plugin --profile <name> add dsh-boost@^0.1.3 --registry=https://registry.npmjs.org/`（或本地路径/tarball）成功，`--dump-config` 里有 `id: dsh-boost` 行
 - [ ] 测试工作区已写入 `scope.workspaceIds`，`shadow: true`、`projection: 'on'` 经 `boost status` 确认
 - [ ] no-tokenmeter 门按 §2.1 承担：单元测试注入 `hasTokenMeter: false` 锁定预期（替换拒绝、投影可用、账目 `unknown`、`ERR_HOST_NO_TOKENMETER`）；活宿主复核仅在确要部署缺该服务的宿主时做，先验健康态，再把 `shadow` 设为 `false` 验拒绝收据（影子模式下只有 `status.degraded` 可观察，不能算过门）
 - [ ] no-spill 门按 §2.2 完整跑过：移除的是 spill **后端**（`dsh-spill-local`），观察到超限回执不投影、`projection-skipped:no-spill`、`ERR_HOST_NO_SPILL`；只移除 `dsh-spill-policy`（宿主的 token 预算保留策略插件，从宿主树解析）的话得到的是 `projection-skipped:no-footer` 与 `ERR_HOST_NO_SPILL_NOTICE`
 - [ ] 两条降级路径都保留 status/收据证据；验收中出现的每个稳定码都按 §2.5 的矩阵处置并留证（含 `ERR_HOST_NO_SPILL_NOTICE` / `ERR_HOST_VERSION_MISMATCH` / `ERR_BOOST_SECTION_REGISTER_FAILED`，以及已有的 `ERR_RECEIPTS_UNREADABLE` / `ERR_RECEIPTS_TRUNCATED` / `ERR_HOST_COMPLETE_SECTION` / `ERR_SCOPE_ABORTED` / `ERR_HOST_SPILL_FAILING` / `ERR_BOOST_PARTIAL_MOUNT`）；同时确认 `status.data.receipts_stopped` 为 `false`（为 `true` 表示收据已连续写失败 3 次、替换被整体拒绝）
 - [ ] 第一次开启替换的真实回合检查 `content[].thinking` 400（不是影子周）；若有，替换在该路由关闭
 - [ ] `npm run --silent stats` 在干净 clone 上可复算 §5.2 的聚合（口径对应设计稿 §2.1）
-- [ ] 发布侧：`npm publish` 走 `publishConfig.registry`（registry.npmjs.org、public）；用 `npm view dsh-boost dist-tags --registry=https://registry.npmjs.org/` 确认 `latest` 是 `package.json` 里的版本（registry 上另有 npm 自动创建的 `0.0.0-stage` 占位版本，见 §2.4）；**必须带 `--registry`**，否则读到的是镜像的旧 `latest`；安装规格是 `dsh-boost@^0.1.2`
+- [ ] 发布侧：`npm publish` 走 `publishConfig.registry`（registry.npmjs.org、public）；用 `npm view dsh-boost dist-tags --registry=https://registry.npmjs.org/` 确认 `latest` 是 `package.json` 里的版本（registry 上另有 npm 自动创建的 `0.0.0-stage` 占位版本，见 §2.4）；**必须带 `--registry`**，否则读到的是镜像的旧 `latest`；安装规格是 `dsh-boost@^0.1.3`
 
 **未交付、因此不在上表可勾选范围：§3 的 20 任务门，以及同一节里的取回完整性检查。**
 `test/regression/` 只有 `.gitkeep`——本仓库不附带任务集，也不提供 `test/regression/run.mjs`

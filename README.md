@@ -220,6 +220,7 @@ token，它只产出下一节的四个比例；`selected + []` 下协议段为�
 四个比例全是 `0`；这与「没有可省项」在报告里长得一模一样——报告不测 plan 发射率。看到
 全零时先查收据里有没有替换决策（`kind:'shadow'` / `kind:'skip'`），不要直接读成
 「插件没有效果」。
+
 `scope.json` 里有两个独立开关：
 
 | 开关 | 取值 | 行为 |
@@ -239,7 +240,7 @@ token，它只产出下一节的四个比例；`selected + []` 下协议段为�
    `~/.dsh`）。这个脚本是 dev-only，不在 npm tarball 里。它输出四个标签：
    `saveableRatio`（白名单能兑现的替换占比 = `whitelisted` 影子提交 / **全部**替换决策——分母
    是每一次替换决策，不只是白名单调用；影子期全族记账，bash/ssh 的潜力看 `byFamily`）、`byFamily`（按候选工具族的命中率）、
-   `candidateRecall`（**提交产出率，不是候选集召回**：`commits / (commits + no-candidate)`；
+   `candidateRecall`（**提交产出率，不是候选集召回**：`commits / (commits + noCandidate)`；
    脚本从不拿候选集去比对模型实际的下一调，所以它回答「有候选的决策里多少提交了」，不回答
    「候选集漏没漏掉模型真正要做的调用」）、`retrievalUpperBound`（**已观测取回率的下界，不是
    取回损害的上界**；影子期没有真正投影，结构上恒为 `0`）。
@@ -285,7 +286,7 @@ token，它只产出下一节的四个比例；`selected + []` 下协议段为�
 | `projection.glob.*` | 700 / 400 / 100 | `glob` 窗口 |
 | `projection.bash.*` | 4000 / 2000 / 500 | `bash` 窗口 |
 | `projection.ssh.*` | 2000 / 1200 / 300 | `mcp__ssh__*`（如 `mcp__ssh__execute-command`）窗口 |
-| `admission.thresholdTokens` | 1024 | 每个候选进入替换所需的最小净节省；**单步计划豁免**（`plan.steps.length === 1`，`src/hooks/post-execute.ts:1052`）——计划只有一步时没有选择器可付，阈值不适用。不是「确定性 && 唯一候选」：多步计划即使只剩一个候选，仍要过阈值（`src/admission/ledger.ts:150`） |
+| `admission.thresholdTokens` | 1024 | 每个候选进入替换所需的最小净节省；**单步计划豁免**（`plan.steps.length === 1`，`src/hooks/post-execute.ts` 的 `admittedFor`）——计划只有一步时没有选择器可付，阈值不适用。不是「确定性 && 唯一候选」：多步计划即使只剩一个候选，仍要过阈值（`src/admission/ledger.ts` 的 `worthSubstituting`） |
 | `selector.maxTokens` | 512 | 多候选选择器的输出预算（输入 + 输出上界从节省里扣） |
 | `stepsPerTurn` | 8 | 每个 turn 的替换步数上限 |
 | `horizonSteps` | 20 | 算不出会话历史均值时的剩余步数 horizon |
@@ -355,8 +356,8 @@ plugin manager 才能把运行中的 entry 认成本包的行、通过 profile p
 - `receipts/<encoded-session>.jsonl`——追加式收据。**收据按“决定”写，不是每次调用都写**：
   只有发生投影、替换决策（含 skip）、待发替换因外部改写被放弃（`kind:'reset'`，`code` 为
   `pruned-reset` / `compaction-reset`）或越界 `skip:no-scope` 时才落一行；一个没有计划的
-  `write` / `edit` 不产生任何收据，它的参数不会被记录。除 `kind:'reset'` 与早期
-  `skip:no-scope` 外，每行携带元数据、回执前 256 个码点的
+  `write` / `edit` 不产生任何收据，它的参数不会被记录。除 `kind:'reset'` 与
+  `appendSkipNoScope` 写出的 `skip:no-scope` 外，每行携带元数据、回执前 256 个码点的
   preview（不存 stdout 全文）和该调用的绑定参数 `args`（模型所写：超过 2048 个码点时以
   `args_truncated` 标记的截断 JSON 落盘；嵌套超过 64 层时以 `args_depth_truncated` 标记，
   并把更深的子树换成 `{ "truncated_depth": 64 }`）。**只有替换类收据**另外携带计划 goal
@@ -370,8 +371,9 @@ plugin manager 才能把运行中的 entry 认成本包的行、通过 profile p
   （`kind:'projection'`、`code:'projection-retrieval'`）带 `locator` 与
   `retrieval_call_tokens` / `retrieval_content_tokens` / `retrieval_tokens`；三个取回字段
   只在这次取回被定价时写入，未定价时 `estimate` 为 `'unknown'`、字段省略。`skip` 收据只有
-  preview 与 args（`skip:no-scope` 分两条路径：无 agent / 无 session id 的早期分支只记工具名；
-  运行中途可见性翻转的 `ledgerEntry` 分支仍带 preview 与 args）。
+  preview 与 args（`skip:no-scope` 分两条路径：走 `appendSkipNoScope` 的分支——无 agent、
+  无 session id、会话已不活跃——只记工具名；运行中途可见性翻转的 `ledgerEntry` 分支仍带
+  preview 与 args）。
 
   当前分片超过 8 MiB 或 20,000 行时，下一次写入前轮转为 `<encoded-session>.1.jsonl`；只保留
   当前分片和它的前一份（旧的 `.1` 被覆盖）。`boost status` 先读 `.1` 再读当前分片。256 分片

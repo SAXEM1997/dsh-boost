@@ -268,6 +268,7 @@ there are no decision receipts at all and all four ratios are `0`; that looks ex
 "nothing saveable" — the report does not measure plan emission. When you see all zeros, first
 check whether the receipts contain substitution decisions (`kind:'shadow'` / `kind:'skip'`); do
 not read it directly as "the plugin has no effect".
+
 `scope.json` has two independent switches:
 
 | Switch | Value | Behaviour |
@@ -291,7 +292,7 @@ The recommended sequence:
    shadow commits over **all** substitution decisions — the denominator is every substitution
    decision, not just the whitelisted calls; shadow mode records every family, so bash/ssh
    potential shows up in `byFamily`), `byFamily` (hit rate per candidate family), `candidateRecall`
-   (**commit yield, not candidate-set recall**: `commits / (commits + no-candidate)`; the script
+   (**commit yield, not candidate-set recall**: `commits / (commits + noCandidate)`; the script
    never compares the candidate set to the model's actual next call, so it answers "how many
    decisions with a candidate committed", not "did the candidate set miss the call the model
    actually made"), and `retrievalUpperBound` (**a lower bound on the observed retrieval rate, not
@@ -345,7 +346,7 @@ cap is 256 KiB, so `300000` prevents the family from triggering at all (there is
 | `projection.glob.*` | 700 / 400 / 100 | `glob` window |
 | `projection.bash.*` | 4000 / 2000 / 500 | `bash` window |
 | `projection.ssh.*` | 2000 / 1200 / 300 | `mcp__ssh__*` (such as `mcp__ssh__execute-command`) window |
-| `admission.thresholdTokens` | 1024 | Minimum net saving per candidate before substitution; **a single-step plan is exempt** (`plan.steps.length === 1`, `src/hooks/post-execute.ts:1052`) — with one step there is no selector to pay, so the threshold does not apply. It is not "deterministic && the only candidate": a multi-step plan that has one candidate left still has to pass the threshold (`src/admission/ledger.ts:150`) |
+| `admission.thresholdTokens` | 1024 | Minimum net saving per candidate before substitution; **a single-step plan is exempt** (`plan.steps.length === 1`, `admittedFor` in `src/hooks/post-execute.ts`) — with one step there is no selector to pay, so the threshold does not apply. It is not "deterministic && the only candidate": a multi-step plan that has one candidate left still has to pass the threshold (`worthSubstituting` in `src/admission/ledger.ts`) |
 | `selector.maxTokens` | 512 | Output budget for the multi-candidate selector (its input plus output bound is deducted from the saving) |
 | `stepsPerTurn` | 8 | Maximum substituted steps per turn |
 | `horizonSteps` | 20 | Remaining-step horizon used when the session average cannot be computed |
@@ -425,11 +426,12 @@ set it falls back to `~/.dsh`; the assembly log prints the resolved `root=` (tha
   (including skips), a pending substitution abandoned after an external rewrite (`kind:'reset'`,
   `code` `pruned-reset` / `compaction-reset`), or an out-of-scope `skip:no-scope`. A `write` /
   `edit` with no plan produces **no receipt at all**, so its arguments are never recorded. Except
-  for `kind:'reset'` and the early `skip:no-scope`, every line carries metadata, a preview of the
-  first 256 code points of the receipt (never the full stdout), and that call's bound `args`
-  (model-written: above 2048 code points they are stored as visibly truncated JSON with an
-  `args_truncated` flag; nesting deeper than 64 levels sets `args_depth_truncated` and replaces
-  the deeper subtree with `{ "truncated_depth": 64 }`). **Only substitution receipts**
+  for `kind:'reset'` and the `skip:no-scope` written by `appendSkipNoScope`, every line carries
+  metadata, a preview of the first 256 code points of the receipt (never the full stdout), and
+  that call's bound `args` (model-written: above 2048 code points they are stored as visibly
+  truncated JSON with an `args_truncated` flag; nesting deeper than 64 levels sets
+  `args_depth_truncated` and replaces the deeper subtree with `{ "truncated_depth": 64 }`).
+  **Only substitution receipts**
   also carry the plan goal (≤256 code points) and guards (≤8, each ≤300 code points):
   `kind:'substitute'`, `kind:'substitute-settled'`, and `kind:'shadow'` with `code:'ok'`.
   `kind:'shadow'` is not substitution-only — projection shadowing also writes `kind:'shadow'`,
@@ -441,9 +443,9 @@ set it falls back to `~/.dsh`; the assembly log prints the resolved `root=` (tha
   carry `locator` plus `retrieval_call_tokens` / `retrieval_content_tokens` / `retrieval_tokens`;
   those three are written only when the retrieval was priced, and an unpriced one has
   `estimate:'unknown'` with the fields omitted. `skip` receipts carry only `preview` and `args`
-  (`skip:no-scope` has two paths: the early no-agent / no-session-id branch carries only the tool
-  name; the mid-call live-visibility branch goes through `ledgerEntry` and still carries `preview`
-  and `args`).
+  (`skip:no-scope` has two paths: the `appendSkipNoScope` branch — no agent, no session id, or an
+  inactive session — carries only the tool name; the mid-call live-visibility branch goes through
+  `ledgerEntry` and still carries `preview` and `args`).
 
   When the current shard exceeds 8 MiB or 20,000 lines, the next write first rotates it to
   `<encoded-session>.1.jsonl`; only the current shard and its predecessor are kept (an older `.1`

@@ -10,6 +10,17 @@ Design rationale lives in `docs/superpowers/specs/`; the release-acceptance proc
 
 ## [Unreleased]
 
+### 文档更正 Docs
+
+- **需求 2.1 / 2.2 的收窄改记为「实现者决定」E2，不再引用已移除的「用户裁决」第 9 条**：没有用户消息追认这两条收窄。README 补上非单工具步的证据（20.2% 的步不是单工具步：16.9% 带 ≥2 个调用、3.3% 零调用），说明 PTC 是为实现范围推迟，不是被证明没有价值。
+- **0.4% 不再称为「净保底」**：它是 300 个最长会话上的聚合净额（778 / 195,531），与 0.8% 毛额、3.5%–10.0% 区间一样都是离线估算；短会话可能倒亏，`top-300` 里没有 ≤5 步会话。本条即对该措辞的更正。
+- **`candidateRecall` 正名为提交产出率**（`commits / (commits + noCandidate)`），`retrievalUpperBound` 改称「已观测取回率的下界」；两者都只提供标签，不单独决定是否开启替换、也不决定发布。补记全零周无法区分「模型没写计划」与「没有可省项」。
+- **准入豁免改为单步计划**（`plan.steps.length === 1`）：不是「确定性 && 唯一候选」，多步计划即使只剩一个候选仍要过阈值。
+- **补记开放缺口**：需求 2.3（工具调用顺序由谁定）的调研未交付，且不被 PTC 的推迟覆盖；HarnessMM 的 EDG 图/链（`predecessor_id`）与 RSI 循环未移植。
+- **发布验收口径**：不搭回放集只免除语料；冒烟 runner 与 locator 取回完整性检查不需要语料，仍是未交付项。安装规格更新为 `dsh-boost@^0.1.3`（两个 registry 的 `latest`），并记录 0.1.3 的修复。
+- **运行手册按代码校正**：宿主版本守卫只在 `engines.dsh` 区间外告警（区间内的 `rc.5` / `0.2.2` 只记 info）；`ERR_HOST_SELECTOR_UNAVAILABLE` 只由 `selector-unavailable` 映射，`selector-error` 不映射；补记 `kind:'reset'` 收据与 `skip:no-scope` 的两条写入路径；`projection-skipped:no-owner` 标为 hook 不可达；英文 README 的页脚算术改为实测 747–749。
+- **投影开启前先看 `status.hasSpill`**（存在性）与 `degraded` 里的 `ERR_HOST_SPILL_UNUSABLE`，两者都过再开 `projection: 'on'`。
+
 ## [0.1.3] - 2026-11-21
 
 ### 修复 Fixed
@@ -73,7 +84,7 @@ Design rationale lives in `docs/superpowers/specs/`; the release-acceptance proc
   `npm run ci && npm run verify:package`。
 - **`verify:package` 的 dist 断言不再被 `prepare` 重建掩盖**：默认路径显式 `npm run build` 后
   `npm pack --ignore-scripts`。
-- 文档：3.5% 不再被称为「保底」（净保底约 0.4%）；首次 `status` 的 `degraded` 是空；状态目录
+- 文档：3.5% 不再被称为「保底」；首次 `status` 的 `degraded` 是空；状态目录
   以 `config.dshHome` 优先；澄清表删掉「计划时冻结」这个不存在的机制，并写明 EDG 的图与链
   没有移植；`package.json` 的 description 改为 substituting。
 
