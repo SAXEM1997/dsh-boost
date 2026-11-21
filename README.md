@@ -99,7 +99,7 @@ bundle，patch 的 `insert` 行落在 profile root 上。**装完必须重启 DS
 ```
 
 `workspaceIds` 为空时没有可见工作区：协议段不注入，投影与替换都原样放行，但每个工具调用
-仍会记一条 `skip:no-scope` 收据。`boost` 工具本身是唯一的 scope 豁免，因此没有工作区时仍然
+仍会记一条 `skip:no-scope` 收据——但 PTC 内层调用（`exec.parent` 存在）与被取消的调用在 scope 门之前就返回，两条都不记。`boost` 工具本身是唯一的 scope 豁免，因此没有工作区时仍然
 可以调用它来启用。
 
 `boost` 是**模型工具，不是 shell 命令**——这个包没有 `bin`，启用全程都要在对话里让模型调用
@@ -108,8 +108,8 @@ bundle，patch 的 `insert` 行落在 profile root 上。**装完必须重启 DS
 > 调用 boost 工具，参数 `{"cmd":"status"}`，把 JSON 结果给我。
 
 首次 `status` 应看到 `ok: true`；`data.scope.workspaceIds` 为空、`revision` 为 `0`，`shadow` 为
-`true`、`projection` 为 `"shadow"`，`counts` 为空（**仅限全新会话**——越界会话更早的工具调用
-已经各记过一条 `skip:no-scope`）。首次 `status` 的 `degraded` 里**不会**因为 `scope.json`
+`true`、`projection` 为 `"shadow"`，`counts` 为空（**仅限全新回执根**——`scan()` 读全部分片，同一 DSH home 里别的会话早先的
+越界调用已经各记过一条 `skip:no-scope`）。首次 `status` 的 `degraded` 里**不会**因为 `scope.json`
 缺失而出现 `ERR_SCOPE_READ_FAILED`：缺失是干净的默认值（`ENOENT` 不带降级码，
 `src/scope/store.ts`）；全新根目录且宿主能力齐全时，`degraded` 就是空数组。在 `status` 的
 读取路径上，`ERR_SCOPE_READ_FAILED` 只表示文件**存在但读不出来**（权限、I/O、路径是目录
@@ -371,8 +371,7 @@ horizon 重放，并计入 `projection_horizon_reestimated`；`projection_horizo
 - `projection_unknown_families`：带 `mcp__` 前缀、进入投影阶段但没有匹配到工具族的调用数；
   `projection_unknown_tools` 是其中保留的未映射工具名及次数（最多 32 个），用来发现 mapper
   缺口。
-- `hasWorkspaceRegistry`：宿主当前是否提供 `workspaceRegistry`；没有探测到时该键**省略**，
-  不是 `false`。
+- `hasWorkspaceRegistry`：宿主当前是否提供 `workspaceRegistry`，并且能真的列出工作区。生产装配总是传入这个键，所以它**总是布尔**：宿主没有该服务，或 `list()` 抛错，都是 `false`，同时 `degraded` 带`ERR_HOST_NO_WORKSPACE_REGISTRY`。只有直接构造 `boost` 依赖、完全不给宿主事实时该键才省略（测试场景）。
 - `saved`：兼容旧消费者的 camelCase 账目对象（`substitution` / `projectionGross` /
   `projectionNet` / `retrievals`），与顶层 snake_case 字段由同一次聚合派生。旧投影收据
   （pre-T23b）没有 `saved_projection_tokens` 时，按收据里的 legacy `saved` 字段回退计价。
@@ -412,7 +411,7 @@ horizon 重放，并计入 `projection_horizon_reestimated`；`projection_horizo
 
 ## 宿主依赖
 
-`inject` 是硬依赖：`tools`、`systemPrompt`——缺任一，插件加载失败。`llm` 是软依赖（只有
+`inject` 是硬依赖：`tools`、`systemPrompt`——缺任一，cordis 让插件停在 pending、不 apply（不是抛错，但对使用者而言效果相同：插件不工作）。`llm` 是软依赖（只有
 选择器用），缺失时选择器以 `selector-unavailable` 退回，投影与替换的其余部分照常。
 
 | 依赖 | 形态 | 缺失时 |

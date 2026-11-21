@@ -135,8 +135,8 @@ equivalent. In the conversation, ask the agent to call it, for example:
 > Call the boost tool with `{"cmd":"status"}` and show me the JSON.
 
 The first `status` should answer `ok: true`, with `data.scope.workspaceIds` empty, `revision` `0`,
-`shadow` `true`, `projection` `"shadow"`, and `counts` empty (in a fresh session — any earlier tool
-call from an out-of-scope session has already recorded `skip:no-scope`). The first `status` does
+`shadow` `true`, `projection` `"shadow"`, and `counts` empty (only on a fresh receipt root — `scan()` reads every shard, so earlier out-of-scope
+calls from other sessions in the same DSH home have already recorded `skip:no-scope`). The first `status` does
 **not** report `ERR_SCOPE_READ_FAILED` merely because `scope.json` is missing: a missing file is
 the clean default (`ENOENT` carries no degradation code, `src/scope/store.ts`); on a fresh root
 with the host capabilities in place, `degraded` is simply an empty array. On the `status` read
@@ -188,7 +188,7 @@ After the write, call `status` again. A healthy result looks like this:
   `"host"` because the token-meter service is present — the two are different things.
 - `data.counts` usually starts empty — but **control calls count too**: while no workspace is
   visible, `boost`'s own calls pass the same post-execute scope gate (there is no boost exemption
-  there; the exemption lives at tool registration), each recording one `skip:no-scope`. It grows
+  there; the exemption lives at tool registration), each recording one `skip:no-scope` — except PTC inner calls (`exec.parent` set) and cancelled calls, which return before the scope gate and record nothing. It grows
   after normal tool calls, for example with `projection-shadow` entries.
 
 Excerpt (illustrative values; ledger fields omitted):
@@ -442,8 +442,10 @@ in effect (the minimum over live sessions, falling back to `horizonSteps` when n
 - `projection_unknown_families`: calls carrying an `mcp__` prefix that reached projection but
   matched no tool family; `projection_unknown_tools` is the retained unmapped tool names with
   counts (at most 32), for spotting mapper gaps.
-- `hasWorkspaceRegistry`: whether the host currently offers `workspaceRegistry`. The key is
-  **omitted** when nothing was probed — it is not `false`.
+- `hasWorkspaceRegistry`: whether the host provides `workspaceRegistry` **and** can actually list
+  workspaces. The production assembly always supplies the key, so it is **always boolean**: no service, or a
+  `list()` that throws, is `false`, with `ERR_HOST_NO_WORKSPACE_REGISTRY` in `degraded`. The key is omitted
+  only when `boost` is constructed directly with no host facts at all (tests).
 - `saved`: a camelCase ledger object for older consumers (`substitution` / `projectionGross` /
   `projectionNet` / `retrievals`), derived from the same aggregation as the top-level snake_case
   fields. A projection receipt written before T23b has no `saved_projection_tokens` and is priced
