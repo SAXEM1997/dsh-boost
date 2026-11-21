@@ -443,13 +443,21 @@ in effect (the minimum over live sessions, falling back to `horizonSteps` when n
   matched no tool family; `projection_unknown_tools` is the retained unmapped tool names with
   counts (at most 32), for spotting mapper gaps.
 - `hasWorkspaceRegistry`: whether the host provides `workspaceRegistry` **and** can actually list
-  workspaces. The production assembly always supplies the key, so it is **always boolean**: no service, or a
-  `list()` that throws, is `false`, with `ERR_HOST_NO_WORKSPACE_REGISTRY` in `degraded`. The key is omitted
-  only when `boost` is constructed directly with no host facts at all (tests).
-- `saved`: a camelCase ledger object for older consumers (`substitution` / `projectionGross` /
-  `projectionNet` / `retrievals`), derived from the same aggregation as the top-level snake_case
-  fields. A projection receipt written before T23b has no `saved_projection_tokens` and is priced
-  from its legacy `saved` field instead.
+  workspaces. The production assembly always supplies the key, so it is **always boolean**: no
+  service is `false` + `ERR_HOST_NO_WORKSPACE_REGISTRY`; a service whose `list()` throws is `true` +
+  `ERR_HOST_WORKSPACE_REGISTRY_BROKEN`. Both leave every session invisible, but they are fixed
+  differently. The key is omitted only when `boost` is constructed directly with no host facts.
+- `hasSpill`: whether the host spill backend is usable. A missing service is `false`
+  (`ERR_HOST_NO_SPILL`); a service without `saveText` is also `false` (`ERR_HOST_SPILL_UNUSABLE`).
+- `saved`: the camelCase ledger object kept for older consumers (`substitution` /
+  `substitutionAvoided` / `projectionGross` / `projectionNet` / `retrievals`), derived from the same
+  aggregation as the top-level snake_case fields. Legacy projection receipts (pre-T23b) without
+  `saved_projection_tokens` fall back to the receipt's own `saved` field.
+  **The two substitution numbers are a range, not the same quantity.** `substitution` takes the
+  input of the *next* real request after the skipped one — it includes the substituted call's own
+  result, so it is an **upper bound**. `substitutionAvoided` takes the planning request's
+  `input + cacheRead + output` — it excludes that result, so it is a **lower bound**. The true
+  saving lies between them.
 
 With `projection: 'on'`, the complete original is written to the host spill backend **before** the
 replacement happens, and the footer locator can be read with `read` / `grep`. Projection never

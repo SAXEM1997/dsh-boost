@@ -371,10 +371,18 @@ horizon 重放，并计入 `projection_horizon_reestimated`；`projection_horizo
 - `projection_unknown_families`：带 `mcp__` 前缀、进入投影阶段但没有匹配到工具族的调用数；
   `projection_unknown_tools` 是其中保留的未映射工具名及次数（最多 32 个），用来发现 mapper
   缺口。
-- `hasWorkspaceRegistry`：宿主当前是否提供 `workspaceRegistry`，并且能真的列出工作区。生产装配总是传入这个键，所以它**总是布尔**：宿主没有该服务，或 `list()` 抛错，都是 `false`，同时 `degraded` 带`ERR_HOST_NO_WORKSPACE_REGISTRY`。只有直接构造 `boost` 依赖、完全不给宿主事实时该键才省略（测试场景）。
-- `saved`：兼容旧消费者的 camelCase 账目对象（`substitution` / `projectionGross` /
-  `projectionNet` / `retrievals`），与顶层 snake_case 字段由同一次聚合派生。旧投影收据
-  （pre-T23b）没有 `saved_projection_tokens` 时，按收据里的 legacy `saved` 字段回退计价。
+- `hasWorkspaceRegistry`：宿主是否提供 `workspaceRegistry` **并且**能真的列出工作区。生产装配
+  总是传入这个键，所以它**总是布尔**：宿主没有该服务是 `false` + `ERR_HOST_NO_WORKSPACE_REGISTRY`；
+  服务在但 `list()` 抛错是 `true` + `ERR_HOST_WORKSPACE_REGISTRY_BROKEN`——两种都让每个会话被判
+  不可见，但修法不同。只有直接构造 `boost` 依赖、完全不给宿主事实时该键才省略（测试场景）。
+- `hasSpill`：宿主 spill 后端是否可用。服务缺失是 `false`（`ERR_HOST_NO_SPILL`）；服务在但不提供
+  `saveText` 也是 `false`（`ERR_HOST_SPILL_UNUSABLE`）。
+- `saved`：兼容旧消费者的 camelCase 账目对象（`substitution` / `substitutionAvoided` /
+  `projectionGross` / `projectionNet` / `retrievals`），与顶层 snake_case 字段由同一次聚合派生。
+  旧投影收据（pre-T23b）没有 `saved_projection_tokens` 时，按收据里的 legacy `saved` 字段回退计价。
+  **两个替换数是一对区间，不是同一个量**：`substitution` 取被跳过请求的**下一**个真实请求的输入
+  （含被替换调用自己的结果，所以是**上界**）；`substitutionAvoided` 取计划那一次请求的
+  `input + cacheRead + output`（不含被替换调用的结果，所以是**下界**）。真实节省落在两者之间。
 
 `projection: 'on'` 时，完整原文在替换发生**之前**写入宿主的 spill 后端，页脚 locator 可以用
 `read` / `grep` 取回。投影不会丢掉唯一副本；spill 写入失败就不替换（收据记

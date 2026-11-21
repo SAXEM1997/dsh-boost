@@ -334,6 +334,9 @@ for p in $pkgs; do diff -r "$d/0.2.2-rc.4/$p/lib" "$d/0.2.2-rc.5/$p/lib" >/dev/n
 | `ERR_HOST_NO_SPILL` | `status.degraded`（收据映射在任何模式；宿主探针仅 `projection:'on'`） | 超限回执不投影，`projection-skipped:no-spill` | 恢复/检查的是 spill **后端**（`dsh-spill-local`，§2.2） |
 | `ERR_HOST_NO_SPILL_NOTICE` | `status.degraded`（收据映射） | spill 后端在，但页脚模块解析不到 `formatSpillNotice`；投影全部跳过，收据 `projection-skipped:no-footer`，原文保留 | 恢复宿主树里的 `@deepseek-ai/dsh-spill-policy/notice`；这是与 no-spill 不同的门（§2.2 末行） |
 | `ERR_HOST_SPILL_FAILING` | `status.degraded`（收据映射） | spill 后端**在**，但 `saveText` 每次都被拒；投影全部跳过，收据 `projection-skipped:spill-failed`，原文保留。与 `ERR_HOST_NO_SPILL`（后端缺失）是两种状态，修法不同 | 查后端写权限/磁盘/路径；`ERR_HOST_NO_SPILL` 那条的处置会把人引向「重装 spill 包」，在这里是错的 |
+| `ERR_HOST_WORKSPACE_REGISTRY_BROKEN` | `status.degraded` | registry 服务在，但 `list()` 抛错或返回的不是数组：每个会话都被判不可见，投影与替换全部跳过，而 `hasWorkspaceRegistry` 仍是 `true`——没有这个码，`status` 看起来是健康的 | 查宿主 workspace 存储（`~/.dsh/storages/workspace.json` 或宿主自身日志）；这不是"没装服务"，重装无用 |
+| `ERR_HOST_SPILL_UNUSABLE` | `status.degraded` | spill 后端服务在，但不提供 `saveText`（例如只注入了一个 `{}`）：apply 模式的投影无法落盘，`hasSpill` 仍为 `true` | 查宿主注入的 spill 服务是不是真后端（`dsh-spill-local`，§2.2）；与 `ERR_HOST_NO_SPILL`（服务缺失）是两种状态 |
+| `ERR_HOST_SELECTOR_UNAVAILABLE` | `status.degraded`（由 `selector-unavailable` / `selector-error` 收据映射） | LLM 软依赖不可用或调用失败：多候选计划永远弃权，单候选替换不受影响 | 查 LLM 路由；`selector-abstain` 不映射到本码——那是正常弃权，不是能力缺失 |
 | `ERR_HOST_PLATFORM_UNSUPPORTED` | `status.degraded` | win32 上替换拒绝，投影不受影响 | 平台限制，无需处置 |
 | `ERR_HOST_COMPLETE_SECTION` | `status.degraded` | 宿主的 `complete: true` 提示段在装配瀑布之后替换了整个系统提示，协议段没有到达出站请求；受影响请求上替换与投影 fail-closed（会话被判不可见），工作区明明可见插件却不动作 | 找出宿主提示配置里覆盖瀑布装配的 complete 段（通常属于另一个插件）；移除它，或接受这些请求上替换/投影不可用 |
 | `ERR_RECEIPTS_TRUNCATED` | `status.degraded` | 收据分片超过 256 个；`status` 只聚合按名排序的前 256 个，`counts` 与两账因此都是**下界**，不是漏算就是少算——方向安全但数字偏小 | 归档或清理旧分片，重跑 `status`；要全量就分批统计 |
@@ -378,6 +381,7 @@ for p in $pkgs; do diff -r "$d/0.2.2-rc.4/$p/lib" "$d/0.2.2-rc.5/$p/lib" >/dev/n
 | `dispatch-rejected` | 合成派发的工具名/参数与决定不符（防篡改检查），该次派发被拒、队列已清 | 到达的调用不是插件决定的那一个；查是否有别的写入者或中间层改了参数 |
 | `pruned-reset` / `compaction-reset` | `llm/stream` 时锚点无法验证：历史被 pruner 裁掉（`pruned-reset`），或锚定回执已不在/被压缩替换（`compaction-reset`）；队列与锚点清空后放行 | 压缩/裁剪后的预期重置；替换在下一回合重新开始 |
 | `projection-skipped:no-owner` | 投影跳过：回执没有 session id，落盘产物无法归属；原文保留 | 投影的降级类跳过（与 `no-spill`/`no-footer` 同组）；查宿主是否没传 session |
+| `substitute-skipped:gate-error` | 决策阶段抛错（计划形状过了 `safePlan` 但绑定/守卫抛，或回执映射异常），该步替换被丢弃且没有别的收据能说明原因 | 记录 `status` 与日志，按 bug 上报——正常输入不应让决策层抛 |
 | `substitute-skipped:no-toolset` | 替换**已提交**，但该步的准入工具集不可得，无法用 `exec.toolSet` 复核；派发照常 | 可见性信号，不是失败；宿主缺 toolSet 时每次替换都会记一条 |
 
 ## 3. 20 任务回归门（人工流程；任务集与 runner 都不随包发布）
