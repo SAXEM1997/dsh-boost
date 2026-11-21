@@ -1,14 +1,14 @@
 # dsh-boost：用三层委派提高 DSH 的 token 效率
 
 - 日期：2026-11-18
-- 状态：已评审（specpowers-review），待批准
+- 状态：已评审（specpowers-review）；设计已带入实现（v0.1.x），但**从未经用户消息正式批准**——没有批准记录，头部长期写的"待批准"不是笔误，见澄清表 E2 与 §13
 - 相关研究：[三层委派的一手来源研究](../../research/2026-11-18-three-tier-delegation.md)
 
 ## 1. 意图与为什么
 
 目标是在 DeepSeek Harness（DSH）上做一个插件，让**同样的任务用更少的 token 完成，且成功率不降**。参照 HarnessMM 的"已定决策复用"思路：工具回执回来时，如果下一步在规划时就已经确定，就不必再问一次大模型。**关于"更高质"**：原始需求第 3 条提到"上下文更精炼高质"，但 v1 没有任何指标能判定质量是否提升（A1 的成功率口径已声明不可判）。"更精炼"由投影的 before/after token 差度量；"更高质"在 v1 只是一个**未经检验的假设**——v1 最多声称"质量不降"（即"same or better"），这同样未被测量，只作为设计意图而非已验证的事实。判定质量所需的指标（如任务完成率、主模型对替换/投影结果的推翻率）在 §6.1 的护栏中定义，但 v1 不产出这些数字。
 
-参照对象的核心机制（EDG 计划 / GDR 守卫 / CCS 回调替换 / Jev 快选择）在 `ref-harnessmm/` 中已完整实现，并附带一个能跑的 DSH 插件 `dsh-plugin/harnessmm-desktop`。本项目是**移植 + 改造**：移植扁平候选银行、守卫、单候选提交与选择器；EDG 的图/链（`predecessor_id`）未移植（见 §5.2-6），不是从零实现。（Jev = 选择器，见 §5.1 的术语约定。）
+参照对象的核心机制（EDG 计划 / GDR 守卫 / CCS 回调替换 / Jev 快选择）在 `ref-harnessmm/` 中已完整实现，并附带一个能跑的 DSH 插件 `dsh-plugin/harnessmm-desktop`。本项目是**移植 + 改造**：移植扁平候选银行、守卫、单候选提交与选择器；EDG 的图/链（`predecessor_id`）未移植（见 §5.2-6），HarnessMM 的 RSI 循环（用训练反馈细化 companion prompts / context settings / adapter rules，验证集从冻结候选里选一个，`ref-harnessmm/README.md:56-58`）也未移植——v1 是固定策略插件，没有训练/选择生命周期；不是从零实现。（Jev = 选择器，见 §5.1 的术语约定。）
 
 要解决的问题在两个方向上都存在：
 
@@ -24,7 +24,7 @@
 | 指标 | 数值 | 含义 |
 |---|---|---|
 | 模型调用步数 / 工具调用数 | 54,141 / 62,624 | 平均每会话 180 步 |
-| 每步工具调用数 | 1 个：79.8%；2 个：15.8%；≥3：1.1% | 单工具步是主流，批量已存在但非主体 |
+| 每步工具调用数 | 0 个：3.3%；1 个：79.8%；2 个：15.8%；≥3：1.1% | 单工具步是主流；20.2% 不是单工具步（16.9% 带 ≥2 调用，3.3% 零调用），批量已存在但非主体 |
 | 每请求平均回放 token | 195,531（均值）/ 187,681（中位） | 分母是请求数；上下文重放是绝对主体 |
 | 每步平均回放 token | 195,340 | 分母是 54,141 步；与上一行分母不同，不是矛盾 |
 | 缓存命中占比 | 97.0% | 几乎全部输入是缓存读 |
@@ -33,7 +33,7 @@
 | 白名单工具（read/grep/glob）覆盖 | 调用占 5.7%（3,562/62,624）；全覆盖 step 占 4.00%（2,165/54,141）；单调用 step 占 3.14%（1,702/54,141）；这些 step 的 token 占 2.70% | 替换账的 v1 天花板：步数 4.00% / token 2.70% |
 | 下一步调用里逐字来自上一步回执 | 7.2%（3,249/45,082；842 全绑定 + 2,407 部分） | 分母是 45,082 个**可判定的下一步调用**（上一步只有一个工具调用，回执来源唯一；每个调用的参数组算一个位置，不是每个字符串叶）；**值传递是少数** |
 
-**口径与方法**：统计脚本 `scripts/session-stats.mjs`（随仓库交付，见 §11），输入 `$DSH_HOME/sessions`，按 `session.v4.jsonl.zstd` 的**文件大小取前 300**。因此这些是**最长/最贵**的会话，长会话占比偏高，G1 必须按**会话长度分层**报告，不能直接外推到全体。tool-share 按回执字符数归因，分母是 62,624 次工具调用；step 占比的分母是 54,141 步。回执占比为 300 会话口径；前 20 大会话为 bash 60.3 / read 5.0 / ssh 17.9，本稿不采用那一口径。"7.2%"的分母是 **可判定的下一步调用**（上一步只有一个工具调用，回执来源唯一；每个调用的参数组算一个位置，**不是每个字符串叶**），是**逐字 span 覆盖率**，也是值传递的**下界**——提取/转换型传递（取字段、改格式）不计入；分母是调用，不是字符串叶。快照定稿值为 **45,082 个调用 / 842 全绑定 / 2,407 部分绑定 / 7.21%**——**全绑定 842 与初稿完全一致**，这是两条独立实现互为验证的证据。凡与本节初稿数字不符处，以 `npm run stats` 的复算为准。
+**口径与方法**：统计脚本 `scripts/session-stats.mjs`（随仓库交付，见 §11），输入 `$DSH_HOME/sessions`，按 `session.v4.jsonl.zstd` 的**文件大小取前 300**。因此这些是**最长/最贵**的会话，长会话占比偏高，G1 必须按**会话长度分层**报告，不能直接外推到全体。tool-share 按回执字符数归因，分母是 62,624 次工具调用；step 占比的分母是 54,141 步。回执占比为 300 会话口径；前 20 大会话为 bash 60.3 / read 5.0 / ssh 17.9，本稿不采用那一口径。"7.2%"的分母是 **可判定的下一步调用**（上一步只有一个工具调用，回执来源唯一；每个调用的参数组算一个位置，**不是每个字符串叶**），是**逐字 span 覆盖率**，也是值传递的**下界**——提取/转换型传递（取字段、改格式）不计入；分母是调用，不是字符串叶。**它回答的是"参数里逐字抄了上一步回执多少"，不是"这条结果能否作为下一个工具的输入"；后者没有测量，不能拿 7.2% 当它的上限或替代。**快照定稿值为 **45,082 个调用 / 842 全绑定 / 2,407 部分绑定 / 7.21%**——**全绑定 842 与初稿完全一致**，这是两条独立实现互为验证的证据。凡与本节初稿数字不符处，以 `npm run stats` 的复算为准。
 
 **§2 全部统计按 `session-snapshot.json` 复算**；按文件大小取前 300 每次跑会漂（二次复算 p50/p90/p99 为 646/4,619/18,057，与快照定稿 623/4,572/18,087 差 <1%，属同一选择规则下的漂移）。
 
@@ -44,14 +44,14 @@
 两条直接结论：
 
 - **token 数口径下最大的杠杆是"少一次回放"**：跳过一步省的是**该步请求的 `totalTokens`**（含 cacheRead；每请求均值 195,531、中位 187,681）；每缩小上下文 X token，后续每一步都省 X。投影不再只盯 read——bash 61.8% + ssh 10.0% 合计 71.8% 的回执体量，v1 必须给它们投影参数（§5.3）。
-- **值传递（把上一步输出喂给下一步的参数）只覆盖 7.2% 的可判定下一步参数位置**。所以"Jev 给'结果能否作为下一工具输入'打分"这个设计只作用在少数路径上，不能作为核心。
+- **值传递（把上一步输出喂给下一步的参数）只覆盖 7.2% 的可判定下一步参数位置**。所以"Jev 给'结果能否作为下一工具输入'打分"这个设计只作用在少数路径上，不能作为核心——但注意 7.2% 是逐字 span 的下界，提取/改写型传递不计入，"可喂给下一工具"的总体比例没有测量；这条结论是"逐字复用是少数"，不是"值传递是少数"。
 
 ### 2.2 一手来源（摘要，详见研究文件）
 
 | 结论 | 对我们 |
 |---|---|
 | 缓存读按 1 token 计（本稿不打折、不算钱），匹配是精确前缀，任何早于断点的改动会让后缀全部失效 | 追加式、到达即定形，是硬约束 |
-| 在固定 95%-of-GPT-4 质量目标下，MT Bench / MMLU / GSM8K 分别报告 85% / 45% / 35% 的成本削减；路由器出分布后接近随机 | 路由/选择器类的**全局质量阈值**不成立（那是"按任务难度挑模型"的问题，须按任务族校准）；替换准入是另一回事——阈值回答"省下的量值不值得一次慢速往返"，取决于回放成本而非工具族，v1 用全局标量，分族推迟（§5.2-4 裁决） |
+| 在固定 95%-of-GPT-4 质量目标下，MT Bench / MMLU / GSM8K 分别报告 85% / 45% / 35% 的成本削减；路由器出分布后接近随机 | 路由/选择器类的**全局质量阈值**不成立（那是"按任务难度挑模型"的问题，须按任务族校准）；替换准入是另一回事——阈值回答"省下的量值不值得一次慢速往返"，取决于回放成本而非工具族，v1 用全局标量，分族推迟（§5.2-4 的实现者决定） |
 | 字面 span 校验证明"字符串确实出现过"，不证明"选对了"；span 抽取最好约 53.6 F1 | 出处校验只能当**伪造过滤器**，不能当正确性证明 |
 | LLM 压缩器在短任务上让 token **增加 24–94%**；确定性遮蔽省 8.6% 且完成率 100% | 蒸馏必须先过后验门，且确定性裁剪优先于模型蒸馏 |
 | 乐观执行（先执行再校验）在 ReWOO/LLMCompiler 上不掉成功率，但它们的校验是强模型判定或沙箱状态校验 | 第一版只对**效果可检查**的动作放行 |
@@ -63,11 +63,11 @@
 - G1：在真实会话上，provider 记账的 `totalTokens`（= uncached input + cacheRead + cacheWrite + output）相对基线下降。**全部按 raw token 计：cacheRead 也按 1 token 计，不打折、不算钱、不乘任何价格权重。** G1 拆成**两本账**，分别报告、不合并成一个乘法：
   - **替换账**（跳过调用）：跳过一步省的是**该步请求的 `totalTokens`（含 cacheRead）**。天花板两个数并列：步数份额 4.00%、token 份额 **2.70%**（白名单步均 131,851 token vs 全局步均 195,340）；经验换算率 0.675——20% 的步 ≈ 13.5% 的 token（实测），不能把步数份额直接当 token 份额。
   - **投影账**（缩小进入上下文的内容）：`被裁 token × (1 + 剩余步数)`，不乘价格、不乘权重，参数取 §5.3 默认值。**v1 只能给区间，不能给单点**：
-    - **上界 10.0% / 下界 3.5% 都是离线（ex-ante）估算，不是可复现的测量**：按本节方法学在一个 300 会话语料上离线算出。上界假设被裁内容在其后的平均剩余步数里**全程存活**——没有 compaction、没有 pruner 剪裁、没有模型重读；下界按 horizon 20 的保守口径（只回放 21 次）。**两个数都加了替换账的 2.70%**：3.5% = 投影侧 0.8% + 替换账 2.70%，10.0% = 投影侧 7.3% + 替换账 2.70%。替换账的 2.70% 是 token 份额的**上限**，不是保底，不能作为 floor 的一部分。
-    - **诚实的 floor**：投影侧单独约 **0.8%** 毛额；扣掉每请求固定开销约 **0.4%**（778 / 195,531 = 0.398%，分子是协议段 379 + `boost` 工具 schema 399，见 D4）后，**净保底约 0.4%**。0.8% 与 0.4% 都是离线估算，不是测量。**目标 10.0%** 仍是理想上界（含替换账上限），不是硬承诺。
-    - **离线分项不可从交付物复现，本文不再把它们当数字引用**：那次离线运行自身的分项（候选 token 数、回执条数、剩余步数、回放次数、总 token 分母）没有进入交付物——`scripts/session-snapshot.json` 只存聚合计数（其复算总 `totalTokens` 为 10,575,904,022，与离线运行的分母本就不同：选择边界漂移，见 §2.1），不存每会话的投影候选字节（`receiptChars` 无逐条族归属，`toolChars` 只有会话级聚合），仓库里也没有脚本计算这些分项。保留的只有结论：**投影侧约 0.8% 毛额、净保底约 0.4%；目标上界 10.0%**。
-    - **影子期实测值取代上下界**（前提是未来版本补上总 token 分母；当前 `shadow-report.mjs` 不产出净额，见 §6.1）：上下界之间就是 compaction、pruner 剪裁与模型重读造成的损耗；影子周测得的投影账净额替换本节的估算区间，实测只用于收窄区间，不把 10% 改成硬承诺。
-  - **v1 验收：净保底约 0.4%（投影侧 0.8% − 固定开销 0.4%）、目标上界 10.0%**。替换账的 2.70% 只有实际发生替换才计入，不能预先加到保底里；10.0% 是全程存活的理想上界（含替换账上限），不是"必须 10%"的硬承诺。发布决定仍按下面的 ②（实现者决定，非用户裁决）。
+    - **区间 3.5%–10.0% 是离线（ex-ante）估算，不是可复现的测量；3.5% 不是 floor**：按本节方法学在一个 300 会话（最长/最贵）语料上离线算出。上界假设被裁内容在其后的平均剩余步数里**全程存活**——没有 compaction、没有 pruner 剪裁、没有模型重读；低端按 horizon 20 的保守口径（只回放 21 次）。**低端也加了替换账的 2.70%**：3.5% = 投影侧 0.8% + 替换账 2.70%，10.0% = 投影侧 7.3% + 替换账 2.70%。但 2.70% 是 token 份额的**上限**，不是保底；把上限加进低端，3.5% 只能读作"这个离线模型在保守回放假设下的区间低端"，不能读作任何会话的保底，也不能当 floor 用。
+    - **投影侧单独约 0.8% 毛额；扣掉每请求固定开销约 0.4%（778 / 195,531 = 0.398%，分子是协议段 379 + `boost` 工具 schema 399，见 D4）后，300 个最长会话上的聚合净额约 0.4%**。0.8% 与 0.4% 都是离线估算，不是测量；**0.4% 也不是每会话保底**：分母是 195,531 token 的平均请求，长会话摊薄固定开销，短会话可能倒亏（§6.1 的 A4；top-300 里没有 ≤5 步会话，短会话桶没有样本）。**目标 10.0%** 仍是理想上界（含替换账上限），不是硬承诺。
+    - **离线分项不可从交付物复现，本文不再把它们当数字引用**：那次离线运行自身的分项（候选 token 数、回执条数、剩余步数、回放次数、总 token 分母）没有进入交付物——`scripts/session-snapshot.json` 只存聚合计数（其复算总 `totalTokens` 为 10,575,904,022，与离线运行的分母本就不同：选择边界漂移，见 §2.1），不存每会话的投影候选字节（`receiptChars` 无逐条族归属，`toolChars` 只有会话级聚合），仓库里也没有脚本计算这些分项。保留的只有结论：**投影侧约 0.8% 毛额、300 长会话上的聚合净额约 0.4%；目标上界 10.0%**。
+    - **影子期实测值取代区间**（前提是未来版本补上总 token 分母；当前 `shadow-report.mjs` 不产出净额，见 §6.1）：区间两端之间就是 compaction、pruner 剪裁与模型重读造成的损耗；影子周测得的投影账净额替换本节的估算区间，实测只用于收窄区间，不把 10% 改成硬承诺。
+  - **v1 验收：投影侧聚合净额约 0.4%（0.8% − 0.4%）、目标上界 10.0%；两者都是离线估算，不是每会话保底**。替换账的 2.70% 只有实际发生替换才计入，不能预先加到任何保底里；10.0% 是全程存活的理想上界（含替换账上限），不是"必须 10%"的硬承诺。发布决定仍按下面的 ②（实现者决定，非用户裁决）。
   - 两账合计 **≥20% 是总目标**（含二期蒸馏），不是 v1 验收线。影子期结束时用实测值修正总目标的可达性判断。
 - G2：每一次"没问主模型"的决定都可审计（收据：计划、守卫、绑定、回执、节省量；替换与影子收据带 `plan` 目标与 `guards`，分别按 256 码点 / 8 条 / 每条 300 码点截断并显式标注，`args` 按 2048 码点截断且 `receipt_hash` 仍按完整值计算——截断只影响人读的那份拷贝，不改变身份）。
 - G3：默认不改变 agent 行为；干预必须显式开启，且只对只读动作（实现见 §5.5）。
@@ -76,7 +76,7 @@
 
 **非目标**
 
-- N1：不做 PTC/`run_code` 批量执行（第二期）。一期杠杆在回放裁剪——每步 1 个工具占 79.8%（§2.1），批量步不是主体；二期按影子期收据里批量步的真实占比再决策。
+- N1：不做 PTC/`run_code` 批量执行（第二期）。**这是为实现范围而推迟，不是实测证明批量没有价值**：每步恰好 1 个工具占 79.8%，但其余 20.2% 不是单工具步——16.9% 带 ≥2 个调用、3.3% 零调用（§2.1 快照复算）。用户明确要求批量派发，非单工具步正是它的作用面；一期先做只读替换 + 投影，PTC 留二期，重启条件是影子期拿到批量步的真实占比与收益标签，而不是"79.8% 已证明不需要"。
 - N2：不做模型训练或权重改动。
 - N3：不替换 DSH 的压缩、剪裁、spill 等既有机制，也不接管它们的决策：投影只改模型可见的 `content`，原文借宿主 `spillStore` 存放（§5.4），不另建一套 spill 服务。
 - N4：不追求论文里 87.93% 的数字——那是整套配置（含上下文管理与收尾规则）之和，核心机制消融只占 20–27%。
@@ -97,11 +97,11 @@
 
 | 路线 | 做法 | 取舍 | 结论 |
 |---|---|---|---|
-| A 影子优先 | 门照常做决定，但仍问主模型，只记账；一周后按真实数据决定是否开启 | 零质量风险、能拿到免费标签；一周内无收益 | **采用** |
+| A 影子优先 | 门照常做决定，但仍问主模型，只记账；一周后按真实数据修正预期，是否开启由实现者决定，报告不单独裁决（§6.1） | 零质量风险、能拿到免费标签；一周内无收益 | **采用** |
 | B 直接干预 | 照搬 HarnessMM 插件，日常任务直接开，不区分只读/写 | 立刻见效；守卫写错会让 agent 走错路，且样本少难归因 | 二期（不限只读、不等影子的全量直接开） |
 | C 先建基准 | 20 个固定任务双跑 | 数字最硬；半天到一天搭环境，且不反映真实长会话 | **未采用**；20 任务门降级为发布前人工冒烟。**"不搭回放集"只免除语料**；冒烟 runner 与取回完整性检查不需要语料，仍是未交付项（2026-11-18 裁决，m00234；§6.1/§6.2） |
 
-被否掉的方案：让 Jev 决定"下一步调哪个工具"（没有候选集时它就退化成第二个主模型，成本回到原点）；让 Jev 给"结果能否作为下一输入"打全局分（值传递只占 7.2%，且阈值不可迁移）。
+被否掉的方案：让 Jev 决定"下一步调哪个工具"（没有候选集时它就退化成第二个主模型，成本回到原点）；让 Jev 给"结果能否作为下一输入"打全局分（逐字值传递只占 7.2%，且这是下界、不是可喂给下一工具的总比例；阈值也不可迁移）。
 
 ## 5. 架构
 
@@ -155,7 +155,7 @@
 1. **追加式**：回执到达时决定其形态，进了历史就不再改；要原文时追加"展开"。任何回改都会让后缀缓存失效。
 2. **确定性优先**：能用投影/正则/JSON pointer 解决的，不用模型。模型只在非结构化文本上有价值。
 3. **失败即回退**：绑定不清、守卫不真、schema 不符、账算不过来，一律回退主模型，不做"猜一下"。
-4. **按工具族校准（投影参数 v1 即生效；准入参数 v1 全局，分族推迟）**：投影的窗口与触发阈值按工具族分别维护（§5.3 的 per-family 表，v1 覆盖五族）。**替换准入 v1 是一个全局标量** `admission.thresholdTokens`（`src/config.ts` 默认 1,024，`src/admission/ledger.ts` 按 `savedTokens − overheadTokens > thresholdTokens` 判定，无族维度）。裁决（2026-11-20，业主拍板，记录在案）：准入阈值回答的是"这次省下的量值不值得多一次慢速往返"，它取决于**回放成本**，不取决于字节来自哪个工具，故 v1 不分族；**推迟的触发条件**——影子周收据按工具族拆出的节省/通过率呈现族间方差时，再引入 per-family 准入阈值。§2.2 那条"全局单阈值不成立"出自路由器文献，约束的是模型路由的质量阈值，不约束这个经济学判定。
+4. **按工具族校准（投影参数 v1 即生效；准入参数 v1 全局，分族推迟）**：投影的窗口与触发阈值按工具族分别维护（§5.3 的 per-family 表，v1 覆盖五族）。**替换准入 v1 是一个全局标量** `admission.thresholdTokens`（`src/config.ts` 默认 1,024，`src/admission/ledger.ts` 按 `savedTokens − overheadTokens > thresholdTokens` 判定，无族维度）。实现者决定（2026-11-20，记录在案；**没有对应的用户消息引用**）：准入阈值回答的是"这次省下的量值不值得多一次慢速往返"，它取决于**回放成本**，不取决于字节来自哪个工具，故 v1 不分族；**推迟的触发条件**——影子周收据按工具族拆出的节省/通过率呈现族间方差时，再引入 per-family 准入阈值。§2.2 那条"全局单阈值不成立"出自路由器文献，约束的是模型路由的质量阈值，不约束这个经济学判定。
 5. **替换白名单只到只读三件套**：v1 允许**替换**的工具只有 `read`、`grep`、`glob`。三层口径分开：
    - **投影覆盖已配置的工具族**：v1 覆盖 `read`、`grep`、`glob`、`bash`、`ssh`；其余未配置族**一律不投影**（每个族都要显式给参数，缺省不是"裁剪"而是"不裁剪"）；
    - **替换只对白名单生效**：只有这三个工具能被跳过主模型；
@@ -177,7 +177,7 @@
 | 收据写失败 | 落盘 append 抛错 | 内存缓冲；连续 **3 次** append 抛错即停止替换（fail-closed） | 不写收据（store 已停写，收据本身写不出去）；信号是 `boost status.receipts_stopped: true` |
 | 派发被拒（参数不符） | `tools/execute` 解析后实参 ≠ 解析后候选 | 该步不执行替换，下一步回主模型 | `dispatch-rejected` |
 | 守卫平凡 | 候选只有 `ok: true`，没有一个非平凡 guard | 判不合格，回退主模型 | `guard-trivial` |
-| scope 读 / 解析失败 | 文件缺失、JSON 坏、未知 version | 落到 `selected+[]`；`boost status` 暴露 degraded note | `scope-degraded` |
+| scope 读 / 解析失败 | 无权限 / 读失败、JSON 坏、未知 version（文件缺失是 revision 0 的干净默认） | 落到 `selected+[]`；`boost status` 的 degraded 列表带 `ERR_SCOPE_*` | **不写收据**（`scope-degraded` 只是 store 的内部标签，见 §5.5） |
 | 宿主 compaction 后锚点丢失 | 计划引用的历史区间已被摘要替换 | 回主模型、清空 pending | `compaction-reset` |
 | 宿主 pruner 原位改写回执 | 计划引用的回执被换成 head + marker + tail（锚点仍在） | 回主模型、清空 pending | `pruned-reset` |
 
@@ -219,12 +219,12 @@
 | 缩小进入上下文的内容 | 被裁 token ×（1 + 剩余步数） | 是 |
 | 模型蒸馏（二期） | 上式再减去：蒸馏调用的输入 + 输出 | 是，但要先减开销 |
 
-**替换**被允许，当且仅当**替换杠杆**的省下 > 该杠杆的新增开销 + 阈值（v1 为单一全局阈值 `admission.thresholdTokens`，分族按 §5.2-4 的裁决推迟）；蒸馏（二期）要先减开销，再过后验门。
+**替换**被允许，当且仅当**替换杠杆**的省下 > 该杠杆的新增开销 + 阈值（v1 为单一全局阈值 `admission.thresholdTokens`，分族按 §5.2-4 的决定推迟）；蒸馏（二期）要先减开销，再过后验门。
 
 - **v1 不做货币计价，也没有费用护栏**：只用 token 数做准入。`ctx.tokenMeter` 是计数/压力估算器，没有货币价格，不能拿来复算金额；`src/config.ts` 里**没有 per-route 费率键**（也没有任何费用键）。这是 v1 的**有意简化**，不是"默认关闭的可选项"——要加费用护栏必须新增配置键、价格表和独立验收，留二期。
-- **剩余步数（两种口径，不许混）**：**报告 / 离线复算**用该回执之后的**实际剩余请求数**（§3 上界估算所用的"平均剩余步数 + 1 次回放"即此口径）；**运行期准入**用固定 horizon（默认 20 步）与会话历史均值二者取小做保守下界，不会高估收益。**会话历史均值 = 本会话最近 5 个 turn 的步数均值**，不足 5 个 turn 时直接用 horizon 20。
+- **剩余步数只有一个运行期口径，收据按回执钉住**：投影收据写入时把当时的 horizon 记进 `horizon_steps`（`projectionHorizonOf`，`src/hooks/post-execute.ts`；默认 horizon 20 与本会话最近 5 个 turn 的步数均值取小，不足 5 个 turn 直接用 20）。`boost status` **逐条按该收据自己的 `horizon_steps` 回放**，只有缺这个字段的旧收据才回落到当前 horizon 并计入 `projection_horizon_reestimated`（`src/tools/boost.ts:575-584`、`:601-607`）。没有"报告用实际剩余请求数"的第二口径。
 - **投影按确定性策略执行，不参与准入判断，不产生逐次决策**（按工具族 + 字符阈值）；收益决策只发生在"是否替换"这一步。
-- **宿主 compaction 之后的步骤重新按未缓存前缀计**：压缩会把老区间换成摘要，从首个被替换 token 起整段前缀重算；投影账的"剩余步数"也按压缩后的上下文重新起算。
+- **宿主 compaction 不重启投影账**：压缩会把老区间换成摘要、从首个被替换 token 起整段前缀重算，但**已写收据的 `horizon_steps` 不重算**；压缩后的新投影用压缩后时点的 horizon 写新收据。`status` 不会因为 compaction 把旧账重新起算。
 
 **投影参数（per-family，v1 全部五族：`read` / `grep` / `glob` / `bash` / `ssh`；表中 `grep`/`glob` 合并一行）**：
 
@@ -243,7 +243,7 @@
 
 | 参数 | 默认值 | 作用域 |
 |---|---|---|
-| 准入阈值 | 1,024 token | **全局单一**，作用于每个候选；**确定性单候选豁免**（`deterministic && 唯一候选`，对齐参照的 `admitted_deterministic`） |
+| 准入阈值 | 1,024 token | **全局单一**，作用于每个候选；**单步计划豁免**（`plan.steps.length === 1`，`src/hooks/post-execute.ts:1052`）：计划只有一步时没有选择器可付，阈值不适用。不是"确定性 && 唯一候选"——多步计划即使只剩一个候选，仍要过阈值（`src/admission/ledger.ts:147-151`） |
 | Jev 输出上限 | 512（`selector.maxTokens`，见准入表）；输入按实际 prompt 估算、另计 | 多候选时从节省里扣 `maxTokens + estimate(input)` |
 | 替换步数上限 | 8 步 / turn | §5.2-6 |
 | 剩余步数 horizon | 20 | 算不出历史均值时 |
@@ -260,7 +260,7 @@ config:
     glob:  { triggerChars: 700,  headChars: 400,  tailChars: 100 }
     bash:  { triggerChars: 4000, headChars: 2000, tailChars: 500 }
     ssh:   { triggerChars: 2000, headChars: 1200, tailChars: 300 }
-  admission: { thresholdTokens: 1024 }   # v1：全局单一准入阈值；分族推迟（§5.2-4 裁决，触发条件见彼处）
+  admission: { thresholdTokens: 1024 }   # v1：全局单一准入阈值；分族推迟（§5.2-4 的决定，触发条件见彼处）
   selector:  { maxTokens: 512 }
   stepsPerTurn: 8
   horizonSteps: 20
@@ -275,7 +275,9 @@ config:
 
 | 字段 | 定义 | 缺失时 |
 |---|---|---|
-| `saved_input_tokens` | 发生替换时，**后一次请求的 `(input + cacheRead)`**（取后端点，不做插值） | 该步或后一次请求任一缺失记 `unknown`，**不计入**合计 |
+| `saved_input_tokens` | 发生替换时，**后一次请求的 `(input + cacheRead)` 之和**（取后端点，不做插值；不是两个独立字段）；这是被避免输入的**上界** | 该步或后一次请求任一缺失记 `unknown`，**不计入**合计 |
+| `avoided_total_tokens` | 发生替换时，**前一次（产生计划的）请求的 `input + cacheRead + output`**；这是被避免请求的**下界**（含 output，故名为 total） | 该侧样本缺失记 `unknown` |
+| `output_tokens` | 后一次请求的 `output`；从不折进 input 和 | 该步或后一次请求任一缺失记 `unknown` |
 | `cache_hit_delta` | 后一请求与前一次的 `cacheRead / (input + cacheRead)` 之差（正数 = 命中率上升） | 记 `null` |
 
 投影账：
@@ -283,14 +285,14 @@ config:
 | 字段 | 定义 |
 |---|---|
 | `before` | 投影前规范化原文的 token 估计（宿主 `tokenMeter` 的 `estimateMessage`） |
-| `after` | 投影后可见 content（窗口 + 页脚）的 token 估计 |
+| `after` | 投影后可见 content 的 token 估计。**apply** 是窗口 + 宿主 `formatSpillNotice` 真实页脚；**shadow** 不知道落盘后的 locator，用 `(Omitted N bytes.)` 占位页脚（`src/projection/apply.ts:134-146`），比真实页脚短，所以 shadow 的 `after` 是下界、`saved_projection_tokens` 是上界 |
 | `saved_projection_tokens` | `before − after`，**毛节省** |
 | `estimate` | `'host'` 或 `'unknown'`；`'unknown'` 表示没有 meter 的投影，收据**不写** `before` / `after` / `saved_projection_tokens`，不伪造数字 |
 | `unit` | 固定 `'raw'` |
 | `projection_retrievals` | 模型对该 spill locator 路径的 `read`/`grep` 次数 |
-| `projection_net_tokens` | `(gross_non_retrieval − retrieval_content) × (1 + horizon) − retrieval_calls`；`gross_non_retrieval` **不含**取回调用自身的投影；**投影账只报净额** |
+| `projection_net_tokens` | `(gross_non_retrieval − retrieval_content) × (1 + 该收据的 horizon_steps) − retrieval_calls`；`gross_non_retrieval` **不含**取回调用自身的投影；**投影账只报净额**。`horizon_steps` 是收据写入时钉住的，不是 status 时统一重算 |
 
-投影账报**净额**：毛额先剔除取回调用自身的投影，再与取回内容一起按 `(1 + 剩余步数)` 回放，最后一次性扣掉取回调用。两条理由：把取回自身的投影算进毛额、又把它的可见窗口算成取回成本，会把同一批 token 从两边各算一次；毛额与取回内容必须用同一个回放因子（只回放一边会让符号翻转——旧式子在两个常规用例上报出了很大的负节省）。`projection_retrievals` 与净额都进 `boost status`。
+投影账报**净额**：毛额先剔除取回调用自身的投影，再与取回内容一起按**各自收据的** `(1 + horizon_steps)` 回放，最后一次性扣掉取回调用。两条理由：把取回自身的投影算进毛额、又把它的可见窗口算成取回成本，会把同一批 token 从两边各算一次；同一收据内毛额与取回内容必须用同一个回放因子（只回放一边会让符号翻转——旧式子在两个常规用例上报出了很大的负节省）。`projection_retrievals` 与净额都进 `boost status`。
 
 ### 5.4 回执投影的可见性契约
 
@@ -327,7 +329,7 @@ config:
 契约化四条：
 
 4. **不可裁剪清单**：错误信号、退出码、状态标记（`is_error` / `exit_code` / `[exit code: N]`）、页脚本身永久保留；裁剪只能作用于正文。
-5. **顺序固定**：`canonicalise → 绑定/守卫 → 投影 → 进历史`。绑定与守卫一律读**原始规范化回执**（canonicalise 后的完整文本），投影只改"模型可见的 content"；Jev 与准入读投影后的文本。
+5. **顺序固定**：`canonicalise → 绑定/守卫 → 替换判定（Jev/准入）→ 投影 → 进历史`。绑定与守卫一律读**原始规范化回执**（canonicalise 后的完整文本），投影只改"模型可见的 content"；**Jev 与准入也读原始规范化回执**——选择器只对原文做自己的头尾窗口（`selectorReceiptOf`，最多 1,200 字符），准入用同一段原文计价（`selectorChargeOf`），投影在替换判定之后才施加（`decideSubstitution` → `projectDecision`，`src/hooks/post-execute.ts` 的 `applyDecision`）。
 6. **投影不新增回放段**：canonicalise 在投影之前、进入历史之前完成，因此不违反追加式；投影后的回执**保持 `tool` 角色、原位替换**，不新增 assistant 段。
 7. **两种计量单位不许混写**：投影的长度按 **Unicode code point**（`Array.from(text).length`）计，切点不得切开代理对（surrogate pair）；spill 页脚的省略量按 **UTF-8 字节**（`formatSpillNotice` 的 `count` 是 bytes，且 `describeOmitted` 不加千位分隔符）计。示例里 "18,432 chars" 与 "15932 bytes" 是两个单位；本例纯 ASCII 只是恰好相等，不是笔误。
 
@@ -386,10 +388,10 @@ workspace 归属由 agent 的 cwd 映射到 workspace id。每个挂载点各有
 | 挂载点 | agent 来源 | 拿不到时（fail-closed） | 放行/跳过时的记账 |
 |---|---|---|---|
 | `tools/*` 钩子 | `exec.agent` | 判为不可见 | 收据 `skip:no-scope` |
-| `llm/stream` | 只有可选的 `sessionId`，需经会话表解析 | 原样 `next()` 放行 | 收据 `skip:no-scope`（不合成、不记账为节省） |
+| `llm/stream` | 只有可选的 `sessionId`，需经会话表解析 | 原样 `next()` 放行 | **不写收据**：不可见会话不是一次判定（不合成、不记账为节省）；该次工具调用的 `skip:no-scope` 由 `tools/post-execute` 侧记，`test/hooks-stream.test.ts:581-589` 钉住 |
 | `systemPrompt` | `AssembleContext.scope`（**可选**字段） | 不注入该段 | 只累加 `protocol_suppressed` 计数，不逐条写收据 |
 
-**fail-closed 的定义（写死）**：指"**原样放行、不做替换、不注入该段**"，**绝不**指"拦截请求"。对 `tools/*` 而言"判为不可见"是更强的同向处理：连工具声明都不出现，仍然不是拦截。每次 fail-closed 都记一条 `skip:no-scope` 收据（`systemPrompt` 每次装配都会判定，只累加 `protocol_suppressed` 计数、不写收据），并在 `boost status` 暴露，防止静默失效。
+**fail-closed 的定义（写死）**：指"**原样放行、不做替换、不注入该段**"，**绝不**指"拦截请求"。对 `tools/*` 而言"判为不可见"是更强的同向处理：连工具声明都不出现，仍然不是拦截。**每次判定路径的 fail-closed 记一条 `skip:no-scope` 收据**，并在 `boost status` 暴露，防止静默失效。两个例外：`systemPrompt` 每次装配都会判定，只累加 `protocol_suppressed` 计数、不写收据；`llm/stream` 在 `sessionId` 解析不出或会话不可见时只是放行一个**不是判定**的请求，不写收据（`src/hooks/llm-stream.ts:995-997`；`test/hooks-stream.test.ts:581-589`）。收据 store 已停写时也不写（§5.2）。
 
 **`systemPrompt` 无 scope 的语义**：`AssembleContext.scope` 是可选字段；**无 scope = 全局视图 = 按 `selected+[]` 处理 = 不注入**。这条同样覆盖 `boost` 工具自身的协议段：`boost` 工具的**可见性**豁免 scope（见下），但它的协议段不豁免。
 
@@ -403,38 +405,38 @@ workspace 归属由 agent 的 cwd 映射到 workspace id。每个挂载点各有
 
 **两条错误通道不许混**：
 
-| `boost` 工具失败码（`ToolErrorInfo.code`） | 判定路径的收据字段 | 触发 |
+| `boost` 工具失败码（`ToolErrorInfo.code`） | `boost status` 的 degraded 项 | 触发 |
 |---|---|---|
-| `ERR_SCOPE_UNKNOWN_VERSION` | `scope-degraded` | `scope.json` 的 version 是 v1、缺失或非数值（v1 可升级） |
-| `ERR_SCOPE_FUTURE_VERSION` | `scope-degraded` | `scope.json` 的 version 是数值且 > 2；只读，写操作一律拒绝 |
-| `ERR_SCOPE_PARSE_FAILED` | `scope-degraded` | JSON 坏 |
-| `ERR_SCOPE_READ_FAILED` | `scope-degraded` | 文件缺失 / 无权限 |
-| `ERR_SCOPE_REVISION_CONFLICT` | 不写收据，工具直接失败 | base revision 不匹配 |
-| `ERR_SCOPE_LOCKED` | 不写收据，工具直接失败 | 另一 writer 持有 `scope.lock` |
+| `ERR_SCOPE_UNKNOWN_VERSION` | 同码 | `scope.json` 的 version 字段是 v1、缺失或非数值（v1 可升级） |
+| `ERR_SCOPE_FUTURE_VERSION` | 同码 | `scope.json` 的 version 是数值且 > 2；只读，写操作一律拒绝 |
+| `ERR_SCOPE_PARSE_FAILED` | 同码 | JSON 坏 |
+| `ERR_SCOPE_READ_FAILED` | 同码 | 无权限 / 读失败（文件缺失是 revision 0 的干净默认，不是降级） |
+| `ERR_SCOPE_REVISION_CONFLICT` | 不出现（工具直接失败） | base revision 不匹配 |
+| `ERR_SCOPE_LOCKED` | 不出现（工具直接失败） | 另一 writer 持有 `scope.lock` |
 
-- `ERR_SCOPE_*` 是**工具失败**：走 `PostToolDecision.kind = 'block'`（`feedback` + `info.code`），模型能看到反馈。
-- `scope-degraded` 是**判定路径的收据字段**：不发往模型，只进收据与 `boost status`。
-- 两张表不互相替代：前者是"工具调用失败"，后者是"这一步判定降级后照常回主模型"。
+- `ERR_SCOPE_*` 是**工具失败**：`boost` 把 `{ ok: false, code }` 作为工具返回值交给模型（`src/tools/boost.ts:1176-1197` 的 `runBoost`，注册在 `:1342`），模型能看到 `code`。**本插件没有任何路径发 `PostToolDecision.kind = 'block'`**——`boost` 的失败是工具值，不走 post-execute 的 block 通道；旧稿写的 `feedback + info.code` 不是这条路径。
+- `scope-degraded` 是 **scope store 的内部降级标签**，不是收据字段：`read()` 返回 `degraded: 'scope-degraded'` + 稳定 code（`src/scope/store.ts:259-268`），`boost status` 把 code 放进 degraded 列表（`src/tools/boost.ts:905`），**不收进任何收据**。
+- 两张表不互相替代：前者是"工具调用失败"，后者是"scope 读取降级、status 可见，判定照常回主模型"。
 
 ## 6. 度量与验证
 
 **主口径**：provider 记账的 `totalTokens` / **会话**（per-session；需要更细时按 per-turn 报），= uncached input + cacheRead + cacheWrite + output。四个字段是**互斥计数**：`inputTokens` 只含未缓存输入、不含 `cacheReadTokens`，所以不能拿 input+output 当总量。
 **"任务"的定义**：若沿用"任务"一词，**task = 一个 turn**；收据记 `sessionId` + `turn`，不再用没有定义的"任务"当分母。
 **次口径**：cache-miss token；费用（**v1 未实现**：没有 per-route 费率键，不参与验收）；首 token 延迟（**v1 未实现**：没有代码、没有收据字段，不参与验收——与 A4 分桶的标注方式一致）。
-**收据三类**：分别记 `uncached` / `cacheRead` / `output`，不糊成单一 input 字段。
+**收据字段**：替换结算收据记 `saved_input_tokens` = 后一次请求的 `input + cacheRead`（**上界**）、`avoided_total_tokens` = 前一次请求的 `input + cacheRead + output`（**下界**）、`output_tokens` = 后一次请求的 `output`、`cache_hit_delta` = 前后命中率之差（`src/admission/usage.ts:139-179`）；不分别记 `uncached` / `cacheRead` 两个输入字段，`output` 也不折进 input 和。
 **护栏**：完成判定（per-session；需要时按 turn 拆）的成功率、回退率、收据里"放行后被主模型推翻"的比例。
 
 **"被推翻"的定义**（护栏与抽样复核都用这一条）：下一步对**同一 target** 发起写/删，或对**同一路径**重读且结果不同。只"再看一眼"不算推翻。
 
 阶段：
 
-1. **影子（1 周）**：门做决定但照常问主模型，只写收据；`projection: 'shadow'`（只记投影前后 token，不落盘、不改 content）。产出以 `scripts/shadow-report.mjs` 的四个键为准：`saveableRatio`（白名单可实现的替换决定占比）、`byFamily`（按族的 commits / decisions）、`candidateRecall`（候选集召回）、`retrievalUpperBound`（on-mode 的取回调用 / 已应用投影回执）。**它不产出影子周净节省率，也没有总 token 分母**；A4 裁决因此未交付（见 §6.1）。
+1. **影子（1 周）**：门做决定但照常问主模型，只写收据；`projection: 'shadow'`（只记投影前后 token，不落盘、不改 content）。产出以 `scripts/shadow-report.mjs` 的四个键为准：`saveableRatio`（白名单可实现的替换决定占比）、`byFamily`（按族的 commits / decisions）、`candidateRecall`（**名字叫召回，实际是提交产出率**：`commits / (commits + noCandidate)`，`scripts/shadow-report.mjs:206`；它从不拿候选集去比对模型实际的下一调，所以不是召回）、`retrievalUpperBound`（on-mode 的取回调用 / 已应用投影回执）。**它不产出影子周净节省率，也没有总 token 分母**；A4 裁决因此未交付（见 §6.1）。**它也不测 plan 发射率**：模型若不写 `<CHISEL_PLAN>`，`safePlan` 直接返回、一条决策收据都没有，整周零值和"没有可省项"在报告里无法区分。因此影子报告只提供标签：**它不单独决定是否开启替换，也不决定是否发布**（发布决定见 §3 的 ② 与澄清表 E1）。
 2. **只读放行**：只对白名单工具真正跳过调用；`projection: 'on'` **按工具族分批开**——先 `read`，再 `grep`/`glob`，最后 `bash`/`ssh`，每族过一个观察窗再开下一族，不一次性全工具翻 `'on'`。
 3. **回归门**：20 个固定任务双跑，只当"没有灾难性回退"的门。固定任务集不构成可复现回放基准，不允许为其加断言式成功率指标。**裁决边界**：2026-11-18 的"不搭回放集"只免除**语料**，不免除冒烟 runner 与取回完整性检查——两者都不需要语料。**当前两者都未交付**：`test/regression/` 只有 `.gitkeep`（无 `tasks.jsonl`、无双跑脚本）；也没有任何测试/脚本验证"每条被投影回执可按页脚 locator 取回且字节数 = count + 保留窗口字节数"（`test/projection-apply.test.ts` 断言页脚含 locator、`saveText` 收到原文，但不读回核对字节数）。
 
 **两本账的放行依据不同，不能混**：
 
-- **替换**的放行依据是影子期标签（一致率 / 命中率 / 召回）。
+- **替换**的放行依据是影子期标签（一致率 / 命中率 / 提交产出率——报告键 `candidateRecall`，不是候选集召回）。
 - **投影**的放行依据是**可见性契约（§5.4）+ 外部文献（确定性遮蔽省 8.6%、完成率 100%）+ 事后检测**，**不是影子标签**。影子期只记投影前后 token，给不出"模型是否因看不到全文而走错"的标签；因此投影不靠"影子期收益为正"放行，而靠"模型随时能取回原文 + 事后能检出误裁"。
 
 ### 6.1 判据怎么裁决
@@ -442,7 +444,7 @@ workspace 归属由 agent 的 cwd 映射到 workspace id。每个挂载点各有
 先说清分辨率，再谈指标：
 
 - **20 个任务双跑判定不了 1 个百分点**（分辨率是 5 个点，一次抖动就翻盘）。它的作用只是拦住灾难性回退，不是证明"成功率没降"。
-- **影子期产出的是标签，不是任务成败**：门与主模型的一致率、按工具族的命中率、候选集召回率。
+- **影子期产出的是标签，不是任务成败**：门与主模型的一致率、按工具族的命中率、候选提交产出率（`candidateRecall` 实为 commit yield）；候选集相对模型实际下一调的召回、plan 发射率都没有测量。
 - **真实成败只能从回执和后续行为里推断**：被替换的动作是否报错、下一步主模型是否推翻了它、同一处是否被反复改写。
 
 **影子期的损害代理（投影专用）**：设计原意是离线统计"模型后续 `read`/`grep` 的参数落在**会被裁掉的区间**内"的比例，作为取回率上界。**交付物没有实现这个统计**：`scripts/shadow-report.mjs` 的 `retrievalUpperBound` 是 `retrievals / appliedProjections`——分子是 `kind:'projection'` 且 `retrieved:true` 的收据（一次精确命中本会话 spill locator 的取回），分母是未被取回的已应用投影收据；它只在 `projection:'on'` 时有值，影子期分子恒 0（投影收据是 `kind:'shadow'`）。所以它是**已观测取回率的下界**，不是取回损害的上界；也不能与毛节省相乘——单位是"取回调用 / 投影回执"，不是"被取回的 token 比例"。它只许可一个结论：on 模式下每个已应用投影至少观测到多少次取回；0 只说明没有观测到精确 locator 取回，不说明没有取回。要约束损害，需要另一套度量（每次取回的 offset/limit 是否落在被裁区间、取回内容 token 数），v1 未交付。
@@ -455,10 +457,10 @@ v1 的裁决组合：
 | 抽样复核 | 每天抽 10 条放行记录人工看 | 语义上对不对 |
 | 20 任务回归门（**未交付**） | 清单 `test/regression/tasks.jsonl` 双跑；**pass ⇔（两轮都完成且 `isError=false` 的任务数 ≥ 19）∧（每条被投影的回执都能用页脚 locator 取回，且取回字节数 = 页脚 `count` + 保留窗口字节数）** | 有没有灾难性回退；后半句即"无数据丢失"的可执行定义。**当前状态：`test/regression/` 只有 `.gitkeep`，清单与双跑脚本均未交付；后半句（取回完整性不变量）在全套测试中无任何覆盖，目前未验证。** 裁决（2026-11-18，m00234）：**不搭回放集只免除语料**；冒烟 runner 与取回完整性检查不需要语料，仍是未交付项，不能据此豁免 |
 | 会话统计 | 相对 300 会话基线的 token 分布（按会话长度分层） | 省了多少 |
-| 固定开销预算 | 计划段 + `boost` 工具 schema 的每请求开销 ≤ 800 token；插件加载时用 `estimateSystemMessage` / `estimateToolsTokens`（`@deepseek-ai/dsh-token-meter/estimate`，**`await import(...)` 包 try/catch**）测一次，`boost status` 惰性 await 同一次测量——测量从不在请求路径上；没有 `chars/4` 回退（`estimate: 'unknown'` 比错数字有用）。实测 **778 / 800**（计划段 379 + schema 399；2026-11-20 复测，余量 22 token），写进 `boost status` | 固定成本是否失控；**A4 的净收益裁决不在此行**（需要 totalTokens 分母，见下行） |
-| 分桶净节省 | 按会话步数分桶：**≤5 / 6–50 / ≥51** 步，分别报净节省率；**短会话桶另用随机抽 300 个会话**（基线 top-300 里 ≤5 步会话为 0 个）；**样本 < 20 个会话的桶不出数** | 裁决 A4：短会话是否被长会话摊薄。**v1 未实现，且不可由交付物计算**：`scripts/shadow-report.mjs` 只输出 `saveableRatio` / `byFamily` / `candidateRecall` / `retrievalUpperBound` 四个比例，没有总 token 分母，也没有净节省率或分桶。A4 裁决未交付。未来版本要补：每会话 provider `totalTokens` 分母、每请求固定开销归因、按步数分桶 |
+| 固定开销预算 | 计划段 + `boost` 工具 schema 的每请求开销 ≤ 800 token；插件加载时用 `estimateSystemMessage` / `estimateToolsTokens`（`@deepseek-ai/dsh-token-meter/estimate`，**`await import(...)` 包 try/catch**）测一次，`boost status` 惰性 await 同一次测量——测量从不在请求路径上；没有 `chars/4` 回退（`estimate: 'unknown'` 比错数字有用）。实测 **778 / 800**（计划段 379 + schema 399；2026-11-20 复测，余量 22 token），写进 `boost status`；**0.4% 是 300 长会话上的聚合比率（778 / 195,531），不是每会话保底** | 固定成本是否失控；**A4 的净收益裁决不在此行**（需要 totalTokens 分母，见下行） |
+| 分桶净节省 | 按会话步数分桶：**≤5 / 6–50 / ≥51** 步，分别报净节省率；**短会话桶另用随机抽 300 个会话**（基线 top-300 里 ≤5 步会话为 0 个）；**样本 < 20 个会话的桶不出数** | 裁决 A4：短会话是否被长会话摊薄。**v1 未实现，且不可由交付物计算**：`scripts/shadow-report.mjs` 只输出 `saveableRatio` / `byFamily` / `candidateRecall` / `retrievalUpperBound` 四个比例（其中 `candidateRecall` 是提交产出率，不是召回；也没有 plan 发射率），没有总 token 分母，也没有净节省率或分桶。A4 裁决未交付。未来版本要补：每会话 provider `totalTokens` 分母、每请求固定开销归因、按步数分桶 |
 
-**A4 是聚合口径**，不是单会话口径：长会话摊薄固定开销，短会话可能倒亏。v1 的分桶行与总体净节省率都未实现（见上表标注）；`scripts/shadow-report.mjs` 不能裁决 A4——它没有总 token 分母。固定开销本身可测（778 token/请求），但"短会话是否倒亏"需要 provider 记账的 per-session `totalTokens` 分母和按步数分桶，当前交付物没有。top-300 基线里没有 ≤5 步会话，必须换随机样本才能填满短会话桶；随机样本只用于 A4，不替换 G1 的 top-300 基线。
+**A4 是聚合口径**，不是单会话口径：长会话摊薄固定开销，短会话可能倒亏；§3 的 0.4% 同样是 300 长会话上的聚合净额（778 / 195,531），不是每会话 floor。v1 的分桶行与总体净节省率都未实现（见上表标注）；`scripts/shadow-report.mjs` 不能裁决 A4——它没有总 token 分母。固定开销本身可测（778 token/请求），但"短会话是否倒亏"需要 provider 记账的 per-session `totalTokens` 分母和按步数分桶，当前交付物没有。top-300 基线里没有 ≤5 步会话，必须换随机样本才能填满短会话桶；随机样本只用于 A4，不替换 G1 的 top-300 基线。
 
 ### 6.2 测试策略
 
@@ -486,7 +488,7 @@ v1 的裁决组合：
 |---|---|---|---|
 | D1 | 主口径用 token 数；**v1 不做费用口径**（没有费率配置，也不做费用护栏） | 与"省 token"的原始目标一致；两个口径下优先级不同，混用会导致优化错方向 | 缓存被破坏这类费用异常不直接进主口径，也没有费用护栏事后发现；费用口径留二期，需新增配置键与独立验收 |
 | D2 | 第一版只放行**只读**工具，替换白名单只到 `read` / `grep` / `glob` | 失败代价不对称：错放行一次可能不可逆，错回退只多花一次调用；只读白名单本身不可靠判定（`bash` 无法在派发层收窄、`web_fetch` 无 guard 字段），且本 profile 没有文件级快照，git 之外 `edit` 不可回滚 | 替换面收窄到三件套，v1 收益上限明显变小 |
-| D3 | 先影子一周，再开干预 | 没有标签就无法校准；影子期同时产出候选集召回数据 | 一周内零收益，且要维护影子路径与收据 |
+| D3 | 先影子一周，再开干预 | 没有标签就无法校准；影子期产出候选提交产出率（报告键 `candidateRecall`，实为 commit yield）与族间命中率，但**不测候选集召回、也不测 plan 发射率** | 一周内零收益，且要维护影子路径与收据 |
 | D4 | 计划协议段**常驻**系统提示，稳定、中途不翻转 | 实测固定开销 **778 token/请求**（协议段 379 + `boost` 工具 schema 399），相对每请求均值 195,531 token 为 **0.40%**（778 / 195,531 = 0.398%；只算协议段是 379 / 195,531 = 0.19%）。两端都按 raw token 计，cacheRead 不打折。中途翻转会让整段前缀失效并重算，代价高两个数量级。所以"按需打开"是错的，"常驻且稳定"才对 | 每次请求固定多几百 token，短会话摊不回来 |
 | D5 | 模板参数**先解析再比对** | `tools/execute` 拿解析后的实参与解析后的候选逐字比较，不是拿模板比；证书措辞改为"由声明的投影解析得到"，不再声称"逐字等于作者所写" | 模板表达力受限（只能填参数、不能造结构），bank 校验要同步改 |
 | D6 | 命名 `dsh-boost`，先只针对本 web profile；desktop 二期 | 复用现成插件的钩子层；测试面先减半 | desktop 一期不支持，后续适配要另补 |
@@ -501,14 +503,14 @@ v1 的裁决组合：
 | 只自用还是发布 | **发布，提交 GitHub**（**已交付**：公开仓 `https://github.com/SAXEM1997/dsh-boost` 已建；`0.1.0` 是首个发布版本，npm registry 上没有更早的 `dsh-boost` 版本） | 见 D7：双语 README、LICENSE、npm 元数据、工作区暴露面、更严格的失败兜底 |
 | 建回放集 | 先不搭（**只免除语料**） | 用收据 + 抽样复核 + 20 任务回归门；冒烟 runner 与取回完整性检查不需要语料，仍是未交付项（§6.1/§6.2） |
 
-剩余未定：无。目标 2.3 的定序调研未交付，作为开放缺口记在澄清表 2.3 行；它不要求 v1 做新选择（v1 已按 2.1 的裁决排除多工具组合），但也不是用户裁决。
+剩余未定：无。目标 2.3 的定序调研未交付，作为开放缺口记在澄清表 2.3 行；它**不被 PTC 的推迟覆盖**——研究 `docs/research/2026-11-18-three-tier-delegation.md:37` 有 ReWOO/LLMCompiler"先声明计划、步骤间不再问模型"的证据，但 `:74-85` 的 implications 从未把它应用到"定序权威"上，也没有比较"选择器定序"与"计划冻结定序"的实验。v1 的实现是主模型逐步决定，Jev 只在已声明候选里选一个、无权加步骤或改序；这是实现现状，不是用户裁决，也不是已完成的调研（E2 只覆盖 2.1/2.2）。
 
 ## 10. 留给 builder 的
 
 - 移植 `ref-harnessmm/dsh-plugin/harnessmm-desktop` 的 `llm/stream` 合成回合与 `tools/execute` 防篡改逻辑，保留其收据结构。
 - 按 D5 展开为模板支持（bank 校验 + 防篡改 + 证书措辞）；起点是 `integrations/deepseek_harness/public_argument_binding.mjs` 的 `$public` 投影（语法规范见 §5.2）。注意现成的 bank 校验**不是**在 `parseBank` 拒模板——`{"path":{"$public":…}}` 是合法字面量对象，能通过解析；真正拒绝的是 `sameLiteral` 逐字校验链（`projectTurn` 的 `chain-arguments-differ` 与 `violateDispatch`）。扩成模板要同步改 `parseBank`、`projectTurn`、`violateDispatch` 三处，结论不变。
 - guard 按 §5.2 的词表实现：`ok` / `text_contains` / `text_not_contains` / `json_equals`。**不要**照抄参照实现的 `GUARD_FIELDS`——`stderr_empty` 在 v1 白名单（read/grep/glob）上恒真、`exit_code` 恒 `unknown`（恒拒），两者都不可用；"只有 `ok:true`"必须判不合格。
-- 收据格式：完整字段见 §5.3 的两组表——替换账 `saved_input_tokens` / `cache_hit_delta`；投影账 `before` / `after` / `saved_projection_tokens` / `estimate` / `unit` / `projection_retrievals` / `projection_net_tokens`。不要写成 `saved_tokens_estimate`。
+- 收据格式：完整字段见 §5.3 的两组表——替换账 `saved_input_tokens` / `avoided_total_tokens` / `output_tokens` / `cache_hit_delta`；投影账 `before` / `after` / `saved_projection_tokens` / `estimate` / `unit` / `projection_retrievals` / `projection_net_tokens`。不要写成 `saved_tokens_estimate`。
 - 收据存储（`$DSH_HOME/boost/receipts/<encodeSegment(sessionId)>.jsonl`，分片名把 `[A-Za-z0-9_-]` 以外的字符按 UTF-8 字节可逆百分号编码——session id 可能含 `/` 或 `..`，存储绝不能写出 `receipts/`）：
   - 每行一条收据，带 `version`（收据 schema 版本，从 1 起）与 `receipt_hash`（对 `sessionId` / `turn` / `stepId` / 工具名 / 参数 的稳定哈希）。
   - **只存摘要与预览**：`preview` = 规范化回执的前 256 字符，**不存 stdout 全文**；全文只在 spill 后端（页脚 locator 指向它）。
@@ -559,7 +561,7 @@ dsh-boost/
 - `files` **不含 `src/`**：装出来的包只有 `dist`，源码只在 checkout 里，构建与统计都是 checkout-only。
 - `exports` 同时给 `import` 与 `require`（缺 `require` 时 `require('dsh-boost')` 报 `ERR_PACKAGE_PATH_NOT_EXPORTED`）。
 - 发布门是 `prepublishOnly = npm run ci && npm run verify:package`，不是 `npm pack --dry-run && test -f …`（后者无法失败，见 2026-11-20 复审行 4/5）。`prepare` 负责构建，`prepack` 已废除。
-- `publishConfig.registry` 指向 npmjs，而 `.npmrc` 声明内网镜像——安装来源与发布目标是两件事。
+- `publishConfig.registry` 与 `.npmrc` 都指向 `registry.npmjs.org`（`.npmrc:5`）——安装来源与发布目标是同一个 registry；CI 还断言 lockfile 里没有 npmmirror URL。
 - `engines.node` 为 `>=24.9.0`（不是 22.18）：测试与脚本用了 24 的内建能力。
 
 - **`version` 不能省**：缺 `version` 时 `npm pack` 直接报 `Invalid package, must have name and version`，发布链在第一步就断。`description` / `repository` / `keywords` 同理是 npm 页面与检索的最低要求；owner 沿用同作者的 `dsh-cherry-bridge` 命名空间。
@@ -631,3 +633,4 @@ dsh-boost/
 - **round 3 回写（2026-11-21）**：评审发现文档声称了代码没有的机制，故澄清表改正两处——定序不是"计划时冻结"（计划每回执一次性，主模型逐步决定；该结论降为未经验证的设计直觉），"EDG" 只移植了扁平候选银行、没有 `predecessor_id` 图链；§1/§5.2 同步去掉未移植的"图"语义（步数上限、守卫子串来源、`after` 的候选 id）；§5.4 说明 owner 可选链是对外部 exec 的运行期防御，并补上 `Agent.session` / `Session.header` 非可选的宿主出处；§5.1 的 `purpose` 引用注明只在 live profile 可核。
 - 对应提交：主回写 `0286371`；取回完整性措辞的后续修正见 `git log -1 -- docs/superpowers/specs/2026-11-18-dsh-token-efficiency-design.md`。报告见 `.superpowers/sdd/2026-11-18-dsh-token-efficiency/fix-r2-design.md`。
 - **round 4 回写（2026-11-21）**：6 项文档/注释更正。目标 2.3 的定序调研从未交付，澄清表改记为**未裁决的开放缺口**（研究文档无定序权威一节；裁决 #9 只覆盖 2.1/2.2；"被 2.1 吸收"是实现者判断）——原因是原文把实现者判断写成了可辩护结论，不是有了新证据。"影子结果不决定发布"改记为**实现者的设计决定**（用户只裁决影子期一周；`shadow-report.mjs` 无总 token 分母，影子周复算不出 ex-ante 区间），澄清表新增 E1。澄清表 80.0% → **79.8%**（对齐 §2.1 与快照）。`src/scope/doc.ts` 的 `boost shadow on|off` 注释改为布尔 body（实现拒 on/off）。§12 补 v2 质量信号候选；去重/合并的重开条件改为手工测量口径。除注释外，错都在文档侧。报告见 `.superpowers/sdd/2026-11-18-dsh-token-efficiency/fix-r4-spec.md`（本地，不入库）。
+- **round 5 回写（2026-11-21）**：同意来源与规格漂移两类更正，共 14 行（3/4/5/9/10/27/28/29/30/31/32/33/34/39）。(1) 需求 2.1/2.2 的收窄不再是"用户裁决"：澄清表原第 9 行没有 `mNNNNN`，只有"实现者按请求方指示"，而 `.superpowers/review/fix-c2-report.md:75` 说明这句只是照任务书写法、原始对话不可得；现记为 **E2**，并明确没有用户消息追认、`.superpowers/review/ledger.md:26` 的"批准过含 N1/N2 的设计"没有消息引用。设计稿头部从"待批准"改为"已带入实现、从未经用户消息正式批准"；§5.2-4 的"业主拍板"同样改记为无消息引用的实现者决定。(2) 需求 ② 的未交付面：79.8% 单工具步的补集是 20.2%（16.9% 带 ≥2 调用、3.3% 零调用），PTC 是为范围推迟而非证明无价值；7.2% 是逐字 span 下界，且选择器已读最多 1,200 字符回执（`src/hooks/post-execute.ts:162`）；2.3 的定序调研仍是独立开放缺口（研究 `:37` 有 plan-then-execute 证据，`:74-85` 未应用）。(3) `llm/stream` 的不可见会话不写收据（`src/hooks/llm-stream.ts:995-997`，`test/hooks-stream.test.ts:581-589`），§5.5 的表行与散文同步收窄。(4) 3.5% 不是 floor、0.4% 不是每会话 floor：前者把替换账上限加进了低端，后者是 300 长会话上的聚合比率（778 / 195,531）。(5) 影子报告的 `candidateRecall` 是 commit yield、不是召回，且没有 plan 发射率；它只提供标签，不决定开启。(6) 规格跟随实现：单步计划豁免（`plan.steps.length === 1`）、投影 horizon 按收据钉住且 compaction 不重启、shadow `after` 用占位页脚、Jev/准入读原文、scope 降级只进 status 不收据、`boost` 失败是 `{ok:false,code}` 工具值、收据记 input 和 + `output_tokens` + `cache_hit_delta`、`.npmrc` 指向 npmjs。(7) RSI 循环加入未移植清单（`ref-harnessmm/README.md:56-58`）。(8) HEAD 在本轮期间从 `3ec82f3` 前进到 `224f7f8`（其他 agent 的提交）；收据新增 `avoided_total_tokens`（row 7 的下界），§5.3/§6/§10 已按当前实现补记，row 7 的完整对账仍待其回写。
