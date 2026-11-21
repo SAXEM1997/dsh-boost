@@ -10,20 +10,22 @@ Design rationale lives in `docs/superpowers/specs/`; the release-acceptance proc
 
 ## [Unreleased]
 
-### 文档更正 Docs
+## [0.1.4] - 2026-11-21
 
-- **需求 2.1 / 2.2 的收窄改记为「实现者决定」E2，不再引用已移除的「用户裁决」第 9 条**：没有用户消息追认这两条收窄。README 补上非单工具步的证据（20.2% 的步不是单工具步：16.9% 带 ≥2 个调用、3.3% 零调用），说明 PTC 是为实现范围推迟，不是被证明没有价值。
-- **0.4% 不再称为「净保底」**：它是 300 个最长会话上的聚合净额（778 / 195,531），与 0.8% 毛额、3.5%–10.0% 区间一样都是离线估算；短会话可能倒亏，`top-300` 里没有 ≤5 步会话。本条即对该措辞的更正。
-- **`candidateRecall` 正名为提交产出率**（`commits / (commits + noCandidate)`），`retrievalUpperBound` 改称「已观测取回率的下界」；两者都只提供标签，不单独决定是否开启替换、也不决定发布。补记全零周无法区分「模型没写计划」与「没有可省项」。
-- **准入豁免改为单步计划**（`plan.steps.length === 1`）：不是「确定性 && 唯一候选」，多步计划即使只剩一个候选仍要过阈值。
-- **补记开放缺口**：需求 2.3（工具调用顺序由谁定）的调研未交付，且不被 PTC 的推迟覆盖；HarnessMM 的 EDG 图/链（`predecessor_id`）与 RSI 循环未移植。
-- **发布验收口径**：不搭回放集只免除语料；冒烟 runner 与 locator 取回完整性检查不需要语料，仍是未交付项。安装规格更新为 `dsh-boost@^0.1.3`（两个 registry 的 `latest`），并记录 0.1.3 的修复。
-- **运行手册按代码校正**：宿主版本守卫只在 `engines.dsh` 区间外告警（区间内的 `rc.5` / `0.2.2` 只记 info）；`ERR_HOST_SELECTOR_UNAVAILABLE` 只由 `selector-unavailable` 映射，`selector-error` 不映射；补记 `kind:'reset'` 收据与 `skip:no-scope` 的两条写入路径；`projection-skipped:no-owner` 标为 hook 不可达；英文 README 的页脚算术改为实测 747–749。
-- **投影开启前先看 `status.hasSpill`**（存在性）与 `degraded` 里的 `ERR_HOST_SPILL_UNUSABLE`，两者都过再开 `projection: 'on'`。
+### 修复 Fixed
 
-### 变更 Changed
+- **节省区间不再可能下界高于上界**：下界是「被跳过那一步的 totalTokens」，上界是「下一次真实请求的输入」。上下文在两次采样之间缩小（压缩、重建请求、适配器不回放整轮输出）时两者会倒挂，现在下界超过上界就置为 `'unknown'`，status 成对求和时该收据只计上界。
+- **准入判据与定义一致**：`savedTokensOf` 现在计 `input + cacheRead + output`（此前漏掉 output，比 design §5.3 的定义保守，会拒掉本该做的替换）。
+- **被切断中段里的信号不再丢失**：`[exit code: N]` / `exit_code` / `is_error` 这类行会从被省略的中段救出、附在两个窗口之后，并让插件自己的投影识别器接受这个后缀。此前 `Truncation.after` 是个死字段——两个渲染器都从 head/tail 重建，救出的行永远到不了模型。
+- **投影收据记录省略量**：`omitted_bytes` / `omitted_code_points`（`ProjectionOutcome` 的这两个字段此前无人读取）。
+- **git 安装可用**：`dist/` 在 gitignore 里且没有构建钩子，`dsh plugin add github:...` 装出来的包 `ERR_MODULE_NOT_FOUND`。新增 `prepare`，仅在 `dist/index.js` 缺失时构建，发布路径上是空操作。
+- **测试门按用例数而非文件数把关**：`scripts/run-tests.mjs` 此前只数 `.test.ts` 文件，二十个空文件即可通过；现在要求至少 600 个用例。
+- **发布门在 Windows 上可用**：`verify-package.mjs` 用 `execFileSync` 启动 `npm.cmd`，Node 不允许不经 shell 启动 `.cmd`；已加 `shell: true`。
+- 删除死代码：`shouldTruncate`（第二个只在测试里用的入口）、`markerResetOf` 的不可达空守卫与未用参数。
 
-- **`prepare` 钩子恢复（只服务 git 安装）**：`scripts/prepare-build.mjs` 只在 `dist/index.js` 缺失时构建，使 `dsh plugin add github:...` / `npm i git+...` 装上的包有入口；`npm pack --ignore-scripts` 会跳过它，已构建的 checkout 也不会重建。`scripts/` 仍不进 tarball。
+### 文档 Docs
+
+- 双语 README、发布手册与变更日志按第六轮审计更正：需求 2.1/2.2 的收窄改记为实现者决定 E2（不再引用已删除的「用户裁决第 9 条」），0.4% 不再称「净保底」，`candidateRecall` 改称提交产出率，`retrievalUpperBound` 说明是已观测取回率的下界，准入豁免改述为「单步计划」，补上 ②.3 排序问题这一开放缺口、影子周全零无法与「模型从未写计划」区分、HarnessMM 未移植的 EDG 与 RSI、`kind:'reset'` 收据行、`skip:no-scope` 两条路径的差别、`projection-skipped:no-owner` 从钩子不可达；版本与计数全部对齐 0.1.3/0.1.4。
 
 ## [0.1.3] - 2026-11-21
 
