@@ -22,7 +22,11 @@
  * 2. **Trivial candidates next.** A candidate whose guards are only `ok: true`
  *    has nothing to verify, so it is not substitution potential either. If
  *    every survivor is trivial (including the empty plan, vacuously), the
- *    answer is `guard-trivial`.
+ *    answer is `guard-trivial`. **Step admission follows (row 7).** When the
+ *    caller supplies this step's `ResolvedToolSet` predicate, a candidate whose
+ *    tool it does not admit is dropped before the selector is paid for: the
+ *    host would reject its dispatch with `UNKNOWN_TOOL`. An emptied list is the
+ *    ordinary `no-candidate`.
  * 3. **Bind, then guard, each remaining candidate in plan order.** Binding
  *    failure drops the candidate (it does not abort the plan); only a bound
  *    candidate has its guards evaluated. Guards read the receipt for
@@ -91,6 +95,30 @@ function whitelisted(whitelist: ReadonlySet<string>): Filter {
     if (kept.length === 0 && candidates.length > 0) return fallback('tool-not-whitelisted')
     return kept
   }
+}
+
+/**
+ * Step-admission filter (row 7).
+ *
+ * The host's `ResolvedToolSet` is this step's dispatch admission. A candidate
+ * whose tool it does not list would be rejected with `UNKNOWN_TOOL` after the
+ * plugin had already paid for the selector and taken a budget step, so it is
+ * dropped here, before both. An emptied list falls through to `no-candidate`:
+ * the plan had candidates and none survived, exactly like a failed guard.
+ *
+ * A throwing membership read drops that candidate: an unverifiable tool is not
+ * one this plugin may dispatch, and dropping under-reports instead of producing
+ * a call the host rejects.
+ */
+function admittedBy(admitted: (tool: string) => boolean): Filter {
+  return (candidates) =>
+    candidates.filter((candidate) => {
+      try {
+        return admitted(candidate.tool)
+      } catch {
+        return false
+      }
+    })
 }
 
 /**
@@ -179,10 +207,24 @@ export function decide(input: {
   receipts: ReadonlyMap<string, CanonicalReceipt>
   whitelist: ReadonlySet<string>
   shadow?: boolean
+  /**
+   * Whether this step's `ResolvedToolSet` admits a tool (row 7).
+   *
+   * `undefined` means the admission evidence is unavailable (an embedded or
+   * legacy call site); the caller proceeds and records the missing evidence
+   * itself, because refusing on absence would silently disable substitution on
+   * paths it cannot enumerate. Shadow mode ignores the predicate: shadow
+   * measures potential, not dispatchability.
+   */
+  admitted?: (tool: string) => boolean
 }): Decision {
   const filters: readonly Filter[] = input.shadow
     ? [nonTrivial]
-    : [whitelisted(input.whitelist), nonTrivial]
+    : [
+        whitelisted(input.whitelist),
+        nonTrivial,
+        ...(input.admitted === undefined ? [] : [admittedBy(input.admitted)]),
+      ]
   const narrowed = narrow(input.plan.steps, filters)
   if (!Array.isArray(narrowed)) return narrowed
   return resolve(bindAndVerify(narrowed, input.stepId, input.receipts))

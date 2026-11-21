@@ -97,10 +97,17 @@ import type { ScopeStore } from '../scope/store.js'
 import { SELECTOR_SYSTEM_PROMPT, choose, selectorPromptText } from '../selector/jev.js'
 import type { LlmLike } from '../selector/jev.js'
 import { familyOf } from '../tools/family.js'
-import type { AbortSignalLike, AgentLike, BoostConfig, PluginContext } from '../types.js'
+import type {
+  AbortSignalLike,
+  AgentLike,
+  BoostConfig,
+  PluginContext,
+  ResolvedToolSet,
+} from '../types.js'
 import type { TurnClock } from './clock.js'
 import { rejectIfTampered } from './execute.js'
 import {
+  budgetWired,
   receiptsStopped,
   sessionBudget,
   sessionClock,
@@ -185,9 +192,12 @@ export interface HookDeps {
   /** At most one pending substitution per session; absent means the path is inert. */
   queue?: PendingQueue
   /**
-   * Per-turn substitution budget; absent means no cap is applied. Used only
-   * when `sessions` is absent, so a shared instance is never preferred over
-   * the per-session runtime.
+   * Per-turn substitution budget; absent **and with no `sessions` runtime**
+   * means no cap is applied. Used only when `sessions` is absent, so a shared
+   * instance is never preferred over the per-session runtime. A shared instance
+   * that another session already borrowed is not "no budget": `sessionBudget`
+   * answers `undefined` for the refused loan and the decision path treats it as
+   * exhausted (row 21).
    */
   budget?: StepBudget
   /** Usage pairing; the shared fallback when `sessions` is absent (T21/T23c). */
@@ -318,6 +328,23 @@ export interface HookDeps {
    */
   clearAcceptedDispatch?: (sessionId: string) => void
   /**
+   * Mirror a synthesized turn for a possible rollover settlement (row 27).
+   *
+   * `llm/stream` owns the synthesis but the mirror lives here next to the
+   * execute-side record, so the fact crosses on a seam rather than by exporting
+   * the map. It is written at synthesis time, not at dispatch acceptance: a
+   * call denied by `tools/pre-execute` never reaches `tools/execute`, and the
+   * skipped model round must still be reported when a late result rolls the
+   * turn over. `registerHooks` wires it; absent means the mirror stays
+   * execute-only (under-report, never a false saving).
+   */
+  noteSynthesis?: (
+    sessionId: string,
+    turn: number,
+    candidateId: string,
+    evidence: SubstitutionEvidence | undefined,
+  ) => void
+  /**
    * The host logger, for the few conditions that have no other surface.
    *
    * `registerHooks` fills it from `ctx.logger` when absent, so production never
@@ -340,6 +367,15 @@ type PostExecuteExec = {
   signal?: AbortSignalLike | undefined
   /** Parsed tool arguments; the retrieval matcher reads them (Task 25). */
   arguments?: unknown
+  /**
+   * The step's resolved tool admission (`dsh-tools`' `ResolvedToolSet`).
+   *
+   * A real model step always has one: the host's pipeline builds the execution
+   * as `...toolSet === void 0 ? {} : { toolSet }`. It is optional here because
+   * embedded/legacy call sites can omit it, and the decision path records
+   * `substitute-skipped:no-toolset` rather than refusing (row 7).
+   */
+  toolSet?: ResolvedToolSet
   /**
    * PTC transport token. Present on an SDK sub-dispatch (`tools/execute` and
    * `tools/post-execute` run for inner calls too), where the result belongs to
@@ -372,6 +408,12 @@ type DispatchExec = {
   /** Host-issued call id; compared here because `rejectIfTampered` never sees it. */
   callId?: string
   agent?: AgentLike | undefined
+  /**
+   * PTC transport token. An inner call belongs to the enclosing `run_code`
+   * step: its host-assigned call id is not the root decision's, so the
+   * tamper check must not read a collision as our dispatch (row 30).
+   */
+  parent?: unknown
 }
 
 /** Everything one decision pass needs, computed once by the listener. */
@@ -1017,24 +1059,34 @@ function admittedFor(
  *
  * A selector call is real spend, so this check runs before the selector is
  * priced or called; the consuming `takeBudget` stays at the commit point.
- * A missing or foreign budget means "not exhausted", matching `takeBudget`'s
- * no-cap contract. Shadow mode never calls this: it spends no step.
+ * `undefined` from `sessionBudget` has two different meanings (row 21): no
+ * budget is wired at all (no cap), or one is wired but was not lent to this
+ * session (exhausted, fail closed). Shadow mode never calls this: it spends no
+ * step.
  */
 function budgetExhausted(deps: HookDeps, sessionId: string): boolean {
   try {
     const budget = sessionBudget(deps, sessionId)
-    if (budget == null || typeof budget.exhausted !== 'function') return false
+    if (budget == null) return budgetWired(deps)
+    if (typeof budget.exhausted !== 'function') return false
     return budget.exhausted() === true
   } catch {
-    return false
+    return budgetWired(deps)
   }
 }
 
-/** Claim one budget step; no budget wired means no cap is applied. */
+/**
+ * Claim one budget step.
+ *
+ * No budget wired means no cap is applied. A wired budget that this session may
+ * not borrow is a refusal, not "no cap": `take` fails and the caller records
+ * `steps-exhausted` without enqueueing (row 21).
+ */
 function takeBudget(deps: HookDeps, sessionId: string): boolean {
   try {
     const budget = sessionBudget(deps, sessionId)
-    if (budget == null || typeof budget.take !== 'function') return true
+    if (budget == null) return !budgetWired(deps)
+    if (typeof budget.take !== 'function') return true
     return budget.take()
   } catch {
     return false
@@ -1070,10 +1122,14 @@ function pendingCandidateOf(deps: HookDeps, sessionId: string): string | undefin
  * accepted dispatch is mirrored here together with the evidence that would
  * otherwise be parked for the next settlement.
  *
- * One record per session: a later accepted dispatch replaces it, a session
- * whose usage mark is already gone drops it, and a rollover consumes it. The
- * `HookDeps` key keeps two assemblies in one process from reading each other's
- * sessions. The record is small and per-session; it is never persisted.
+ * One record per session: a later accepted dispatch (or a later synthesis)
+ * replaces it, a session whose usage mark is already gone drops it, and a
+ * rollover consumes it. The `HookDeps` key keeps two assemblies in one process
+ * from reading each other's sessions. The record is small and per-session; it
+ * is never persisted. It is also written at synthesis time through
+ * {@link HookDeps.noteSynthesis}: a dispatch denied by `tools/pre-execute`
+ * never reaches `tools/execute`, and that skipped model round must still be
+ * reportable at a rollover (row 27).
  */
 const ACCEPTED_DISPATCH = new WeakMap<
   HookDeps,
@@ -1105,21 +1161,24 @@ function noteAcceptedDispatch(
  *
  * The turn check is a staleness guard: the record that a pending mark belongs
  * to was written in the turn now rolling over. A record written in the new
- * turn cannot belong to it.
+ * turn cannot belong to it. The record's own turn is returned so the settled
+ * receipt pairs with the dispatch, not with the rollover (row 26).
  */
 function takeAcceptedDispatch(
   deps: HookDeps,
   sessionId: string,
   candidateId: string,
   turn: number,
-): { evidence?: SubstitutionEvidence } | undefined {
+): { turn: number; evidence?: SubstitutionEvidence } | undefined {
   const bySession = ACCEPTED_DISPATCH.get(deps)
   const record = bySession?.get(sessionId)
   bySession?.delete(sessionId)
   if (record === undefined || record.candidateId !== candidateId || record.turn === turn) {
     return undefined
   }
-  return record.evidence === undefined ? {} : { evidence: record.evidence }
+  return record.evidence === undefined
+    ? { turn: record.turn }
+    : { turn: record.turn, evidence: record.evidence }
 }
 
 /** Drop the mirrored dispatch; no pending mark is waiting to settle it. */
@@ -1134,11 +1193,13 @@ export function clearAcceptedDispatch(deps: HookDeps, sessionId: string): void {
  * parallel tool result can roll the turn before that request; the mark must not
  * survive into the new turn, where it would pair with a request that is not the
  * substitution's next one. If `tools/execute` never accepted the synthesized
- * dispatch, the substitution did not run and the mark is a discard. If it did,
- * the model round really was skipped: the settlement line is written with
- * whatever sample the ledger holds (`'unknown'` when no after-mark request has
- * run yet) and with the evidence captured at dispatch, so the substitution is
- * reported instead of disappearing.
+ * dispatch, the substitution did not run and the mark is a discard. If it did
+ * — or if the synthesis itself was mirrored before a `tools/pre-execute`
+ * denial (row 27) — the model round really was skipped: the settlement line is
+ * written with whatever sample the ledger holds (`'unknown'` when no after-mark
+ * request has run yet), with the evidence captured at dispatch, and with the
+ * dispatch turn the mirror recorded rather than the rollover turn (row 26), so
+ * the substitution is reported instead of disappearing.
  */
 async function settleRollover(deps: HookDeps, sessionId: string, turn: number): Promise<void> {
   const candidateId = pendingCandidateOf(deps, sessionId)
@@ -1177,7 +1238,10 @@ async function settleRollover(deps: HookDeps, sessionId: string, turn: number): 
     version: 1,
     ts: new Date().toISOString(),
     sessionId,
-    turn,
+    // Row 26: the substitution happened in the dispatch turn the mirror
+    // recorded. Stamping the rollover turn paired a turn-1 substitution with a
+    // turn-2 settled line, which reads as a saving from the wrong round.
+    turn: dispatched.turn,
     stepId: 'root',
     kind: 'substitute-settled',
     code: 'substitute-settled',
@@ -1453,12 +1517,42 @@ async function chooseCandidate(
   }
 }
 
+// ---------------------------------------------------------------------------
+// Row 7: the step's admitted tool set
+// ---------------------------------------------------------------------------
+
+/**
+ * Read this step's admission predicate, or `undefined` when it cannot be
+ * verified.
+ *
+ * `view(scope)` takes the exact requesting agent; the host admits no other
+ * scope. A missing `toolSet`, a missing `view` and a throwing `view` are all
+ * "no evidence" and take the documented `no-toolset` path: the substitution
+ * proceeds and records that it ran without admission evidence. Refusing on
+ * absence would silently disable the feature on paths we cannot enumerate,
+ * while a real model step always carries one (row 7).
+ */
+function admissionViewOf(exec: PostExecuteExec | undefined): ((tool: string) => boolean) | undefined {
+  const toolSet = exec?.toolSet
+  if (toolSet == null || typeof toolSet.view !== 'function') return undefined
+  try {
+    const view = toolSet.view(exec?.agent)
+    if (view == null || typeof view.has !== 'function') return undefined
+    return (tool: string) => view.has(tool) === true
+  } catch {
+    return undefined
+  }
+}
+
 /**
  * The substitution decision and its side effects.
  *
  * The fixed order is the plan's: existence of a plan and a receipt first, then
- * `worthSubstituting`, then `budget.take()`. Nothing below spends budget on a
- * decision that will not be dispatched.
+ * `worthSubstituting`, then `budget.take()`. The step's admission filter
+ * (row 7) runs inside `decide`, before the selector is priced and before the
+ * budget is taken; when its evidence is unavailable the commit still happens
+ * and a `substitute-skipped:no-toolset` line records that it did.
+ * Nothing below spends budget on a decision that will not be dispatched.
  *
  * `ask-selector` is fulfilled here since Task 23c-2: the decision carries only
  * already-bound candidates, so the selector's choice is committed from
@@ -1525,6 +1619,13 @@ async function decideSubstitution(
     return
   }
 
+  // Row 7: this step's `ResolvedToolSet` is the host's admission set, so
+  // `decide` drops a candidate whose tool it does not admit before the selector
+  // or the budget is touched. Shadow mode is record-only and measures potential
+  // across the whole whitelist, so it passes no admission filter.
+  const admission = ctx.doc.shadow ? undefined : admissionViewOf(ctx.exec)
+  const noToolset = !ctx.doc.shadow && admission === undefined
+
   let decision: ReturnType<typeof decide>
   try {
     decision = decide({
@@ -1533,6 +1634,7 @@ async function decideSubstitution(
       receipts: ctx.state.receiptsFor(ctx.sessionId, ctx.turn),
       whitelist: SUBSTITUTION_WHITELIST,
       shadow: ctx.doc.shadow,
+      ...(admission === undefined ? {} : { admitted: admission }),
     })
   } catch {
     return
@@ -1709,6 +1811,19 @@ async function decideSubstitution(
       }),
     )
     return
+  }
+
+  // Row 7: the commit is real but the admission evidence was not available.
+  // Recording it here (not at the missing-evidence point above) means the note
+  // names the candidate that actually committed and only exists when one did.
+  if (noToolset) {
+    await appendReceipt(
+      deps,
+      ledgerEntry(ctx, 'skip', 'substitute-skipped:no-toolset', {
+        stepId: 'root',
+        candidateId,
+      }),
+    )
   }
 
   markSubstituted(deps, ctx.sessionId, candidateId)
@@ -2314,6 +2429,11 @@ async function inspectDispatch(
       evidence: SubstitutionEvidence | undefined
     }
 > {
+  // Row 30: a PTC inner call carries `parent` and belongs to the enclosing
+  // `run_code` step. Its host-assigned call id is not the root decision's, so
+  // even a collision must not be read as our dispatch.
+  if (exec.parent !== undefined) return { kind: 'next' }
+
   const sessionId = sessionIdOf(exec)
   if (sessionId === undefined) return { kind: 'next' }
 
@@ -2374,6 +2494,10 @@ async function executeHook(
   exec: DispatchExec,
   next: () => Promise<unknown>,
 ): Promise<unknown> {
+  // Row 30: a PTC inner dispatch is the enclosing `run_code` step's business,
+  // not this hook's; `next()` runs untouched so the inner tool still executes.
+  if (exec?.parent !== undefined) return next()
+
   let outcome: Awaited<ReturnType<typeof inspectDispatch>>
   try {
     outcome = await inspectDispatch(deps, exec)
@@ -2466,6 +2590,10 @@ export function registerHooks(ctx: PluginContext, deps: HookDeps): void {
   // keeps the degradation warnings reachable without widening every caller's
   // deps literal. A deps object that already names one keeps it.
   deps.logger ??= ctx.logger
+  // Row 27: `llm/stream` records the synthesis through this seam, because the
+  // mirror lives here and a denied dispatch never reaches `tools/execute`.
+  deps.noteSynthesis ??= (sessionId, turn, candidateId, evidence) =>
+    noteAcceptedDispatch(deps, sessionId, turn, candidateId, evidence)
   registerProtocolSection(ctx, deps.scope)
   registerPostExecute(ctx, deps, state)
   registerLlmStream(ctx, deps)

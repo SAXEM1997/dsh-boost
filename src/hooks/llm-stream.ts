@@ -29,20 +29,24 @@
  *    session is not substitutable: pass through and clear that session's queue
  *    (the decision cannot be honoured any more).
  * 4. No pending entry -> pass through. This is the ordinary turn.
- * 5. Turn validity. The queue is cleared on the **new turn's first
- *    `post-execute`**, which happens after the new turn's first `llm/stream`.
- *    An entry whose `turn` differs from the session clock's turn belongs to a
- *    previous turn: synthesizing it would answer the new turn with an old
- *    decision, and its `callId` would even match at dispatch and be accepted.
- *    Compare, clear and pass through (obligation 4).
- * 6. Anchors intact. `ReceiptAnchors` has no turn field, so `entry.turn` being
- *    current is what makes the anchors current; only then is detection run
- *    against `options.messages` (obligation 6). A pruned carrier yields
+ * 5. Anchors readable and intact. A decision whose anchors were never written
+ *    (the commit's `set` failed), whose store holds no record, or whose store
+ *    throws cannot be verified at all; all three fail closed through the reset
+ *    path (row 28). With a record present, detection runs against
+ *    `options.messages` (obligation 6). A pruned carrier yields
  *    `pruned-reset`, a receipt that is no longer present yields
  *    `compaction-reset`; either clears queue + anchors and passes through. A
  *    body that only shares the anchor's head and tail is **not** a carrier: it
  *    must also carry the pruner marker or our projection's head line, or a
  *    middle edit would pass for the original text.
+ * 6. Turn validity. The queue is cleared on the **new turn's first
+ *    `post-execute`**, which happens after the new turn's first `llm/stream`.
+ *    An entry whose `turn` differs from the session clock's turn belongs to a
+ *    previous turn: synthesizing it would answer the new turn with an old
+ *    decision, and its `callId` would even match at dispatch and be accepted.
+ *    Compare, clear and pass through (obligation 4). This runs after the anchor
+ *    read: an entry that is dead by identity but also lost its evidence still
+ *    reports the reset, while one with intact anchors is dropped silently.
  * 7. Step still payable. `post-execute` already took the entry's step, but the
  *    same decision can be replayed (a retried request, a re-enqueue at one
  *    step). The per-turn synthesis tally and the budget's paid-step count are
@@ -400,6 +404,21 @@ export function sessionBudget(deps: HookDeps, sessionId: string): StepBudget | u
     : undefined
 }
 
+/**
+ * Whether a substitution budget is wired at all.
+ *
+ * `undefined` from {@link sessionBudget} has two meanings and callers must not
+ * conflate them (row 21): with neither `deps.budget` nor a per-session runtime,
+ * the embedder never asked for a cap, so the substitution is unconstrained; a
+ * wired budget that this session may not borrow is the opposite — the shared
+ * instance belongs to another session and the step cannot be paid. Treating the
+ * refusal as "no cap" let an unbudgeted substitution through without ever
+ * incrementing the live budget.
+ */
+export function budgetWired(deps: HookDeps): boolean {
+  return deps.budget !== undefined || deps.sessions !== undefined
+}
+
 /** The session's usage ledger; the same precedence as {@link sessionClock}. */
 export function sessionUsage(deps: HookDeps, sessionId: string): UsageLedger | undefined {
   try {
@@ -413,12 +432,32 @@ export function sessionUsage(deps: HookDeps, sessionId: string): UsageLedger | u
     : undefined
 }
 
-/** The session's anchors without ever failing the request. */
-function anchorsOf(deps: HookDeps, sessionId: string): ReceiptAnchors | undefined {
+/** What the session's anchor store answered. */
+type AnchorRead =
+  | { kind: 'record'; anchors: ReceiptAnchors }
+  /** The store answered, but holds no record for a session with a live decision. */
+  | { kind: 'cold' }
+  /** The store is absent or its read threw: nothing can be verified. */
+  | { kind: 'unreadable' }
+
+/**
+ * The session's anchors, distinguishing a record from a cold store.
+ *
+ * A substitution is only legitimate against the receipt the model still holds,
+ * so every missing answer is a lost anchor (row 28). `post-execute` writes
+ * anchors with every commit, so a live queue entry with no record means that
+ * write failed; synthesizing then would skip the only verification the design
+ * has. A throwing read is equally unverifiable. Both fail closed through the
+ * ordinary reset path instead of substituting on unseen evidence.
+ */
+function anchorsOf(deps: HookDeps, sessionId: string): AnchorRead {
+  const store = deps.anchors
+  if (store == null || typeof store.get !== 'function') return { kind: 'unreadable' }
   try {
-    return deps.anchors?.get(sessionId)
+    const anchors = store.get(sessionId)
+    return anchors == null ? { kind: 'cold' } : { kind: 'record', anchors }
   } catch {
-    return undefined
+    return { kind: 'unreadable' }
   }
 }
 
@@ -652,26 +691,31 @@ function carriesAnchor(
  * pruner literal means `pruned-reset`, because the pruner is the common case
  * and it leaves the receipt in place. Only when no anchor was pruned does a
  * missing carrier mean `compaction-reset` (the history was replaced by a
- * summary). No anchors at all is vacuously intact: `post-execute` always writes
- * them with a commit, but a missing evidence store must not block substitution
- * forever.
+ * summary).
  *
- * An empty anchor cannot be located in any message and is skipped; `invalidate`
- * treats an empty anchor as a real value, but the stream hook has no receipt
- * body to compare it with, and refusing every substitution on one empty tool
- * result would be worse than the uncertainty.
+ * A missing record, a record with no entries and a record whose shape cannot be
+ * read are all unverifiable and therefore `compaction-reset` (row 28): the
+ * commit that parked the decision writes anchors, so their absence is a failed
+ * write, not a reason to substitute with zero verification. An empty anchor
+ * string is a real value the check skips; `invalidate` treats an empty anchor
+ * as a real value, and the stream hook has no receipt body to compare it with.
  */
 function anchorResetOf(
   anchors: ReceiptAnchors | undefined,
   messages: unknown,
   probe: { head: number; tail: number },
 ): ResetCode | undefined {
-  if (anchors == null) return undefined
-  const record: unknown = anchors.anchors
-  if (typeof record !== 'object' || record === null) return undefined
+  if (anchors == null) return 'compaction-reset'
+  let record: unknown
+  try {
+    record = anchors.anchors
+  } catch {
+    return 'compaction-reset'
+  }
+  if (typeof record !== 'object' || record === null) return 'compaction-reset'
 
   const values = Object.values(record as Record<string, unknown>)
-  if (values.length === 0) return undefined
+  if (values.length === 0) return 'compaction-reset'
   const texts = values.filter((text): text is string => typeof text === 'string' && text.length > 0)
   if (texts.length === 0) {
     // An empty anchor is a real value the check skips (it cannot be located in
@@ -693,6 +737,15 @@ function anchorResetOf(
     if (carriers.some((body) => looksPruned(body))) return 'pruned-reset'
   }
   return compacted ? 'compaction-reset' : undefined
+}
+
+/** The anchored step id a reset receipt names, never throwing on a foreign shape. */
+function anchorStepIdOf(anchors: ReceiptAnchors): string {
+  try {
+    return typeof anchors.stepId === 'string' ? anchors.stepId : 'root'
+  } catch {
+    return 'root'
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -811,7 +864,9 @@ function synthesisBlocked(
   const current = tally !== undefined && sameTurn(tally.turn, turn) ? tally : undefined
   if (current !== undefined && current.callIds.has(entry.callId)) return true
   const budget = sessionBudget(deps, sessionId)
-  if (budget === undefined) return false
+  // Row 21: a wired budget that was not lent to this session is unpayable, not
+  // "no cap". Only a completely unwired budget leaves the step unconstrained.
+  if (budget === undefined) return budgetWired(deps)
   let spent: number
   try {
     spent = budget.count()
@@ -856,15 +911,6 @@ function resolveStreamPlan(
   const entry = peekPending(deps, sessionId)
   if (entry === undefined) return { kind: 'pass', sessionId }
 
-  const turn = clockTurnOf(deps, sessionId)
-  if (turn === undefined || !sameTurn(entry.turn, turn)) {
-    return {
-      kind: 'pass',
-      sessionId,
-      abandon: { entry, clearQueue: true, clearAnchors: false },
-    }
-  }
-
   // A blank call id cannot be dispatched and must not be "repaired" here: the
   // execute-side tamper check would compare a different id and reject silently.
   if (typeof entry.callId !== 'string' || entry.callId.trim().length === 0) {
@@ -875,22 +921,37 @@ function resolveStreamPlan(
     }
   }
 
-  const anchors = anchorsOf(deps, sessionId)
-  const reset = anchorResetOf(anchors, options?.messages, anchorProbe(deps))
+  const turn = clockTurnOf(deps, sessionId)
+  // The reset receipt pairs with the entry's own turn when the clock cannot
+  // name a real one; a turn-0 commit still wrote (or failed to write) anchors.
+  const resetTurn = turn ?? turnNumberOf(entry.turn)
+
+  // Row 28: anchor evidence is checked before turn validity. A decision whose
+  // anchors were never written (the commit's `set` failed), a store that holds
+  // no record for a live entry, and a throwing read are all unverifiable;
+  // dropping them as an ordinary stale entry would hide the lost evidence.
+  // Intact anchors on a stale turn still take the silent abandon below: there
+  // the decision is dead by identity, not because its evidence vanished.
+  const anchorRead = anchorsOf(deps, sessionId)
+  if (anchorRead.kind !== 'record') {
+    return resetPlan(sessionId, entry, 'compaction-reset', 'root', resetTurn)
+  }
+  const reset = anchorResetOf(anchorRead.anchors, options?.messages, anchorProbe(deps))
   if (reset !== undefined) {
+    return resetPlan(
+      sessionId,
+      entry,
+      reset,
+      anchorStepIdOf(anchorRead.anchors),
+      resetTurn,
+    )
+  }
+
+  if (turn === undefined || !sameTurn(entry.turn, turn)) {
     return {
       kind: 'pass',
       sessionId,
-      abandon: {
-        entry,
-        clearQueue: true,
-        clearAnchors: true,
-        reset: {
-          code: reset,
-          stepId: typeof anchors?.stepId === 'string' ? anchors.stepId : 'root',
-          turn: turn,
-        },
-      },
+      abandon: { entry, clearQueue: true, clearAnchors: false },
     }
   }
 
@@ -909,6 +970,31 @@ function resolveStreamPlan(
   }
 
   return { kind: 'synthesize', sessionId, entry }
+}
+
+/**
+ * Abandon a decision whose anchored evidence cannot be verified.
+ *
+ * The reset receipt explains the lost anchor; the queue and anchors go with it,
+ * and the usage mark is settled as discarded by `applyAbandon`.
+ */
+function resetPlan(
+  sessionId: string,
+  entry: PendingEntry,
+  code: ResetCode,
+  stepId: string,
+  turn: number,
+): StreamPlan {
+  return {
+    kind: 'pass',
+    sessionId,
+    abandon: {
+      entry,
+      clearQueue: true,
+      clearAnchors: true,
+      reset: { code, stepId, turn },
+    },
+  }
 }
 
 /**
@@ -957,35 +1043,49 @@ export function settleDiscarded(deps: HookDeps, sessionId: string): void {
 }
 
 /**
- * Plan/guards evidence parked between synthesis and settlement.
+ * The facts of a synthesized turn that its later settlement needs.
  *
  * The settled receipt is written at the first real request after the
- * synthesized turn, when the queue entry is already gone; the synth-time
- * receipt has it from the entry, this park hands it to the settle. Keyed by
- * `HookDeps` first so two plugin instances in one process cannot read each
- * other's session, and a `WeakMap` lets the whole map die with the assembly.
+ * synthesized turn, when the queue entry is already gone. The evidence (plan,
+ * guards) must survive until then, and so must the turn: the settled line pairs
+ * with the synthesis turn, not with whichever request happened to settle it
+ * (row 26).
  */
-const PENDING_EVIDENCE = new WeakMap<HookDeps, Map<string, SubstitutionEvidence>>()
+interface SynthesisFact {
+  /** Host turn the synthesized turn answered. */
+  turn: number
+  /** Plan/guards evidence for the settled receipt, when the entry carried it. */
+  evidence?: SubstitutionEvidence
+}
 
-/** Park the evidence for the session's next settlement, replacing any earlier. */
-function rememberEvidence(deps: HookDeps, sessionId: string, evidence: SubstitutionEvidence): void {
+/**
+ * Plan/guards evidence parked between synthesis and settlement.
+ *
+ * Keyed by `HookDeps` first so two plugin instances in one process cannot read
+ * each other's session, and a `WeakMap` lets the whole map die with the
+ * assembly.
+ */
+const PENDING_EVIDENCE = new WeakMap<HookDeps, Map<string, SynthesisFact>>()
+
+/** Park the fact for the session's next settlement, replacing any earlier. */
+function rememberEvidence(deps: HookDeps, sessionId: string, fact: SynthesisFact): void {
   let bySession = PENDING_EVIDENCE.get(deps)
   if (bySession === undefined) {
     bySession = new Map()
     PENDING_EVIDENCE.set(deps, bySession)
   }
-  bySession.set(sessionId, evidence)
+  bySession.set(sessionId, fact)
 }
 
-/** Take (and forget) the evidence one settlement consumes. */
-function takeEvidence(deps: HookDeps, sessionId: string): SubstitutionEvidence | undefined {
+/** Take (and forget) the fact one settlement consumes. */
+function takeEvidence(deps: HookDeps, sessionId: string): SynthesisFact | undefined {
   const bySession = PENDING_EVIDENCE.get(deps)
-  const evidence = bySession?.get(sessionId)
+  const fact = bySession?.get(sessionId)
   bySession?.delete(sessionId)
-  return evidence
+  return fact
 }
 
-/** Drop evidence that no settlement will ever consume. */
+/** Drop a fact that no settlement will ever consume. */
 function forgetEvidence(deps: HookDeps, sessionId: string): void {
   PENDING_EVIDENCE.get(deps)?.delete(sessionId)
 }
@@ -1040,25 +1140,34 @@ async function settlePendingMark(deps: HookDeps, sessionId: string): Promise<voi
   let settled: ReturnType<UsageLedger['settle']>
   try {
     const pending = ledger.pendingCandidateId()
-    if (typeof pending !== 'string' || pending.length === 0) return
+    if (typeof pending !== 'string' || pending.length === 0) {
+      // A parked fact without a mark can never be settled; drop it rather than
+      // let a later, unrelated mark pick up this turn's evidence.
+      forgetEvidence(deps, sessionId)
+      return
+    }
     candidateId = pending
     settled = ledger.settle()
   } catch {
+    forgetEvidence(deps, sessionId)
     return
   }
 
+  const fact = takeEvidence(deps, sessionId)
   await appendReceipt(deps, {
     version: 1,
     ts: new Date().toISOString(),
     sessionId,
-    turn: clockTurnOf(deps, sessionId) ?? 0,
+    // Row 26: the synthesized turn is the substitution's turn; the request that
+    // happens to settle it may already be the next one.
+    turn: fact?.turn ?? clockTurnOf(deps, sessionId) ?? 0,
     stepId: 'root',
     kind: 'substitute-settled',
     code: 'substitute-settled',
     candidateId,
     // G2 applies to the settled line too: the goal and guards are the same
     // evidence the synth-time line carried, parked when that line was written.
-    ...(takeEvidence(deps, sessionId) ?? {}),
+    ...(fact?.evidence ?? {}),
     saved_input_tokens: settled.saved_input_tokens,
     cache_hit_delta: settled.cache_hit_delta,
     output_tokens: settled.output_tokens,
@@ -1202,10 +1311,19 @@ async function* synthesizeBranch(
   }
 
   markSubstitutedFor(deps, sessionId, current.candidateId)
-  // Park the plan evidence for the settled line, which runs at the next real
-  // request after this entry has left the queue.
+  // Park the plan evidence and the synthesis turn for the settled line, which
+  // runs at the next real request after this entry has left the queue.
   const evidence = (current as AuditedPendingEntry).evidence
-  if (evidence !== undefined) rememberEvidence(deps, sessionId, evidence)
+  const turn = turnNumberOf(current.turn)
+  rememberEvidence(deps, sessionId, {
+    turn,
+    ...(evidence === undefined ? {} : { evidence }),
+  })
+  // Row 27: mirror the synthesis fact now, not when `tools/execute` accepts the
+  // dispatch. A call denied by `tools/pre-execute` never reaches that hook, and
+  // a rollover must still report the model round this turn skipped. The mirror
+  // only feeds the settle path; it never claims a measured saving.
+  deps.noteSynthesis?.(sessionId, turn, current.candidateId, evidence)
   await appendSubstituteReceipt(deps, sessionId, current)
   yield* synthesizeTurn(current)
 }

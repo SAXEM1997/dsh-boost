@@ -75,6 +75,21 @@ function setup(over: { doc?: Any; deps?: Record<string, unknown> } = {}) {
   return { host, receipts, anchors, queue, clock, plans, usage, deps }
 }
 
+/**
+ * The step's admission set, shaped like the host's `ResolvedToolSet`.
+ *
+ * `tools/post-execute` receives the host's `ToolExecution`, whose optional
+ * `toolSet` is the step's resolved admission. The fixture admits the read-only
+ * trio by default; a test that needs a restricted step overrides it, and one
+ * that needs the legacy no-evidence path passes `toolSet: undefined`.
+ */
+function toolSetOf(names: readonly string[] = ['read', 'grep', 'glob']) {
+  return {
+    dispose: () => {},
+    view: () => new Map(names.map((name) => [name, { name }])),
+  }
+}
+
 /** One post-execute call with the real nested agent shape. */
 function runPost(
   host: Any,
@@ -85,7 +100,7 @@ function runPost(
   return host.callHook(
     'tools/post-execute',
     [
-      { name: 'read', callId: 'root-call', agent, ...execOver },
+      { name: 'read', callId: 'root-call', agent, toolSet: toolSetOf(), ...execOver },
       { content: [{ type: 'text', text }] },
     ],
     async () => decision,
@@ -411,6 +426,84 @@ test('O5 同一 shadow flag 也传给 decide：bash 在影子期 commit，非影
   assert.ok(realEnv.receipts.some((r) => r.code === 'tool-not-whitelisted'))
 })
 
+// ---------------------------------------------------------------------------
+// Row 7: a synthesized call must be admitted by this step's ResolvedToolSet
+// ---------------------------------------------------------------------------
+
+test('row 7 候选不在本步 ResolvedToolSet 中即弃权（present 时过滤）', async () => {
+  const env = setup()
+  env.plans.set(SESSION, { goal: 'g', steps: [candidate('A', 'TRIGGER')] })
+
+  // The step admits `grep` only. A `read` candidate is whitelisted, but the
+  // host would reject its dispatch with UNKNOWN_TOOL after the plugin had
+  // already parked the entry and written a receipt.
+  await runPost(env.host, 'TRIGGER here', { kind: 'accept' }, { toolSet: toolSetOf(['grep']) })
+
+  assert.equal(env.queue.peek(SESSION), undefined, 'an unadmitted tool must not be parked')
+  assert.equal(env.deps.budget.count(), 0, 'no step is spent on a call the host rejects')
+  assert.ok(
+    env.receipts.some((r) => r.kind === 'skip' && r.code === 'no-candidate'),
+    'an emptied candidate list takes the ordinary no-candidate path',
+  )
+  assert.equal(
+    env.receipts.some((r) => r.code === 'substitute-skipped:no-toolset'),
+    false,
+    'the absence note is for a missing tool set, not for a filtered candidate',
+  )
+})
+
+test('row 7 admission 过滤在 selector 之前：只剩 B 时不付 selector', async () => {
+  const env = setup()
+  env.plans.set(SESSION, {
+    goal: 'g',
+    steps: [
+      candidate('A', 'TRIGGER'),
+      { id: 'B', tool: 'grep', args: { pattern: 'x' }, guards: [{ text_contains: 'TRIGGER' }] },
+    ],
+  })
+
+  await runPost(env.host, 'TRIGGER here', { kind: 'accept' }, { toolSet: toolSetOf(['grep']) })
+
+  assert.equal(env.queue.peek(SESSION)?.candidateId, 'B', 'the admitted candidate is the only survivor')
+  assert.equal(
+    env.receipts.some((r) => r.code === 'selector-unavailable'),
+    false,
+    'a single admitted survivor commits without paying for a selector',
+  )
+})
+
+test('row 7 取不到 toolSet 时照常替换，但写 substitute-skipped:no-toolset', async () => {
+  const env = setup()
+  env.plans.set(SESSION, { goal: 'g', steps: [candidate('A', 'TRIGGER')] })
+
+  // The host omits `toolSet` on paths where no step admission exists (embedded
+  // dispatch, older call sites). We cannot tell "unrestricted" from "unknown",
+  // so the substitution proceeds and the missing evidence is recorded.
+  await runPost(env.host, 'TRIGGER here', { kind: 'accept' }, { toolSet: undefined })
+
+  assert.equal(env.queue.peek(SESSION)?.candidateId, 'A', 'absent admission evidence is not a refusal')
+  const note = env.receipts.find((r) => r.code === 'substitute-skipped:no-toolset')
+  assert.ok(note, 'the operator must see a commit made without admission evidence')
+  assert.equal(note.kind, 'skip')
+  assert.equal(note.candidateId, 'A')
+})
+
+test('row 7 toolSet.view 抛错按不可验证处理：照常替换并记 no-toolset', async () => {
+  const env = setup()
+  env.plans.set(SESSION, { goal: 'g', steps: [candidate('A', 'TRIGGER')] })
+  const toolSet = {
+    dispose: () => {},
+    view: () => {
+      throw new Error('view boom')
+    },
+  }
+
+  await runPost(env.host, 'TRIGGER here', { kind: 'accept' }, { toolSet })
+
+  assert.equal(env.queue.peek(SESSION)?.candidateId, 'A', 'a foreign view must not break substitution')
+  assert.ok(env.receipts.some((r) => r.code === 'substitute-skipped:no-toolset'))
+})
+
 test('O5 影子期也走 live visibility：越权会话不记影子（F2 复核）', async () => {
   const env = setup({
     doc: doc({ shadow: true }),
@@ -519,6 +612,45 @@ test('O6 fallback 不清空另一调用的 pending 条目（F2）', async () => 
 })
 
 // ---------------------------------------------------------------------------
+// Row 21: a refused shared-budget loan is "exhausted", not "no budget"
+// ---------------------------------------------------------------------------
+
+test('row 21 共享预算借给别的会话时按耗尽处理，不当作无上限', async () => {
+  const shared = new StepBudget(2)
+  const env = setup({ deps: { budget: shared } })
+  const { sessionBudget } = await import('../src/hooks/llm-stream.ts')
+
+  // Another session owns the one shared instance. Every `sessionBudget` call
+  // for SESSION now returns `undefined`, which used to read as "no cap" and let
+  // the commit through without ever incrementing the live budget.
+  assert.equal(sessionBudget(env.deps, 'other-session'), shared, 'the other session holds the loan')
+
+  for (let attempt = 0; attempt < 10; attempt += 1) {
+    env.plans.set(SESSION, { goal: 'g', steps: [candidate('A', 'TRIGGER')] })
+    await runPost(env.host, 'TRIGGER here')
+  }
+
+  assert.equal(env.queue.peek(SESSION), undefined, 'a refused loan must never park a substitution')
+  assert.equal(shared.count(), 0, 'nothing was spent on the shared budget')
+  assert.equal(
+    env.receipts.filter((r) => r.code === 'steps-exhausted').length,
+    10,
+    'each refused attempt is the exhausted path, not a silent commit',
+  )
+  assert.equal(env.deps.usage.pendingCandidateId(), undefined, 'no usage mark without a substitution')
+})
+
+test('row 21 完全没接线预算时仍是无上限', async () => {
+  const env = setup({ deps: { budget: undefined } })
+  env.plans.set(SESSION, { goal: 'g', steps: [candidate('A', 'TRIGGER')] })
+
+  await runPost(env.host, 'TRIGGER here')
+
+  assert.equal(env.queue.peek(SESSION)?.candidateId, 'A', 'no budget wired means no cap')
+  assert.equal(env.receipts.some((r) => r.code === 'steps-exhausted'), false)
+})
+
+// ---------------------------------------------------------------------------
 // Obligation 7: the execute hook peeks, compares callId, and clears both paths
 // ---------------------------------------------------------------------------
 
@@ -623,6 +755,43 @@ test('O7 queue.peek 抛错时 tools/execute 不抛、直通', async () => {
     async () => 'DISPATCHED',
   )
   assert.equal(out, 'DISPATCHED')
+})
+
+test('row 30 tools/execute 跳过 PTC 内层调用（parent 存在）', async () => {
+  const env = setup()
+  env.queue.set(SESSION, {
+    callId: 'decided-call',
+    candidateId: 'A',
+    name: 'read',
+    args: { file_path: '/a' },
+    turn: 1,
+    step: 0,
+  })
+  let dispatched = 0
+  const out: Any = await env.host.callHook(
+    'tools/execute',
+    [
+      {
+        name: 'read',
+        callId: 'decided-call',
+        arguments: { file_path: '/inner' },
+        agent,
+        parent: { token: 'outer-run-code' },
+      },
+    ],
+    async () => {
+      dispatched += 1
+      return 'INNER'
+    },
+  )
+
+  // A PTC inner call's result belongs to the enclosing `run_code` step. Its
+  // call id is host-assigned, so even a collision must not be read as our
+  // root dispatch: the inner call passes through and the decision survives.
+  assert.equal(out, 'INNER')
+  assert.equal(dispatched, 1, 'the inner call must reach its tool')
+  assert.equal(env.queue.peek(SESSION)?.callId, 'decided-call', 'the root decision is not consumed')
+  assert.equal(env.receipts.some((r) => r.code === 'dispatch-rejected'), false)
 })
 
 // ---------------------------------------------------------------------------
@@ -1632,6 +1801,74 @@ test('row 28: a rollover after the dispatch was accepted reports the skipped rou
   )
   assert.equal(settled.plan, 'g', 'the settled line keeps the plan evidence')
   assert.deepEqual(settled.guards, [{ text_contains: 'TRIGGER' }])
+})
+
+test('row 26 翻转结算沿用派发回合，而不是翻转回合', async () => {
+  const env = setup()
+  env.plans.set(SESSION, { goal: 'g', steps: [candidate('A', 'TRIGGER')] })
+  await runPost(env.host, 'TRIGGER')
+  const entry = env.queue.peek(SESSION)
+  assert.ok(entry, 'the decision committed a substitution')
+  assert.equal(entry.turn, 1)
+
+  // The host dispatches the synthesized call in turn 1.
+  await env.host.callHook(
+    'tools/execute',
+    [{ name: 'read', callId: entry.callId, arguments: entry.args, agent }],
+    async () => 'DISPATCHED',
+  )
+
+  // A late parallel result rolls the turn before the next real request.
+  env.clock.onModelRequest(2, 0)
+  await runPost(env.host, 'late parallel result', { kind: 'accept' }, { callId: 'parallel' })
+
+  const settled = env.receipts.find((r) => r.kind === 'substitute-settled')
+  assert.ok(settled)
+  assert.equal(
+    settled.turn,
+    1,
+    'a turn-1 substitution must not pair with a turn-2 settled line',
+  )
+})
+
+test('row 27 pre-execute 拒绝的合成派发在翻转时仍报告被跳过的模型回合', async () => {
+  const env = setup()
+  env.plans.set(SESSION, { goal: 'g', steps: [candidate('A', 'TRIGGER')] })
+  await runPost(env.host, 'TRIGGER')
+  const entry = env.queue.peek(SESSION)
+  assert.ok(entry, 'the decision committed a substitution')
+
+  // The model round really is skipped: llm/stream answers with the synthesized
+  // call, so a `substitute` receipt is written.
+  for await (const _chunk of env.host.stream(SESSION, {
+    messages: [{ role: 'tool', content: [{ type: 'text', text: 'TRIGGER' }] }],
+  })) {
+    // drain
+  }
+  assert.equal(env.receipts.filter((r) => r.kind === 'substitute').length, 1)
+
+  // `tools/pre-execute` denies the call, so `tools/execute` never runs. The
+  // host still runs post-execute for the denied result, and its call id matches
+  // the pending entry: that is how the plugin learns the call is over.
+  await runPost(env.host, 'denied by pre-execute', { kind: 'accept' }, { callId: entry.callId })
+  assert.equal(env.queue.peek(SESSION), undefined, 'the denied call consumes the pending entry')
+
+  // A late parallel result rolls the turn before the next real request.
+  env.clock.onModelRequest(2, 0)
+  await runPost(env.host, 'late parallel result', { kind: 'accept' }, { callId: 'parallel' })
+
+  const settled = env.receipts.find((r) => r.kind === 'substitute-settled')
+  assert.ok(
+    settled,
+    'a synthesized turn whose dispatch was denied still skipped a model round',
+  )
+  assert.equal(settled.candidateId, 'A')
+  assert.equal(settled.turn, 1, 'the settled line pairs with the synthesis turn')
+  assert.equal(
+    settled.saved_input_tokens,
+    'unknown',
+    'the denial produced no after-mark sample; the line must not invent one',
+  )
 })
 
 test('row 36: an aborted exec.signal returns before projection', async () => {

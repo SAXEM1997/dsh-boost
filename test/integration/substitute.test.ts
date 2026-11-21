@@ -180,12 +180,20 @@ async function modelStep(
   return collect(a.host.stream(SESSION, { messages }))
 }
 
+/** The step admission set the host attaches to a real model-step execution. */
+function toolSetOf(names: readonly string[] = ['read', 'grep', 'glob']) {
+  return {
+    dispose: () => {},
+    view: () => new Map(names.map((name) => [name, { name }])),
+  }
+}
+
 /** Run one `tools/post-execute` listener pass (the host's waterfall shape). */
 async function postExecute(a: Integration, callId: string, text: string): Promise<Any> {
   return a.host.callHook(
     'tools/post-execute',
     [
-      { name: 'read', callId, agent },
+      { name: 'read', callId, agent, toolSet: toolSetOf() },
       { content: [{ type: 'text', text }] },
     ],
     async () => ({ kind: 'accept' }),

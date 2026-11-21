@@ -108,6 +108,30 @@ function anchorMessages(text: string): Any[] {
   return [{ role: 'tool', content: [{ type: 'text', text }] }]
 }
 
+/**
+ * The step's admission set, shaped like the host's `ResolvedToolSet`.
+ *
+ * `dsh-tools`' pipeline attaches it to every execution it builds from a model
+ * step (`...toolSet === void 0 ? {} : { toolSet }`), so a real step always has
+ * one. The fixture supplies the read-only trio; the dedicated row-7 test below
+ * omits it on purpose.
+ */
+export function toolSetOf(names: readonly string[] = ['read', 'grep', 'glob']) {
+  return {
+    dispose: () => {},
+    view: () => new Map(names.map((name) => [name, { name }])),
+  }
+}
+
+/** The registered `boost` tool's status payload. */
+export async function statusOf(host: Any): Promise<Any> {
+  const registration = host.tools.definitions.find((entry: Any) => entry.def?.name === 'boost')
+  assert.ok(registration, 'boost tool must be registered')
+  const result = await registration.def.execute({ cmd: 'status' }, {})
+  assert.equal(result.ok, true, JSON.stringify(result))
+  return result.data
+}
+
 type Assembly = {
   host: Any
   dir: string

@@ -15,8 +15,11 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import type { StreamChunk } from '@deepseek-ai/dsh-llm'
+import { StepBudget } from '../src/admission/ledger.ts'
+import { UsageLedger } from '../src/admission/usage.ts'
 import { DEFAULT_CONFIG } from '../src/config.ts'
 import { AnchorStore, PRUNE_MARKER } from '../src/gate/invalidate.ts'
+import { TurnClock } from '../src/hooks/clock.ts'
 import { clearSession, SessionRuntime, streamHook } from '../src/hooks/llm-stream.ts'
 import { PendingQueue } from '../src/hooks/pending.ts'
 import { registerHooks, streamHook as reexportedStreamHook } from '../src/hooks/post-execute.ts'
@@ -140,11 +143,19 @@ function runPost(
   return env.host.callHook(
     'tools/post-execute',
     [
-      { name: 'read', callId: 'root-call', agent, ...execOver },
+      { name: 'read', callId: 'root-call', agent, toolSet: toolSetOf(), ...execOver },
       { content: [{ type: 'text', text }] },
     ],
     async () => decision,
   )
+}
+
+/** The step admission set the host attaches to a real model-step execution. */
+function toolSetOf(names: readonly string[] = ['read', 'grep', 'glob']) {
+  return {
+    dispose: () => {},
+    view: () => new Map(names.map((name) => [name, { name }])),
+  }
 }
 
 /** The one read-only candidate every end-to-end test commits. */
@@ -455,6 +466,91 @@ test('P2 锚点形状无法校验（旧/外来值）：不崩溃且 fail closed'
 })
 
 // ---------------------------------------------------------------------------
+// Row 28: a cold or throwing anchor store is unverifiable, not "intact"
+// ---------------------------------------------------------------------------
+
+test('row 28 锚点读取抛错时走 reset，不合成', async () => {
+  const env = setup({ chunks: [{ type: 'finish', reason: { kind: 'stop' } }] })
+  env.runtime.onModelRequest(SESSION, 1, 0)
+  seedPending(env)
+  // A foreign store that fails on read: nothing can be verified, so the
+  // decision must not synthesize against evidence the plugin cannot see.
+  env.deps.anchors = {
+    get: () => {
+      throw new Error('anchor store cold')
+    },
+    set: () => {},
+    clear: () => {},
+  }
+
+  const chunks = await streamOnce(env, { messages: messagesWith('anything') })
+
+  assert.equal(env.host.nextCalls, 1, 'the real model must answer')
+  assert.equal(chunks.some((c) => c.type === 'tool-call-delta'), false)
+  const reset = env.receipts.find((r) => r.kind === 'reset')
+  assert.equal(reset?.code, 'compaction-reset', 'an unreadable store is a lost anchor')
+  assert.equal(env.queue.peek(SESSION), undefined, 'the reset abandons the decision')
+})
+
+test('row 28 提交没有留下锚点记录时走 reset，不合成', async () => {
+  const env = setup({ chunks: [{ type: 'finish', reason: { kind: 'stop' } }] })
+  env.runtime.onModelRequest(SESSION, 1, 0)
+  seedPending(env)
+  // The store reads successfully but holds no record for this session: the
+  // commit produced no anchors, so there is nothing to verify against.
+  env.deps.anchors = {
+    get: () => undefined,
+    set: () => {},
+    clear: () => {},
+  }
+
+  const chunks = await streamOnce(env, { messages: messagesWith('anything') })
+
+  assert.equal(env.host.nextCalls, 1)
+  assert.equal(chunks.some((c) => c.type === 'tool-call-delta'), false)
+  assert.equal(env.receipts.find((r) => r.kind === 'reset')?.code, 'compaction-reset')
+  assert.equal(env.queue.peek(SESSION), undefined)
+})
+
+test('row 28 空锚点记录不可验证，走 reset', async () => {
+  const env = setup({ chunks: [{ type: 'finish', reason: { kind: 'stop' } }] })
+  env.runtime.onModelRequest(SESSION, 1, 0)
+  seedPending(env)
+  env.anchors.set(SESSION, { stepId: 'root', anchors: {} })
+
+  const chunks = await streamOnce(env, { messages: messagesWith('anything') })
+
+  assert.equal(env.host.nextCalls, 1)
+  assert.equal(chunks.some((c) => c.type === 'tool-call-delta'), false)
+  assert.equal(env.receipts.find((r) => r.kind === 'reset')?.code, 'compaction-reset')
+  assert.equal(env.queue.peek(SESSION), undefined)
+})
+
+test('row 28 提交时锚点写失败 → 下一次请求 reset 而非合成', async () => {
+  const env = setup({ chunks: [{ type: 'finish', reason: { kind: 'stop' } }] })
+  // `setAnchors` contains the write failure at commit time. The decision is
+  // parked, but no record exists: the model-request path must fail closed
+  // instead of synthesizing with zero verification.
+  env.deps.anchors = {
+    get: () => undefined,
+    set: () => {
+      throw new Error('anchor write boom')
+    },
+    clear: () => {},
+  }
+  env.plans.set(SESSION, { goal: 'g', steps: [candidate()] })
+  await runPost(env, 'TRIGGER here')
+  assert.ok(env.queue.peek(SESSION), 'the decision still parks; the anchor write failed silently')
+
+  const chunks = await streamOnce(env, { messages: messagesWith('TRIGGER here') })
+
+  assert.equal(env.host.nextCalls, 1, 'no anchor record means no synthesis')
+  assert.equal(chunks.some((c) => c.type === 'tool-call-delta'), false)
+  assert.equal(env.receipts.find((r) => r.kind === 'reset')?.code, 'compaction-reset')
+  assert.equal(env.queue.peek(SESSION), undefined)
+})
+
+// ---------------------------------------------------------------------------
 // The plan's pass-through tests
 // ---------------------------------------------------------------------------
 
@@ -607,6 +703,34 @@ test('P2 预算已耗尽时即使 callId 不同也不再合成：合成数不得
     1,
     'the only substitute receipt is the one the budget paid for',
   )
+})
+
+test('row 21 借不到共享预算时按不可支付处理：不合成', async () => {
+  const { sessionBudget, sessionClock, sessionUsage } = await import(
+    '../src/hooks/llm-stream.ts'
+  )
+  const clock = new TurnClock()
+  clock.onModelRequest(1, 0)
+  const budget = new StepBudget(2)
+  const usage = new UsageLedger()
+  const env = setup({
+    deps: { sessions: undefined, clock, budget, usage },
+  })
+
+  // The clock and usage loans belong to this session, but the shared budget
+  // belongs to another one. `sessionBudget` therefore answers `undefined` for a
+  // budget that is definitely wired: the step cannot be paid.
+  assert.equal(sessionClock(env.deps, SESSION), clock)
+  assert.equal(sessionUsage(env.deps, SESSION), usage)
+  assert.equal(sessionBudget(env.deps, 'other-session'), budget)
+
+  seedAnchored(env)
+  const chunks = await streamOnce(env, { messages: messagesWith(LONG_ANCHOR) })
+
+  assert.equal(env.host.nextCalls, 1, 'an unpayable step must let the model answer')
+  assert.equal(chunks.some((c) => c.type === 'tool-call-delta'), false)
+  assert.equal(env.receipts.filter((r) => r.kind === 'substitute').length, 0)
+  assert.equal(env.queue.peek(SESSION), undefined, 'the unpayable entry is dropped')
 })
 
 // ---------------------------------------------------------------------------
@@ -767,7 +891,11 @@ test('跨回合结算：合成后的下一次真实请求写 substitute-settled 
   assert.ok(settled, 'the next real request settles the substitution')
   assert.equal(settled.code, 'substitute-settled')
   assert.equal(settled.candidateId, 'A')
-  assert.equal(settled.turn, 2)
+  assert.equal(
+    settled.turn,
+    1,
+    'the settled line pairs with the synthesis turn, not the request that happened to settle it',
+  )
   assert.equal(settled.saved_input_tokens, 1000, 'input + cacheRead of the first after-mark request')
   assert.equal(settled.output_tokens, 7)
   assert.equal(env.runtime.usageFor(SESSION).pendingCandidateId(), undefined)
@@ -830,8 +958,11 @@ test('O1 llm/stream 读本会话的 clock：另一会话的 turn/step 不会让�
   otherClock.onModelRequest(9, 4)
   env.deps.clock = otherClock
   seedPending(env, { turn: 1 })
+  // A live decision always carries the anchors written with it; without them
+  // row 28's fail-closed rule would (correctly) reset instead of synthesizing.
+  env.anchors.set(SESSION, { stepId: 'root', anchors: { root: 'ANCHOR' } })
 
-  const chunks = await streamOnce(env)
+  const chunks = await streamOnce(env, { messages: messagesWith('ANCHOR') })
   assert.equal(env.host.nextCalls, 0)
   assert.equal(chunks.some((c) => c.type === 'tool-call-delta'), true)
   assert.equal(env.queue.peek(SESSION)?.callId, 'seeded-call')
