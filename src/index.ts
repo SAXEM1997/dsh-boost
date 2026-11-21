@@ -1702,12 +1702,26 @@ export function apply(ctx: PluginContext, config: unknown): void {
       // The settings page reads through this plugin's own route, and it reads
       // through `boostDeps` — the same object the tool spreads — so `boost
       // status` and the page can never disagree about the same workspace.
-      registerHttpApi(ctx, {
-        status: () => runBoost({ ...boostDeps, args: { cmd: 'status' } }),
-        scope: () => runBoost({ ...boostDeps, args: { cmd: 'scope-get' } }),
-        workspaces: () => listWorkspaces(registryBackend()),
-        config: () => cfg,
-      }, message => ctx.logger?.warn?.(message))
+      //
+      // Its own try: the catch below reports a failed *tool* registration, and
+      // a route that could not mount is a different fault with a different
+      // remedy (the tool is the control surface; the route is only the page).
+      try {
+        registerHttpApi(
+          ctx,
+          {
+            status: () => runBoost({ ...boostDeps, args: { cmd: 'status' } }),
+            scope: () => runBoost({ ...boostDeps, args: { cmd: 'scope-get' } }),
+            workspaces: () => listWorkspaces(registryBackend()),
+            config: () => cfg,
+          },
+          message => ctx.logger?.warn?.(message),
+        )
+      } catch (error) {
+        ctx.logger?.warn?.(
+          `dsh-boost: ERR_BOOST_HTTP_MOUNT_FAILED: settings page has no data route (${messageOf(error)})`,
+        )
+      }
     } catch (error) {
       // The tool is the user's only control surface; its failure is reported
       // on its own, never as a hook failure.

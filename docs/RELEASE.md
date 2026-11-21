@@ -428,6 +428,9 @@ JSON 体返回一个码，页面据码决定说什么。`ERR_CLIENT_*` 是页面
 | `ERR_HTTP_NOT_FOUND` | 设置页路由的响应体（404） | 前缀匹配上了但子路径不认识：页面与服务端版本不一致 | 升级插件到页面与产物同一个版本 |
 | `ERR_HTTP_INTERNAL` | 设置页路由的响应体（500） | `status`/`scope` 的计算在路由里抛了（宿主服务的 getter 抛错）。四个字段一个都不会返回 | 看宿主日志；这是 bug 级失败，不是配置问题 |
 | `ERR_HTTP_WORKSPACES_UNAVAILABLE` | 设置页路由的响应体（`workspaces.available === false`） | 宿主没有 workspace 注册表，或 `list()` 抛错/返回的不是数组。页面因此**禁用保存**，并说明「读不到」而不是渲染空列表 | 与 `ERR_HOST_NO_WORKSPACE_REGISTRY` / `ERR_HOST_WORKSPACE_REGISTRY_BROKEN` 同源，处置见那两行 |
+| `ERR_CLIENT_NETWORK` | 页面上（不经网络） | 页面读不到数据路由：路由没挂上（见 `ERR_BOOST_HTTP_MOUNT_FAILED`），或请求被网络层打断 | 看宿主日志里有没有 `webServer`；headless 部署没有页面，这条不会出现 |
+| `ERR_CLIENT_SHAPE` | 页面上（不经网络） | 路由返回的 JSON 体本页读不懂（`workspaces` 既不是 `available:true` 也不是带 `code` 的 `available:false`） | 页面与产物版本不一致；升级插件 |
+| `ERR_BOOST_HTTP_MOUNT_FAILED` | 加载日志警告 | 挂载数据路由本身抛了（`ctx.inject` 不可用或被拒绝）。投影、替换与 `boost` 工具都不受影响，只有页面没有数据源。与 `ERR_BOOST_PARTIAL_MOUNT`（钩子没挂上）是两件事 | 宿主没有动态注入能力；页面上会显示 `ERR_CLIENT_NETWORK` |
 | `ERR_HOST_NO_MODEL_SELECTION` | 加载日志警告（一次） | `agent/pre-step` 没带 `modelSelection`，选择器路由回退到已废弃的 `agent/request` 事件（可能被移除） | 升级宿主；若 `agent/request` 也被移除，多候选替换会 fail-closed（`ERR_HOST_NO_AGENT_REQUEST`） |
 | `ERR_BOOST_ALREADY_MOUNTED` | 加载日志警告 | 重复 `apply` 命中已有装配；本次注册跳过 | 确保只装配一次；移除重复的 bundle 行/重复加载 |
 | `ERR_BOOST_SECTION_REGISTER_FAILED` | 加载日志警告 | 协议段注册失败；三个事件钩子随后**逐个独立挂载**，失败者记名（见下一行） | 查宿主提示段冲突（另一个插件占了同名段）；修好后重启 |

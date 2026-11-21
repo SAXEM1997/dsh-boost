@@ -17,7 +17,10 @@
  * underlying read threw.
  */
 import { HTTP_API_PREFIX } from '../shared/api-prefix.js'
+import type { StatePayload, WorkspaceEntry, WorkspaceListing } from '../shared/api-types.js'
 import { isTrustedWebRequest } from './fence.js'
+
+export type { StatePayload, WorkspaceEntry, WorkspaceListing } from '../shared/api-types.js'
 
 /** The route prefix this plugin owns: absolute, no trailing slash. */
 export { HTTP_API_PREFIX } from '../shared/api-prefix.js'
@@ -27,23 +30,7 @@ export const ERR_HTTP_METHOD = 'ERR_HTTP_METHOD'
 export const ERR_HTTP_NOT_FOUND = 'ERR_HTTP_NOT_FOUND'
 export const ERR_HTTP_FORBIDDEN = 'ERR_HTTP_FORBIDDEN'
 export const ERR_HTTP_WORKSPACES_UNAVAILABLE = 'ERR_HTTP_WORKSPACES_UNAVAILABLE'
-
-/** A workspace as the page shows it: the registry's id and the path it owns. */
-export interface WorkspaceEntry {
-  id: string
-  path: string
-}
-
-/**
- * The workspace list, or the reason there is none.
- *
- * `available: false` is NOT an empty list: the page disables saving on it and
- * says the list could not be read. Rendering an empty list instead would read
- * as "you have no workspaces", which is a different, wrong statement.
- */
-export type WorkspaceListing =
-  | { available: true; entries: WorkspaceEntry[] }
-  | { available: false; code: string }
+export const ERR_HTTP_INTERNAL = 'ERR_HTTP_INTERNAL'
 
 /** What the state handler reads. Everything is a thunk: state moves. */
 export interface StateDeps {
@@ -55,14 +42,6 @@ export interface StateDeps {
   workspaces(): WorkspaceListing
   /** The effective configuration `resolveConfig` produced at load. */
   config(): unknown
-}
-
-/** The JSON body `GET /dsh-boost/api/state` returns. */
-export interface StatePayload {
-  status: unknown
-  scope: unknown
-  workspaces: WorkspaceListing
-  config: unknown
 }
 
 /**
@@ -134,7 +113,9 @@ function writeJson(res: HttpResponseLike, status: number, value: unknown): void 
 function subPath(url: string | undefined): string {
   const raw = typeof url === 'string' ? url : ''
   const path = raw.split('?')[0] ?? ''
-  return path.startsWith(HTTP_API_PREFIX) ? path.slice(HTTP_API_PREFIX.length) : path
+  // The route is mounted as a prefix, so the host only ever dispatches paths
+  // that already start with it.
+  return path.slice(HTTP_API_PREFIX.length)
 }
 
 /** What the handler needs beyond its deps. */
@@ -175,7 +156,7 @@ export function createStateHandler(deps: StateDeps, options: HandlerOptions = {}
     } catch {
       // `buildStatePayload` converts its own failures; this catches a host
       // service that throws from a getter, which must still leave a JSON body.
-      writeJson(res, 500, { error: 'ERR_HTTP_INTERNAL' })
+      writeJson(res, 500, { error: ERR_HTTP_INTERNAL })
     }
   }
 }

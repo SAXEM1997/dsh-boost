@@ -8,13 +8,13 @@
  * unmeasured field says so, and a missing workspace list disables saving rather
  * than showing none.
  */
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useState, type ReactNode } from 'react'
 import {
-  ADVICE_FOR_CODE,
+  adviceFor,
   CONFIG_READONLY,
-  DEGRADED_ADVICE,
-  DEGRADED_FALLBACK,
+  CONFIG_UNAVAILABLE,
   HINT_OVERHEAD,
+  HINT_PROJECTION_GROSS_REPLAY,
   HINT_PROJECTION_NET,
   HINT_SAVED_LOWER,
   HINT_SAVED_UPPER,
@@ -27,6 +27,7 @@ import {
   LABEL_OVERHEAD,
   LABEL_PROJECTION,
   LABEL_PROJECTION_GROSS,
+  LABEL_PROJECTION_GROSS_REPLAY,
   LABEL_PROJECTION_NET,
   LABEL_RETRIEVALS,
   LABEL_REVISION,
@@ -38,6 +39,8 @@ import {
   MODE_GLOBAL,
   MODE_SELECTED,
   NO_DEGRADED,
+  NO_RECEIPTS,
+  NO_WORKSPACES_IN_REGISTRY,
   NO_WORKSPACES_SELECTED,
   NOT_APPLICABLE,
   OFF,
@@ -47,6 +50,7 @@ import {
   PROJECTION_SHADOW,
   RETRY,
   SECTION_CONFIG,
+  SECTION_COUNTS,
   SECTION_SCOPE,
   SECTION_STATUS,
   SECTION_WORKSPACES,
@@ -104,11 +108,11 @@ function Row({ label, value, hint }: { label: string; value: string; hint?: stri
   )
 }
 
-function Section({ title, children }: { title: string; children: React.ReactNode }) {
+function Section({ title, children, rows = true }: { title: string; children: ReactNode; rows?: boolean }) {
   return (
     <section className="boost-settings__section">
       <h3>{title}</h3>
-      <dl>{children}</dl>
+      {rows ? <dl>{children}</dl> : children}
     </section>
   )
 }
@@ -122,7 +126,7 @@ function Degraded({ codes }: { codes: readonly string[] }) {
       {codes.map(code => (
         <li key={code}>
           <code>{code}</code>
-          <span>{DEGRADED_ADVICE[code] ?? DEGRADED_FALLBACK}</span>
+          <span>{adviceFor(code)}</span>
         </li>
       ))}
     </ul>
@@ -159,6 +163,14 @@ export function App() {
   const saved = pick(status, 'saved')
   const degraded = pick(status, 'degraded')
   const codes = Array.isArray(degraded) ? degraded.filter((code): code is string => typeof code === 'string') : []
+  const counts = pick(status, 'counts')
+  const countRows: [string, number][] =
+    counts === null || typeof counts !== 'object'
+      ? []
+      : Object.entries(counts as Record<string, unknown>)
+          .filter((entry): entry is [string, number] => typeof entry[1] === 'number' && Number.isFinite(entry[1]))
+          .sort((left, right) => right[1] - left[1])
+  const configRows = flatten(config)
   const mode = pick(scopeDoc, 'mode')
   const workspaceIds = pick(scopeDoc, 'workspaceIds')
   const projection = pick(scopeDoc, 'projection')
@@ -173,7 +185,7 @@ export function App() {
       {result !== undefined && !result.ok ? (
         <div className="boost-settings__error" role="alert">
           <code>{result.code}</code>
-          <span>{ADVICE_FOR_CODE[result.code] ?? DEGRADED_FALLBACK}</span>
+          <span>{adviceFor(result.code)}</span>
           <button type="button" onClick={() => load()}>
             {RETRY}
           </button>
@@ -185,7 +197,12 @@ export function App() {
           <Section title={SECTION_STATUS}>
             <Row label={LABEL_SAVED_LOWER} value={tokens(pick(saved, 'substitution_avoided'))} hint={HINT_SAVED_LOWER} />
             <Row label={LABEL_SAVED_UPPER} value={tokens(pick(saved, 'substitution'))} hint={HINT_SAVED_UPPER} />
-            <Row label={LABEL_PROJECTION_GROSS} value={tokens(pick(saved, 'projectionGross'))} />
+            <Row label={LABEL_PROJECTION_GROSS} value={tokens(pick(status, 'projection_gross_tokens'))} />
+            <Row
+              label={LABEL_PROJECTION_GROSS_REPLAY}
+              value={tokens(pick(saved, 'projectionGross'))}
+              hint={HINT_PROJECTION_GROSS_REPLAY}
+            />
             <Row label={LABEL_PROJECTION_NET} value={tokens(pick(saved, 'projectionNet'))} hint={HINT_PROJECTION_NET} />
             <Row label={LABEL_RETRIEVALS} value={tokens(pick(saved, 'retrievals'))} />
             <Row label={LABEL_OVERHEAD} value={tokens(pick(status, 'fixedOverheadTokens'))} hint={HINT_OVERHEAD} />
@@ -224,16 +241,29 @@ export function App() {
             <Row label={LABEL_REVISION} value={tokens(pick(scopeDoc, 'revision'))} />
           </Section>
 
-          <section className="boost-settings__section">
-            <h3>{LABEL_DEGRADED}</h3>
+          <Section title={LABEL_DEGRADED} rows={false}>
             <Degraded codes={codes} />
-          </section>
+          </Section>
 
-          <section className="boost-settings__section">
-            <h3>{SECTION_WORKSPACES}</h3>
+          <Section title={SECTION_COUNTS} rows={false}>
+            {countRows.length === 0 ? (
+              <p className="boost-settings__muted">{NO_RECEIPTS}</p>
+            ) : (
+              <ul className="boost-settings__codes">
+                {countRows.map(([code, count]) => (
+                  <li key={code}>
+                    <code>{code}</code>
+                    <span>{count.toLocaleString()}</span>
+                  </li>
+                ))}
+              </ul>
+            )}
+          </Section>
+
+          <Section title={SECTION_WORKSPACES} rows={false}>
             {workspaces === undefined ? null : workspaces.available ? (
               workspaces.entries.length === 0 ? (
-                <p className="boost-settings__muted">{NO_WORKSPACES_SELECTED}</p>
+                <p className="boost-settings__muted">{NO_WORKSPACES_IN_REGISTRY}</p>
               ) : (
                 <ul className="boost-settings__workspaces">
                   {workspaces.entries.map(entry => {
@@ -253,11 +283,13 @@ export function App() {
                 <span>{WORKSPACES_UNAVAILABLE}</span>
               </div>
             )}
-          </section>
+          </Section>
 
-          <section className="boost-settings__section">
-            <h3>{SECTION_CONFIG}</h3>
+          <Section title={SECTION_CONFIG} rows={false}>
             <p className="boost-settings__hint">{CONFIG_READONLY}</p>
+            {configRows.length === 0 ? (
+              <p className="boost-settings__muted">{CONFIG_UNAVAILABLE}</p>
+            ) : (
             <table className="boost-settings__config">
               <thead>
                 <tr>
@@ -266,7 +298,7 @@ export function App() {
                 </tr>
               </thead>
               <tbody>
-                {flatten(config).map(([key, value]) => (
+                {configRows.map(([key, value]) => (
                   <tr key={key}>
                     <td>
                       <code>{key}</code>
@@ -276,7 +308,8 @@ export function App() {
                 ))}
               </tbody>
             </table>
-          </section>
+            )}
+          </Section>
         </>
       ) : null}
     </div>

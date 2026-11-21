@@ -58,7 +58,9 @@ interface Server {
  * `webServer` is an override rather than a fixture member so the no-web-server
  * case is the same helper with the service left out.
  */
-async function createServer(options: { webServer?: boolean; trustedHosts?: string[] } = {}): Promise<Server> {
+async function createServer(
+  options: { webServer?: boolean; trustedHosts?: string[]; inject?: boolean } = {},
+): Promise<Server> {
   const dir = await mkdtemp(join(tmpdir(), 'dsh-boost-http-'))
   const root = join(dir, 'boost')
   await mkdir(root, { recursive: true })
@@ -79,6 +81,7 @@ async function createServer(options: { webServer?: boolean; trustedHosts?: strin
   }
 
   const host = fakeHost({
+    ...(options.inject === false ? { inject: undefined } : {}),
     get(name: string) {
       if (name === 'workspaceRegistry') return registry
       if (name === 'webServer') return options.webServer === false ? undefined : webServer
@@ -231,22 +234,7 @@ test('没有 webServer 的部署：不挂路由，也不抛', async () => {
 })
 
 test('没有动态注入能力的宿主：warn 一次、不挂路由', async () => {
-  const dir = await mkdtemp(join(tmpdir(), 'dsh-boost-http-'))
-  const root = join(dir, 'boost')
-  await mkdir(root, { recursive: true })
-  await writeFile(join(root, 'scope.json'), `${JSON.stringify(scopeDoc())}\n`, 'utf8')
-  const savedHome = process.env.DSH_HOME
-  process.env.DSH_HOME = dir
-
-  const warnings: string[] = []
-  const host = fakeHost({
-    inject: undefined,
-    get: () => undefined,
-    logger: { info: () => {}, warn: (message: string) => warnings.push(message) },
-  })
-  plugin.apply(host, {})
-  if (savedHome === undefined) delete process.env.DSH_HOME
-  else process.env.DSH_HOME = savedHome
-
-  assert.ok(warnings.some(message => message.includes('settings page has no data route')))
+  const server = await createServer({ inject: false })
+  assert.equal(server.routes.length, 0)
+  assert.ok(server.warnings.some(message => message.includes('settings page has no data route')))
 })

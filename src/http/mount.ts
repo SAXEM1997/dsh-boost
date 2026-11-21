@@ -14,7 +14,8 @@
  * goes through the un-gated `ctx.get`, because a strict proxy throws on any
  * name outside the injection list.
  */
-import { createStateHandler, HTTP_API_PREFIX, type StateDeps } from './state.js'
+import { HTTP_API_PREFIX } from '../shared/api-prefix.js'
+import { createStateHandler, type StateDeps } from './state.js'
 
 /** The one service this plugin needs from the host's web composition. */
 interface WebServerLike {
@@ -51,7 +52,7 @@ function resolveTrustedHosts(ctx: HttpContextLike): readonly string[] {
 export function registerHttpApi(
   ctx: HttpContextLike,
   deps: StateDeps,
-  warn: (message: string) => void = message => console.warn(message),
+  warn: (message: string) => void,
 ): () => void {
   if (typeof ctx.inject !== 'function') {
     warn('[boost] webServer unavailable (no dynamic injection); settings page has no data route')

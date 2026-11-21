@@ -24,6 +24,7 @@ export const LABEL_SAVED_UPPER = '替换节省（上界）'
 export const LABEL_SAVED_LOWER = '替换节省（下界）'
 export const LABEL_PROJECTION_NET = '投影净额'
 export const LABEL_PROJECTION_GROSS = '投影毛额（一次性）'
+export const LABEL_PROJECTION_GROSS_REPLAY = '投影毛额（按各自 horizon 重放）'
 export const LABEL_RETRIEVALS = '取回次数'
 export const LABEL_OVERHEAD = '常驻开销'
 export const LABEL_ESTIMATE = '口径'
@@ -33,7 +34,10 @@ export const HINT_SAVED_UPPER =
 export const HINT_SAVED_LOWER =
   '下界是被跳过那次请求自己的总用量：它不含「后续还会回放多少次」，所以真实节省高于这个数。'
 export const HINT_PROJECTION_NET =
-  '净额 = 毛额 × (1 + 回放次数) − 取回成本。回放次数用每条回执自己的 horizon 重放，不是当前值。'
+  '净额 = 重放毛额 − 取回内容成本 − 取回调用成本。回放用每条回执自己的 horizon，不是当前值；' +
+  '所以上面两个毛额不是同一个数，净额只与重放那个对齐。'
+export const HINT_PROJECTION_GROSS_REPLAY =
+  '每条回执的节省乘以它自己的 (1 + horizon) 再求和。这个数才是净额的被减数。'
 export const HINT_OVERHEAD =
   '每次请求的常驻成本：协议段 + 工具 schema。它不随会话变化，也不被任何节省抵消。'
 
@@ -55,6 +59,10 @@ export const PROJECTION_SHADOW = '影子（只记账）'
 export const PROJECTION_ON = '投影并替换回执'
 
 export const NO_WORKSPACES_SELECTED = '还没有选中任何工作区：插件对任何会话都不生效。'
+export const NO_WORKSPACES_IN_REGISTRY = '宿主的注册表里没有工作区。这不是「没选中」，是宿主那边确实一个都没有。'
+export const CONFIG_UNAVAILABLE = '读不到生效配置：路由返回的 config 不是对象。页面不会把它显示成一张空表。'
+export const SECTION_COUNTS = '收据计数'
+export const NO_RECEIPTS = '还没有任何收据：插件在这个宿主上还没有产生过一次决策。'
 export const WORKSPACES_UNAVAILABLE =
   '读不到工作区列表，所以保存被禁用。这不是「没有工作区」——是宿主没有提供注册表，或它读的时候抛错了。'
 
@@ -84,6 +92,16 @@ export const DEGRADED_ADVICE: Record<string, string> = {
 }
 
 export const DEGRADED_FALLBACK = '未收录的码：查 docs/RELEASE.md 的稳定码表。'
+
+/**
+ * One lookup with one fallback.
+ *
+ * The page asks this for both its own failures and the host's degradation
+ * codes, so the two must not drift into two fallbacks.
+ */
+export function adviceFor(code: string): string {
+  return DEGRADED_ADVICE[code] ?? ADVICE_FOR_CODE[code] ?? DEGRADED_FALLBACK
+}
 
 export const ADVICE_FOR_CODE: Record<string, string> = {
   ERR_HTTP_METHOD: '这个地址只接受读：写通道在保存那条路上，不在这里。',

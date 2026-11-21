@@ -5,25 +5,9 @@
  * decides what to say — and whether to keep a draft — from the code alone.
  */
 import { HTTP_API_PREFIX } from '../../src/shared/api-prefix'
+import type { StatePayload, WorkspaceListing } from '../../src/shared/api-types'
 
-/** A workspace as the route reports it. */
-export interface WorkspaceEntry {
-  id: string
-  path: string
-}
-
-/** The workspace list, or the reason there is none. */
-export type WorkspaceListing =
-  | { available: true; entries: WorkspaceEntry[] }
-  | { available: false; code: string }
-
-/** The route's success body, narrowed to what this page reads. */
-export interface StatePayload {
-  status: unknown
-  scope: unknown
-  workspaces: WorkspaceListing
-  config: unknown
-}
+export type { StatePayload, WorkspaceEntry, WorkspaceListing } from '../../src/shared/api-types'
 
 /** Success carries the payload; failure carries a code and nothing else. */
 export type StateResult = { ok: true; data: StatePayload } | { ok: false; code: string }

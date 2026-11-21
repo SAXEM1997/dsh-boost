@@ -463,6 +463,22 @@ horizon 重放，并计入 `projection_horizon_reestimated`；`projection_horizo
 | 收据分片数量 | `boost status` 全量扫描（非依赖） | 分片超过 256 个时 `status` 只统计按编码名排序的前 256 个，`status.degraded` 带 `ERR_RECEIPTS_TRUNCATED`，所有计数因此是**下界**；分片永不自动删除，可归档/移走旧会话分片后重跑 `status` |
 | 提示段装配瀑布 | 出站请求探测（非依赖） | 宿主的 `complete: true` 提示段在装配瀑布之后替换了整个系统提示、协议段没有到达请求时，`status.degraded` 带 `ERR_HOST_COMPLETE_SECTION`；受影响请求上替换与投影 fail-closed（工作区明明可见插件却不动作）。找出宿主里覆盖瀑布的 complete 段（通常属于另一个插件）并移除，或接受这些请求上不动作 |
 
+设置页的数据路由有自己的码，它们**不是** `status.degraded` 的成员——每次失败都以 JSON 体返回一个码，
+页面据码决定说什么：
+
+| 码 | 出现位置 | 含义 |
+|---|---|---|
+| `ERR_HTTP_FORBIDDEN` | 路由响应体（403） | 同源栅栏拒绝：`Host` 既非 loopback 也不在 `webStartup.trustedHosts` 里，或 `sec-fetch-site: cross-site`，或 `Origin` 与 `Host` 不同 authority，或 `Origin` 解析不了 |
+| `ERR_HTTP_METHOD` | 路由响应体（405） | 对只读路由发了 `GET`/`HEAD` 以外的方法 |
+| `ERR_HTTP_NOT_FOUND` | 路由响应体（404） | 前缀匹配上了但子路径不认识：页面与服务端版本不一致 |
+| `ERR_HTTP_INTERNAL` | 路由响应体（500） | 读 `status`/`scope` 时宿主服务的 getter 抛错；四块内容一个都不返回 |
+| `ERR_HTTP_WORKSPACES_UNAVAILABLE` | 路由响应体（`workspaces.available === false`） | 没有注册表，或 `list()` 抛错：页面禁用保存并说明「读不到」，不渲染空列表 |
+| `ERR_CLIENT_NETWORK` | 页面（不经网络） | 页面读不到路由：可能没挂上 |
+| `ERR_CLIENT_SHAPE` | 页面（不经网络） | 路由返回的体本页读不懂：版本不匹配 |
+
+`ERR_BOOST_HTTP_MOUNT_FAILED` 只进日志：路由挂载本身抛了（`ctx.inject` 不可用或被拒绝），
+页面因此没有数据源。它与 `ERR_BOOST_PARTIAL_MOUNT` 是两件事——后者说的是钩子。
+
 `ERR_HOST_NO_STEP_WHEN` 已不存在：步骤级 `when` 从本包声明的最老宿主线起就在
 `ToolRegistrationOptions` 里，插件不再探测、无条件注册。
 

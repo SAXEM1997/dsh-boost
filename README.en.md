@@ -553,6 +553,22 @@ to load. `llm` is soft (only the selector uses it); when absent the selector fal
 | Prompt assembly waterfall | outgoing-request probe (not a dependency) | When the host's `complete: true` prompt section replaces the assembled system prompt after the waterfall and the protocol section never reaches the request, `status.degraded` carries `ERR_HOST_COMPLETE_SECTION`; substitution and projection fail closed for the affected requests (the plugin stays inert although the workspace is visible). Find the complete section overriding the waterfall (usually another plugin's) and remove it, or accept the inaction on those requests |
 
 `ERR_HOST_NO_STEP_WHEN` no longer exists: step-level `when` has been part of
+The settings page's data route has codes of its own, and they are **not** members of
+`status.degraded` — every failure returns one in a JSON body, and the page decides what to say from it:
+
+| Code | Where | Meaning |
+|---|---|---|
+| `ERR_HTTP_FORBIDDEN` | route body (403) | Same-origin fence refused: `Host` is neither loopback nor in `webStartup.trustedHosts`, or `sec-fetch-site: cross-site`, or `Origin` and `Host` name different authorities, or `Origin` does not parse |
+| `ERR_HTTP_METHOD` | route body (405) | Something other than `GET`/`HEAD` reached the read-only route |
+| `ERR_HTTP_NOT_FOUND` | route body (404) | The prefix matched but the sub-path is unknown: page and server are different versions |
+| `ERR_HTTP_INTERNAL` | route body (500) | A host service getter threw while reading `status`/`scope`; none of the four blocks is returned |
+| `ERR_HTTP_WORKSPACES_UNAVAILABLE` | route body (`workspaces.available === false`) | No registry, or `list()` threw: the page disables saving and says the list could not be read rather than rendering an empty one |
+| `ERR_CLIENT_NETWORK` | page only (never on the wire) | The page could not reach the route: it may not be mounted |
+| `ERR_CLIENT_SHAPE` | page only | The route returned a body this page cannot read: version mismatch |
+
+`ERR_BOOST_HTTP_MOUNT_FAILED` goes to the log only: mounting the route threw (`ctx.inject` missing or
+refused), so the page has no data source. It is not `ERR_BOOST_PARTIAL_MOUNT` — that one is about hooks.
+
 `ToolRegistrationOptions` since the oldest host line this package declares, so the plugin no
 longer probes it and registers unconditionally.
 
