@@ -91,6 +91,12 @@ function loadBundle(bundle: string): {
         },
       },
     },
+    // Enough of a document for the style injection: the bundle appends a
+    // `<style>` node to the host's head when it is applied.
+    document: {
+      createElement: () => ({ setAttribute() {}, remove() {}, textContent: '' }),
+      head: { append() {} },
+    },
     console: { warn() {}, error() {} },
   })
   vm.runInContext(bundle, context)
@@ -150,4 +156,61 @@ test('client bundle never asks for the dev JSX runtime', async () => {
     requested.filter((specifier) => specifier.includes('jsx-dev-runtime')),
     [],
   )
+})
+
+/** What `apply` did to the host's slots service, recorded in call order. */
+interface SlotCalls {
+  injected: string[]
+  registered: { options: Record<string, unknown>; component: unknown }[]
+}
+
+/**
+ * Runs `apply` against a stand-in for the shell's slots service.
+ *
+ * This is the registration CONTRACT, which the artifact test above cannot see:
+ * the bundle can load perfectly and still claim a seat nowhere. The stand-in
+ * mirrors the host's shape (`inject(key, callback)` returning a disposer,
+ * `register(options, component)` returning a disposer) — see
+ * `dsh-client-ui-settings/src/client/contract/slots.ts` for the slot side.
+ */
+function applyToFakeShell(bundle: string): SlotCalls {
+  const calls: SlotCalls = { injected: [], registered: [] }
+  const slots = {
+    inject(key: string, callback: () => () => void): () => void {
+      calls.injected.push(key)
+      return callback()
+    },
+    register(options: Record<string, unknown>, component: unknown): () => void {
+      calls.registered.push({ options, component })
+      return () => {}
+    },
+  }
+  const { exports } = loadBundle(bundle)
+  const apply = exports['apply'] as (ctx: unknown) => void
+  apply({ slots, effect: (callback: () => () => void) => callback() })
+  return calls
+}
+
+test('client bundle claims a seat in the settings section with the agreed identity', async () => {
+  const bundle = await buildBundle()
+  const calls = applyToFakeShell(bundle)
+  assert.deepEqual(calls.injected, ['settings.section'])
+  assert.equal(calls.registered.length, 1)
+  const options = calls.registered[0]!.options
+  // The nav item's key, the seat's identity and its order are all contract:
+  // T5 changes the label's TEXT, never these three.
+  assert.equal(options['name'], 'settings.section')
+  assert.equal(options['id'], 'boost')
+  assert.equal(options['order'], 50)
+  assert.equal(typeof options['label'], 'function')
+  assert.equal(typeof calls.registered[0]!.component, 'function')
+})
+
+test('client bundle still loads when the shell has no slots service', async () => {
+  const bundle = await buildBundle()
+  const { exports } = loadBundle(bundle)
+  const apply = exports['apply'] as (ctx: unknown) => void
+  // A partial shell must cost the page, never the plugin: `apply` returning is
+  // the whole contract here, and the warn is what an operator greps for.
+  assert.doesNotThrow(() => apply({ effect: (callback: () => () => void) => callback() }))
 })
