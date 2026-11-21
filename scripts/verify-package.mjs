@@ -46,10 +46,11 @@
  * `--prebuilt` packs the existing `dist/` without rebuilding. Rebuilding here
  * would silently repair a missing or stale build after the build that was
  * supposed to be under test, making the allowlist assertions tautological.
- * `prepublishOnly` runs `npm run ci` and then `--prebuilt`; `package.json` no
- * longer publishes a `prepare` hook, so `npm publish`'s own pack step does not
- * rebuild either. The default mode (no flag) still builds first for standalone
- * local use.
+ * `prepublishOnly` runs `npm run ci` and then `--prebuilt`. `package.json` does
+ * carry a `prepare` hook, but it builds only when `dist/index.js` is missing —
+ * it exists so a git install (`dsh plugin add github:...`) is loadable, and it
+ * is a no-op on the release path, where `npm run ci` has just built. The
+ * default mode (no flag) still builds first for standalone local use.
  *
  * `npm pack --ignore-scripts` is used in both modes so the pack step cannot run
  * lifecycle scripts. The receipt (`ok: true`) is JSON on stdout and names the
