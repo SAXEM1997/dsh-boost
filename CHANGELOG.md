@@ -15,7 +15,7 @@ Design rationale lives in `docs/superpowers/specs/`; the release-acceptance proc
 ### 修复 Fixed
 
 - **scope 文件不再被静默覆盖。** 坏 JSON / 非对象 / 数组（`ERR_SCOPE_PARSE_FAILED`）以及「版本缺失或非数值、且没有可识别的 v1 字段」（`ERR_SCOPE_UNKNOWN_VERSION`）两种情况下，`scope-set` 与 `shadow` 现在**拒绝写入**并把文件原样留在盘上；此前会以默认文档为基底覆盖它，`workspaceIds` 会变成空数组。带可识别字段的 v1 文件仍按原路升级并保留 `mode` / `global` / `workspaceIds`。
-- **`engines.dsh` 从精确 `0.2.2-rc.4` 改为 `>=0.2.2-rc.4 <0.2.3-0`。** 宿主按 `includePrerelease` 判定并在不满足时**直接停用插件**，而 `0.2.2-rc.5` 在本插件触及的九个包里与 rc.4 逐字节相同——精确钉法会让一个兼容宿主上的插件静默不加载。
+- **`engines.dsh` 从精确 `0.2.2-rc.4` 改为 `>=0.2.2-rc.4 <0.2.3-0`。** 宿主按 `includePrerelease` 判定并在不满足时**直接停用插件**，而 `0.2.2-rc.5` 在本插件触及的九个包里与 rc.4 逐字节相同（复核命令、九个包名与日期见 `docs/RELEASE.md` §2.4「`0.2.2-rc.5` 逐字节复核」）——精确钉法会让一个兼容宿主上的插件静默不加载。
 - **装配不全不再看起来健康。** 七个会话监听改为逐个独立挂载，失败者记名并进 `missingMounts`；此前它们共用一个裸 catch，首个抛错会静默丢掉其余六个（包括 `session/disposed`，于是每会话状态在进程生命周期内泄漏）。
 - **被替换或销毁的宿主服务不再被永久缓存。** `llm` 与 `workspaceRegistry` 此前只 memo 首次成功的绑定，provider 换掉后仍用旧对象；现在失败即重置、销毁即失效。
 - **合成调用会按本步的工具准入集过滤。** 候选工具不在 `exec.toolSet` 里就弃权，避免派发一个宿主会以 `UNKNOWN_TOOL` 拒绝的调用；取不到准入集时照常替换，但记 `substitute-skipped:no-toolset` 让这种不可验证状态可见。

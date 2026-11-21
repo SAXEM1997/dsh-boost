@@ -1,6 +1,6 @@
 # dsh-boost 发布验收
 
-本文是 `dsh-boost` 0.1.1 的发布验收手册。它覆盖四件事：
+本文是 `dsh-boost` 0.1.2 的发布验收手册（版本以 `package.json` 为准）。它覆盖四件事：
 
 1. `npm run verify:package` 一条命令的打包与产物验收（§1），以及零 peerDependencies 现状下
    两条降级路径的验收方式（§2）；
@@ -23,16 +23,19 @@ npm run verify:package
 
 `scripts/verify-package.mjs` 把机械验收一次做完。它不依赖 `npm publish` 或 `prepublishOnly`，
 可以单独跑；前置条件只有一次 `npm ci`（脚本会显式跑 `npm run build`，需要仓库自己的 `tsc`）。
-本 checkout 实测 exit 0：tarball 110 个条目，回执里 9 条 `checks` 记录：
+0.1.2 的发布 commit `3ec82f3` 上实测 exit 0：tarball 78 个条目，回执里 10 条 `checks` 记录。
+两个数字都随树的形状变化（条目数随文件集合，`checks` 数随脚本里的断言组），不是版本常量：
 
 1. 脚本显式跑 `npm run build`，再用 `npm pack --ignore-scripts` 打出真实 tarball。
-   `--ignore-scripts` 是关键：不带它时 `npm pack` 会执行 `prepare` → clean → tsc，在打包步骤里
-   悄悄重建（并“修复”）工作树，dist 断言就不再描述被测的那棵树，缺文件/多余文件都会被构建抹掉。
-   显式构建后打包，包内容就是这次构建的产物；干净 clone 上即使 `dist/` 不存在也能跑，因为构建
-   发生在打包之前。
+   `--ignore-scripts` 的作用不是挡住重建——`package.json` 里**没有** `prepare`（也没有
+   `prepack`/`postpack`），`npm pack` 本身不构建任何东西。它把 pack 与包内生命周期脚本隔开，
+   让 tarball 只描述上一条 `npm run build` 留下的那棵树；将来若有人加回 `prepare`，这条也不会
+   让它在断言之前悄悄重建（并“修复”）工作树。显式构建后打包，包内容就是这次构建的产物；
+   干净 clone 上即使 `dist/` 不存在也能跑，因为构建发生在打包之前。
 2. **exact allowlist**：每一个 tar 条目都必须由四类来源之一解释——固定根文件（`package.json`、
    `LICENSE`、`NOTICE`、两份 README）、`dsh.bundle.patch` 指向的 patch 文件、`locale/*.json`、或
-   `src/**/*.ts` 对应的一个 `dist/**.js` + `.js.map` + `.d.ts`。多出 `package/dist/ghost.js`
+   `src/**/*.ts` 对应的一个 `dist/**.js` + `.js.map`（声明文件只发 `dist/index.d.ts` 与
+   `dist/types.d.ts` 两个；其余内部 `.d.ts` 被 `files` 的 `!dist/**/*.d.ts` 排除）。多出 `package/dist/ghost.js`
    之类的条目立即失败并点名；少一个也失败并列出缺失项。这是精确集合，不是“必需项齐全 + 禁止前缀
    不出现”。patch 条目不是硬编码的 `cordis.patch.yml`：脚本从 `package.json` 的
    `dsh.bundle.patch` 派生它，字段缺失、不是字符串或指向不存在的文件都会红；指向不存在的文件时，
@@ -67,15 +70,17 @@ npm run verify:package
 
 成功只往 stdout 打 JSON 回执；`checks[].install` 明说每条断言用的是 `ignore-scripts` 还是
 `default` 安装。失败保留临时目录并打印其路径供检查。
-`prepublishOnly` 现在就是 `npm run ci && npm run verify:package`（`ci` = typecheck + test +
-build），所以**不带 flags 的** `npm publish` 本身会跑完这道门。但 npm 仍有两个旁路，见 §6.3。
+`prepublishOnly` 现在就是 `npm run ci && npm run verify:package -- --prebuilt`（`ci` = typecheck +
+test + build）；`--prebuilt` 让 allowlist 描述 `ci` 刚构建的那棵树，而不是在验收里再重建。所以
+**不带 flags 的** `npm publish` 本身会跑完这道门。但 npm 仍有两个旁路，见 §6.3。
 
 ### 1.1 手工回退与维护
 
 - `npm ci`：按已提交的 `package-lock.json` 复现开发依赖树（TypeScript、`tsx`、`@types/node`
   都由 lockfile 钉住）。`verify:package` 用的是当前工作树，不替你确认 commit 状态。
 - 完整路径清单已由 exact allowlist 覆盖，不需要再手工 `diff` 集合。要审**内容**（不是路径集合）
-  仍然可以 `tar -tzf dsh-boost-0.1.1.tgz` 或 `npm pack --dry-run` 人工看。
+  仍然可以 `tar -tzf "dsh-boost-$(node -p "require('./package.json').version").tgz"` 或
+  `npm pack --dry-run` 人工看（前者要求 tarball 就在仓库根目录）。
 - 新增 `src/**/*.ts` 或 `locale/*.json` 时 allowlist 自动跟随，不用改脚本；新增**根文件**才需要
   改 `scripts/verify-package.mjs` 的 `ROOT_ENTRIES`（`dsh.bundle.patch` 指向的 patch 文件除外，
   它的条目从字段派生，不写进 `ROOT_ENTRIES`）。
@@ -91,8 +96,9 @@ build），所以**不带 flags 的** `npm publish` 本身会跑完这道门。�
   不存在的包则加载**响亮失败**。四名一致是为了保住管理面的可寻址性。
 - `version` 必须存在，否则 `npm pack` 在第一步就报 `Invalid package, must have name and version`。
 - `files` 与实际布局一致：`scripts/`、`test/`、`src/` 是 dev-only，**不**进包（`files` 只带
-  `dist`、`locale`、`cordis.patch.yml`、两份 README、`LICENSE`、`NOTICE`）；`dist/` 由 `prepare`
-  构建，sourcemap 以 `inlineSources` 内联源码，装好的包没有 `src/` 也能对上源码。
+  `dist`、`locale`、`cordis.patch.yml`、两份 README、`LICENSE`、`NOTICE`）；`dist/` 由
+  `npm run build`（clean + `tsc`）构建，`npm publish` 的 pack 步骤不会重建（无 `prepare`）；
+  sourcemap 以 `inlineSources` 内联源码，装好的包没有 `src/` 也能对上源码。
 
 ## 2. 装进宿主（一次性 DSH_HOME）
 
@@ -110,8 +116,10 @@ peerDependencies**（§2.4），所以“peer 在空项目里解析到哪个 rc�
 ```bash
 export DSH_HOME=/tmp/dsh-boost-accept/dsh-home
 mkdir -p "$DSH_HOME"
-dsh plugin --profile accept add /path/to/dsh-boost-0.1.1.tgz
-# 或本地 checkout 目录；从 registry 安装时写 dsh-boost@^0.1.1 --registry=https://registry.npmjs.org/
+# 在仓库根目录求版本，tarball 文件名随之变化；手工下载的包直接写绝对路径
+TARBALL="/path/to/dsh-boost-$(node -p "require('./package.json').version").tgz"
+dsh plugin --profile accept add "$TARBALL"
+# 或本地 checkout 目录；从 registry 安装时写 dsh-boost@^0.1.2 --registry=https://registry.npmjs.org/
 # 确认宿主确实把这一行并入了装配计划：
 dsh --profile accept --dump-config | grep -A2 'id: dsh-boost'
 ```
@@ -261,21 +269,21 @@ tarball 会拉进 `dsh-spill-policy@rc.5` 并 `ERESOLVE`（当时实测 exit 1�
   不是这条验证线，插件告警 `ERR_HOST_VERSION_MISMATCH` 但**仍然加载**（advisory：版本不符是风险，
   不是 API 已改的证明；改名仍可能让插件失效）。
 
-安装规格：**`dsh-boost@^0.1.1`**。registry 上有三条版本记录，其中一条是占位版本，不要把它当成
+安装规格：**`dsh-boost@^0.1.2`**。registry 上有四条版本记录，其中一条是占位版本，不要把它当成
 “更早的 API”：
 
-- `0.1.1` — 当前 `latest`（`npm view dsh-boost dist-tags --registry=https://registry.npmjs.org/`
-  实测 `latest: 0.1.1`）；
+- `0.1.2` — 当前 `latest`，npmjs 与 npmmirror 都是它（`npm view dsh-boost dist-tags
+  --registry=https://registry.npmjs.org/` 实测 `latest: 0.1.2`）；含 scope 文件写入的修复（§2.5）；
+- `0.1.1` — 上一版，十项修复；
 - `0.1.0` — 首个可用版本，**缺 0.1.1 的十项修复**，其中数项修的是静默失效；
 - `0.0.0-stage` — npm 对**全新包**做 staged publish 时自动创建的公开占位版本（`stub: true`，
   描述是 “Temporary package placeholder for staged publishing”；tarball 只有 `package.json` +
   `README.md`，没有 `dist/`）。它装得上，但 `import 'dsh-boost'` 报 `ERR_MODULE_NOT_FOUND`；
   它低于 `0.1.0`，所以 `^0.1.0` **不会**选中它，`latest` 也不是它。
 
-**`^0.1.0` 不是安全的钉法**：`registry.npmjs.org` 解析到 0.1.1，而 `registry.npmmirror.com`
-目前只有 0.1.0（它的 `latest` 也是 0.1.0）。镜像用户会装到缺少修复的构建。所以安装规格写成
-`dsh-boost@^0.1.1`，并在意 registry 时显式传 `--registry=https://registry.npmjs.org/`；镜像
-未同步 0.1.1 时，不带该 flag 的 `@^0.1.1` 会解析失败。
+**写成 `^0.1.2` 而不是 `^0.1.0`**：今天两个源都会把 `^0.1.0` 解析到 0.1.2，但 `^0.1.2` 表达的
+是“至少含 0.1.2 的修复”；镜像在发布后短暂滞后时，`^0.1.2` 会解析失败，而不是悄悄装回旧构建。
+在意 registry 时显式传 `--registry=https://registry.npmjs.org/`。
 
 本仓库的 `.npmrc` 与 `package-lock.json` 已钉在 `registry.npmjs.org`（与 `publishConfig` 同一个
 源），CI 断言 lockfile 里不残留 `registry.npmmirror.com`。发布者执行 `npm publish` 即可
@@ -283,12 +291,32 @@ tarball 会拉进 `dsh-spill-policy@rc.5` 并 `ERESOLVE`（当时实测 exit 1�
 
 建议（可选，不属于发布门）：给占位版本加一条弃用说明，让误装的人看到原因——
 `npm deprecate dsh-boost@0.0.0-stage "npm first-publish placeholder" --registry=https://registry.npmjs.org/`。
-它只写该版本的 deprecation 元数据，不改 `latest`、不影响 `^0.1.1` 的解析；本文档只建议，
+它只写该版本的 deprecation 元数据，不改 `latest`、不影响 `^0.1.2` 的解析；本文档只建议，
 不代替发布者执行。
 
 本节取代旧版安装矩阵（rc.4 / rc.5 两侧对照、含一行 `ERESOLVE` 失败）：那张表记录的是 **peer
 还存在时**的安装行为，自 `0567347` 起不再适用；§1 的 `verify:package` 与上面的裸装事实是现行
 依据。
+
+#### `0.2.2-rc.5` 逐字节复核（2026-11-21）
+
+`engines.dsh` 的上界放行 `0.2.2-rc.5`，依据是它在本插件触及的九个宿主包里与 rc.4 逐字节相同。
+这条断言可以复跑（需要能访问 registry；无 `DIFF` 输出即九个包的 `lib/` 全部相同）：
+
+```bash
+export npm_config_cache=/tmp/npmcache   # 本仓库验收环境的缓存位置；普通环境可省略
+pkgs="dsh-agent dsh-app-boot dsh-llm dsh-session dsh-spill dsh-spill-policy dsh-system-prompt dsh-token-meter dsh-tools"
+d=$(mktemp -d)
+for v in 0.2.2-rc.4 0.2.2-rc.5; do for p in $pkgs; do
+  npm pack --silent --pack-destination "$d" "@deepseek-ai/$p@$v" >/dev/null
+  mkdir -p "$d/$v/$p"; tar -xzf "$d/deepseek-ai-$p-$v.tgz" -C "$d/$v/$p" --strip-components=1
+done; done
+for p in $pkgs; do diff -r "$d/0.2.2-rc.4/$p/lib" "$d/0.2.2-rc.5/$p/lib" >/dev/null || echo "DIFF $p"; done
+```
+
+九个包：`dsh-agent`、`dsh-app-boot`、`dsh-llm`、`dsh-session`、`dsh-spill`、`dsh-spill-policy`、
+`dsh-system-prompt`、`dsh-token-meter`、`dsh-tools`。只比较 `lib/`（发布的运行时代码）；tarball
+的 `package.json` 版本字段本来就不同。2026-11-21 复核结果为零差异。
 
 ### 2.5 降级码矩阵（稳定码全表）
 
@@ -309,7 +337,7 @@ tarball 会拉进 `dsh-spill-policy@rc.5` 并 `ERESOLVE`（当时实测 exit 1�
 | `ERR_HOST_COMPLETE_SECTION` | `status.degraded` | 宿主的 `complete: true` 提示段在装配瀑布之后替换了整个系统提示，协议段没有到达出站请求；受影响请求上替换与投影 fail-closed（会话被判不可见），工作区明明可见插件却不动作 | 找出宿主提示配置里覆盖瀑布装配的 complete 段（通常属于另一个插件）；移除它，或接受这些请求上替换/投影不可用 |
 | `ERR_RECEIPTS_TRUNCATED` | `status.degraded` | 收据分片超过 256 个；`status` 只聚合按名排序的前 256 个，`counts` 与两账因此都是**下界**，不是漏算就是少算——方向安全但数字偏小 | 归档或清理旧分片，重跑 `status`；要全量就分批统计 |
 | `ERR_RECEIPTS_UNREADABLE` | `status.degraded` | 至少一个收据分片读不出来（EACCES、名为 `x.jsonl` 的目录等）；`status` 仍是**全量聚合**——健康分片照常计数——并带该码，数字因此可能不完整 | 检查 `<dshHome>/boost/receipts/`（设了 `config.dshHome` 时以它为准，否则 `$DSH_HOME`）的权限与异常条目，修复后重跑 `status`，对比修复前后计数 |
-| `ERR_SCOPE_UNKNOWN_VERSION` | `status.degraded` + `scope-get` 失败 `code`；`shadow` 也拒绝 | scope 文件版本不是 2。分两种：**v1**（带可识别的旧字段，会被读出成 `upgrade`）与**无法识别**（version 缺失或非数值，没有 `upgrade`）。读按 fail-closed 默认；写两种都拒绝 | **v1**：跑一次 `scope-set` 走显式升级，`mode`/`global`/`workspaceIds` 会被保留。**无法识别**：`scope-set` 同样拒绝，必须自己修文件（补 `"version": 2`）或把它移走后重设——插件不会替你覆盖 |
+| `ERR_SCOPE_UNKNOWN_VERSION` | `status.degraded` + `scope-get` 失败 `code`；`shadow` 对两种都拒绝 | scope 文件版本不是 2。分两种：**v1**（带可识别的旧字段，读出的 code 是它且带 `upgrade`）与**无法识别**（version 缺失或非数值，没有 `upgrade`）。读都按 fail-closed 默认 | **v1**：`scope-set` 是文档化的升级路径，会保留 `mode`/`global`/`workspaceIds` 并写成 v2（`src/scope/store.ts:318-345`、`src/tools/boost.ts` 的 `scopeSetCommand`，当前 `:1012-1023`）；`shadow` **拒绝** v1，不做隐式升级（`src/tools/boost.ts` 的 `shadowCommand`，当前 `:1033-1042`）。**无法识别**：`scope-set` 与 `shadow` **都拒绝**（`src/scope/store.ts:336-341`），必须自己修文件（补 `"version": 2`）或把它移走后重设——插件不会替你覆盖 |
 | `ERR_SCOPE_FUTURE_VERSION` | `status.degraded` + `scope-get` 失败 `code` | scope 文件版本比本插件认识的新；只读 | 升级插件；不要用旧版本覆盖 |
 | `ERR_SCOPE_PARSE_FAILED` | `status.degraded` + `scope-get` 失败 `code` | scope 文件不是合法 scope 文档（坏 JSON、非对象、数组）。读按默认；**写一律拒绝**，`scope-set` / `shadow` 不会覆盖它——文件原样留在盘上 | 修文件或删除后重设。**插件不会替你覆盖**，所以「保留现场」是默认结果，不是需要你额外做的事 |
 | `ERR_SCOPE_READ_FAILED` | `status.degraded` + `scope-get` 失败 `code` | scope 文件存在但**读或写**失败：读它、`writeAtomic` 落盘、或 `ensureDirectory` 建目录任一步出错（权限、磁盘满、IO、目录被占）；fail-closed 默认 | 查文件与目录权限、剩余磁盘空间与异常条目；修好后重试 |
@@ -322,11 +350,32 @@ tarball 会拉进 `dsh-spill-policy@rc.5` 并 `ERESOLVE`（当时实测 exit 1�
 | `ERR_BOOST_INTERNAL` | `boost` 工具失败 `code` | 未预期的内部失败（工具仍以值返回，不抛出） | 记录 `status` 与日志，按 bug 上报 |
 | `ERR_HOST_VERSION_MISMATCH` | 加载日志警告 | 解析到的宿主版本不是验证线 `0.2.2-rc.4`；插件**仍然加载**，改名 API 仍可能让它失效 | 核对 `engines.dsh` 与宿主版本；换回验证线或接受风险 |
 | `ERR_HOST_NO_AGENT_REQUEST` | 加载日志警告（一次） | `llm/stream` 前没观察到 `agent/request`；selector 路由捕获不到，多候选替换会 fail-closed | 宿主事件已废弃/移除；升级宿主，或只用单候选替换 |
+| `ERR_HOST_NO_SYSTEM_PROMPT_ASSEMBLE` | 加载日志警告（一次） | 首个 `agent/pre-step` 到达前从未观察到 `system-prompt/assemble`：协议段无法预热/打补丁（事件可能被改名或移除）。事件名同时进 `missingMounts`，所以 `status.degraded` 里看到的是 `ERR_BOOST_PARTIAL_MOUNT` | 核对宿主提示装配事件；升级宿主，或接受协议段不可用 |
+| `ERR_HOST_NO_AGENT_PRE_STEP` | 加载日志警告（一次） | 首个**主** `llm/stream` 前没有该会话的 `agent/pre-step`：步进时钟无法推进，替换不可能（带 `purpose` 的辅助请求不触发）。同样进 `missingMounts` | 升级宿主；此宿主上替换不可用，投影仍可用 |
+| `ERR_HOST_NO_MODEL_SELECTION` | 加载日志警告（一次） | `agent/pre-step` 没带 `modelSelection`，选择器路由回退到已废弃的 `agent/request` 事件（可能被移除） | 升级宿主；若 `agent/request` 也被移除，多候选替换会 fail-closed（`ERR_HOST_NO_AGENT_REQUEST`） |
 | `ERR_BOOST_ALREADY_MOUNTED` | 加载日志警告 | 重复 `apply` 命中已有装配；本次注册跳过 | 确保只装配一次；移除重复的 bundle 行/重复加载 |
 | `ERR_BOOST_SECTION_REGISTER_FAILED` | 加载日志警告 | 协议段注册失败；三个事件钩子随后**逐个独立挂载**，失败者记名（见下一行） | 查宿主提示段冲突（另一个插件占了同名段）；修好后重启 |
 | `ERR_BOOST_PARTIAL_MOUNT` | `status.degraded` | 至少一个挂载点没挂上：协议段、`registerHooks`，或三个事件钩子（`tools/post-execute` / `llm/stream` / `tools/execute`）中的任一个，或七个会话监听中的任一个；插件装配不全，对应能力（投影/替换/可见性预热）实际不可用 | 看同一次加载日志里的**记名**失败项（每个挂载点单独记）；多数是 `apply` 与 dispose/HMR 竞争，重启即可 |
 | `ERR_BOOST_TOOL_REGISTER_FAILED` | 加载日志警告 | `boost` 工具注册失败；用户失去控制面 | 查宿主 `tools` 服务与日志；修好后重启 |
 | `ERR_SCOPE_LOCK_TAKEOVER` | 日志警告（**不是**工具失败 `code`） | 锁龄超过 10 分钟，插件按接管处理（即使 pid 仍活）；只记录，不影响本次写入结果 | 无需处置；作为崩溃写者/pid 复用的证据保留 |
+
+#### 收据 `code`：跳过与重置（不进 `degraded`）
+
+这些码写在收据的 `code` 字段里，回答“这次决定为什么没做/为什么重来”；`boost status` 不把它们
+放进 `degraded`（上表才是 `degraded`），但会按 `code` 计入 `counts`。
+
+| `code` | 含义 | 操作者动作 |
+|---|---|---|
+| `substitution-unavailable` | 替换因环境原因没跑：`platform-unsupported`（win32）、`no-step`（步进时钟缺失）、`no-queue`（没有待发队列）、`queue-failed`（入队抛错，预算已花） | 看 `reason`：win32 是预期；`no-step`/`no-queue` 说明宿主事件缺失，按 `ERR_HOST_NO_AGENT_PRE_STEP` 排查 |
+| `not-admitted` | 已定价但被该步的准入判定拒绝（省得不够）；`reason:'no-estimator'` 是拿不到估算器 | 正常预算行为；`no-estimator` 见 `ERR_HOST_NO_TOKENMETER` / `ERR_HOST_NO_ESTIMATOR` |
+| `steps-exhausted` | 该步的替换预算已用完，或共享预算被别的会话持有；未入队、未派发 | 正常上限；持续出现说明预算或共享运行时配置过紧 |
+| `tool-not-whitelisted` | 计划里有候选，但没有一个在 read/grep/glob 白名单内 | 模型计划用了不可替换的工具；不需要处置 |
+| `selector-error` | 选择器调用失败（派发错误）而弃权 | 查 LLM 路由与日志；与“选择器正常但没标签”区分 |
+| `selector-abstain` | 选择器没给出标签或超时，不是调用失败 | 正常弃权；多候选时替换不提交 |
+| `dispatch-rejected` | 合成派发的工具名/参数与决定不符（防篡改检查），该次派发被拒、队列已清 | 到达的调用不是插件决定的那一个；查是否有别的写入者或中间层改了参数 |
+| `pruned-reset` / `compaction-reset` | `llm/stream` 时锚点无法验证：历史被 pruner 裁掉（`pruned-reset`），或锚定回执已不在/被压缩替换（`compaction-reset`）；队列与锚点清空后放行 | 压缩/裁剪后的预期重置；替换在下一回合重新开始 |
+| `projection-skipped:no-owner` | 投影跳过：回执没有 session id，落盘产物无法归属；原文保留 | 属降级面（与 `no-spill`/`no-footer` 同组）；查宿主是否没传 session |
+| `substitute-skipped:no-toolset` | 替换**已提交**，但该步的准入工具集不可得，无法用 `exec.toolSet` 复核；派发照常 | 可见性信号，不是失败；宿主缺 toolSet 时每次替换都会记一条 |
 
 ## 3. 20 任务回归门（人工流程；任务集与 runner 都不随包发布）
 
@@ -421,7 +470,7 @@ node scripts/shadow-report.mjs --dir "${BOOST_ROOT:-$DSH_HOME}/boost/receipts"  
 | 字段 | 含义 |
 |---|---|
 | `saveableRatio` | 只读白名单真正能兑现的替换比例：`whitelisted` 影子提交 / 全部替换决策 |
-| `byFamily` | 按**候选工具族**的命中率：`commits / decisions`。键是收据里的 `candidateTool`（门决定的族），不是刚执行的 `tool`；老收据没有该字段时回退到 `tool`。**例外**：`code:'no-candidate'` 的 skip 收据本来就没有 `candidateTool`（`src/hooks/post-execute.ts` 的 `no-candidate` 记账，当前在 1617 行），脚本按同一回退把它归到刚执行的 `tool` 的族——这些决策没有候选，`commits` 恒为 0，只抬高该族的 `decisions` 分母，所以读命中率时要知道分母含无候选决策。影子期绕过白名单，所以 bash/ssh 的潜力也计入 |
+| `byFamily` | 按**候选工具族**的命中率：`commits / decisions`。键是收据里的 `candidateTool`（门决定的族），不是刚执行的 `tool`；老收据没有该字段时回退到 `tool`。**例外**：`code:'no-candidate'` 的 skip 收据本来就没有 `candidateTool`（`src/hooks/post-execute.ts` 的 `decideSubstitution` containment 分支，当前在 1719 行），脚本按同一回退把它归到刚执行的 `tool` 的族——这些决策没有候选，`commits` 恒为 0，只抬高该族的 `decisions` 分母，所以读命中率时要知道分母含无候选决策。影子期绕过白名单，所以 bash/ssh 的潜力也计入 |
 | `candidateRecall` | 候选集召回：`commits / (commits + no-candidate)`，分母是**到达绑定/守卫判定的替换决策数**（`commit` 与 `no-candidate` 两种结局各计一次，一次决策一条，**不是**候选条数——同一决策可有多个候选）；`guard-trivial` 不提出候选，不进分母 |
 | `retrievalUpperBound` | 取回率上界：取回调用数 / 已应用投影回执数（取回回执本身不计入分母）。**只在 `projection: 'on'` 成立**：影子期只写 `kind:'shadow'` / `code:'projection-shadow'`，没有 `kind:'projection'` 回执，所以影子账上它按结构恒为 `0`，不能用它约束影子期取回损害 |
 
@@ -441,14 +490,14 @@ node scripts/shadow-report.mjs --dir "${BOOST_ROOT:-$DSH_HOME}/boost/receipts"  
 - `valueTransfer`：call-level 的逐字传递计数——位置是"下一步调用"，且上一步只有**一个**工具调用
   （回执来源唯一）；`full` 是该调用的长度 ≥ 4 的字符串参数全部逐字出现，`partial` 是未全绑定但至少一个
   ≥ 8 字符的参数逐字出现；
-- 两条数值序列：每个请求的 `totalTokens` 与每个回执的字符数（中位数/分位数需要，仍然不含正文）。
+- 两条数值序列：每个请求的 `requestTokens` 与每个回执的 `receiptChars`（中位数/分位数需要，仍然不含正文）。
 
 快照按**一个会话一行**序列化：数组内的每个 session 对象占一行，diff 里可逐条 review；解析后的数字与
 单行 JSON 完全相同。
 
 复算（手工可重复，不碰会话目录；CI 只做发布门 `ci` + `verify:package`，不跑统计复算，见 §6.1）。
 机器可读的管道用下面两种之一：不带 `--silent` 的 `npm run stats` 会把 npm 的
-`> dsh-boost@0.1.1 stats` 横幅打进 **stdout**（stderr 重定向拦不住），直接接 `jq` 之类会破：
+`> dsh-boost@0.1.2 stats` 横幅打进 **stdout**（stderr 重定向拦不住），直接接 `jq` 之类会破：
 
 ```bash
 npm run --silent stats
@@ -516,10 +565,10 @@ DSH 宿主后的行为、§3 的 20 任务回退流程（人工）、§5 的统�
 
 `--ignore-scripts` and `npm publish <tgz>` skip the gate entirely; the only defence is running
 `npm run verify:package` on the commit you tag. 具体地，`npm publish --ignore-scripts` 不跑
-`prepublishOnly`，`npm publish ./dsh-boost-0.1.1.tgz` 对 tarball 发布也不跑包内任何脚本；两者都能
+`prepublishOnly`，`npm publish ./dsh-boost-0.1.2.tgz` 对 tarball 发布也不跑包内任何脚本；两者都能
 把没有 `dist/index.js` 的 8 文件空包推到 registry（本机 npm 11.19.1 实测：无 `dist/` 的干净 clone
 上 `npm publish --dry-run --ignore-scripts` exit 0，8 files / 29,532 字节，约 29.5 kB；该数是按
-0.1.1 的载荷量的，两份 README 改动后会变）。`prepublishOnly` 只保护
+0.1.1 的载荷量的，0.1.2 改了两份 README 与版本号，数字会略有出入）。`prepublishOnly` 只保护
 “在这个 checkout 里、不带 flags 的 `npm publish`”。npm **确实**有 `postpack` 钩子：它在 publish
 时执行，非零退出会中止发布；但 `postpack` 看不到最终上传的那个 tarball，所以它不能替代对发布产物
 的验收（而且 `--ignore-scripts` 与 `npm publish <tgz>` 会连它一起跳过）。真正的门仍是
@@ -532,16 +581,16 @@ DSH 宿主后的行为、§3 的 20 任务回退流程（人工）、§5 的统�
 - [ ] `npm ci` 成功（lockfile 与 `package.json` 一致），开发树可复现
 - [ ] 在**要打 tag 的那个 commit** 上 `npm run verify:package` exit 0（§1）：exact allowlist（无多余/缺失条目，含 `dsh.bundle.patch` 指向的文件）、`dist/index.js` guard、所有 `exports`/`main`/`types` 与 `dsh.bundle.patch` 目标存在、主安装 `--ignore-scripts` 与次安装（生命周期脚本启用）都成功、两次安装的 import/require/locale 探针通过（en 与 zh）、tiny TS consumer 的 `tsc --noEmit` 通过（缺/错 `.d.ts` 会红）
 - [ ] 该 commit 的 `git status --short` 为空；`verify:package` 只证明工作树或给定 tarball，不证明 commit 状态
-- [ ] `prepublishOnly`（`npm run ci && npm run verify:package`）在发布前整体跑过一遍；明确知道 `npm publish --ignore-scripts` 和 `npm publish <tgz>` 会绕过它（§6.3）
+- [ ] `prepublishOnly`（`npm run ci && npm run verify:package -- --prebuilt`）在发布前整体跑过一遍；明确知道 `npm publish --ignore-scripts` 和 `npm publish <tgz>` 会绕过它（§6.3）
 - [ ] CI 在同一个 commit 上绿；明确知道它只跑 `ci` + `verify:package`、不跑 `npm publish`，`v*` tag 不会上传（§6.1）
-- [ ] `dsh plugin --profile <name> add dsh-boost@^0.1.1 --registry=https://registry.npmjs.org/`（或本地路径/tarball）成功，`--dump-config` 里有 `id: dsh-boost` 行
+- [ ] `dsh plugin --profile <name> add dsh-boost@^0.1.2 --registry=https://registry.npmjs.org/`（或本地路径/tarball）成功，`--dump-config` 里有 `id: dsh-boost` 行
 - [ ] 测试工作区已写入 `scope.workspaceIds`，`shadow: true`、`projection: 'on'` 经 `boost status` 确认
 - [ ] no-tokenmeter 门按 §2.1 承担：单元测试注入 `hasTokenMeter: false` 锁定预期（替换拒绝、投影可用、账目 `unknown`、`ERR_HOST_NO_TOKENMETER`）；活宿主复核仅在确要部署缺该服务的宿主时做，先验健康态，再把 `shadow` 设为 `false` 验拒绝收据（影子模式下只有 `status.degraded` 可观察，不能算过门）
 - [ ] no-spill 门按 §2.2 完整跑过：移除的是 spill **后端**（`dsh-spill-local`），观察到超限回执不投影、`projection-skipped:no-spill`、`ERR_HOST_NO_SPILL`；只移除 `dsh-spill-policy`（宿主的 token 预算保留策略插件，从宿主树解析）的话得到的是 `projection-skipped:no-footer` 与 `ERR_HOST_NO_SPILL_NOTICE`
 - [ ] 两条降级路径都保留 status/收据证据；验收中出现的每个稳定码都按 §2.5 的矩阵处置并留证（含 `ERR_HOST_NO_SPILL_NOTICE` / `ERR_HOST_VERSION_MISMATCH` / `ERR_BOOST_SECTION_REGISTER_FAILED`，以及已有的 `ERR_RECEIPTS_UNREADABLE` / `ERR_RECEIPTS_TRUNCATED` / `ERR_HOST_COMPLETE_SECTION` / `ERR_SCOPE_ABORTED` / `ERR_HOST_SPILL_FAILING` / `ERR_BOOST_PARTIAL_MOUNT`）；同时确认 `status.data.receipts_stopped` 为 `false`（为 `true` 表示收据已连续写失败 3 次、替换被整体拒绝）
 - [ ] 第一次开启替换的真实回合检查 `content[].thinking` 400（不是影子周）；若有，替换在该路由关闭
 - [ ] `npm run --silent stats` 在干净 clone 上可复算 §5.2 的聚合（口径对应设计稿 §2.1）
-- [ ] 发布侧：`npm publish` 走 `publishConfig.registry`（registry.npmjs.org、public）；用 `npm view dsh-boost dist-tags --registry=https://registry.npmjs.org/` 确认 `latest` 是 `package.json` 里的版本（registry 上另有 npm 自动创建的 `0.0.0-stage` 占位版本，见 §2.4）；**必须带 `--registry`**，否则读到的是镜像的旧 `latest`；安装规格是 `dsh-boost@^0.1.1`
+- [ ] 发布侧：`npm publish` 走 `publishConfig.registry`（registry.npmjs.org、public）；用 `npm view dsh-boost dist-tags --registry=https://registry.npmjs.org/` 确认 `latest` 是 `package.json` 里的版本（registry 上另有 npm 自动创建的 `0.0.0-stage` 占位版本，见 §2.4）；**必须带 `--registry`**，否则读到的是镜像的旧 `latest`；安装规格是 `dsh-boost@^0.1.2`
 
 **未交付、因此不在上表可勾选范围：§3 的 20 任务门，以及同一节里的取回完整性检查。**
 `test/regression/` 只有 `.gitkeep`——本仓库不附带任务集，也不提供 `test/regression/run.mjs`
