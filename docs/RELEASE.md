@@ -323,7 +323,8 @@ for p in $pkgs; do diff -r "$d/0.2.2-rc.4/$p/lib" "$d/0.2.2-rc.5/$p/lib" >/dev/n
 `boost status` 的 `degraded` 数组与 `boost` 工具调用的失败 `code` 都是稳定契约；日志里的稳定码
 是第三类观察面，不是工具返回值。§2.1、§2.2 是可构造的门的验收细则；本表是操作者看到某个码时的
 速查。收据流里的 `projection-skipped:no-spill` / `projection-skipped:no-footer` 是**输入**，
-分别映射成 `ERR_HOST_NO_SPILL` / `ERR_HOST_NO_SPILL_NOTICE`，本身不是稳定码。
+分别映射成 `ERR_HOST_NO_SPILL` / `ERR_HOST_NO_SPILL_NOTICE`，本身不是稳定码。本表的代码行号以
+0.1.2 的发布 commit `3ec82f3` 为准；源码继续演进时按函数名/命令名定位（行号可能已移动）。
 
 | 码 | 观察面 | 可观察症状 | 操作者动作 |
 |---|---|---|---|
@@ -337,7 +338,7 @@ for p in $pkgs; do diff -r "$d/0.2.2-rc.4/$p/lib" "$d/0.2.2-rc.5/$p/lib" >/dev/n
 | `ERR_HOST_COMPLETE_SECTION` | `status.degraded` | 宿主的 `complete: true` 提示段在装配瀑布之后替换了整个系统提示，协议段没有到达出站请求；受影响请求上替换与投影 fail-closed（会话被判不可见），工作区明明可见插件却不动作 | 找出宿主提示配置里覆盖瀑布装配的 complete 段（通常属于另一个插件）；移除它，或接受这些请求上替换/投影不可用 |
 | `ERR_RECEIPTS_TRUNCATED` | `status.degraded` | 收据分片超过 256 个；`status` 只聚合按名排序的前 256 个，`counts` 与两账因此都是**下界**，不是漏算就是少算——方向安全但数字偏小 | 归档或清理旧分片，重跑 `status`；要全量就分批统计 |
 | `ERR_RECEIPTS_UNREADABLE` | `status.degraded` | 至少一个收据分片读不出来（EACCES、名为 `x.jsonl` 的目录等）；`status` 仍是**全量聚合**——健康分片照常计数——并带该码，数字因此可能不完整 | 检查 `<dshHome>/boost/receipts/`（设了 `config.dshHome` 时以它为准，否则 `$DSH_HOME`）的权限与异常条目，修复后重跑 `status`，对比修复前后计数 |
-| `ERR_SCOPE_UNKNOWN_VERSION` | `status.degraded` + `scope-get` 失败 `code`；`shadow` 对两种都拒绝 | scope 文件版本不是 2。分两种：**v1**（带可识别的旧字段，读出的 code 是它且带 `upgrade`）与**无法识别**（version 缺失或非数值，没有 `upgrade`）。读都按 fail-closed 默认 | **v1**：`scope-set` 是文档化的升级路径，会保留 `mode`/`global`/`workspaceIds` 并写成 v2（`src/scope/store.ts:318-345`、`src/tools/boost.ts` 的 `scopeSetCommand`，当前 `:1012-1023`）；`shadow` **拒绝** v1，不做隐式升级（`src/tools/boost.ts` 的 `shadowCommand`，当前 `:1033-1042`）。**无法识别**：`scope-set` 与 `shadow` **都拒绝**（`src/scope/store.ts:336-341`），必须自己修文件（补 `"version": 2`）或把它移走后重设——插件不会替你覆盖 |
+| `ERR_SCOPE_UNKNOWN_VERSION` | `status.degraded` + `scope-get` 失败 `code`；`shadow` 对两种都拒绝 | scope 文件版本不是 2。分两种：**v1**（带可识别的旧字段，读出的 code 是它且带 `upgrade`）与**无法识别**（version 缺失或非数值，没有 `upgrade`）。读都按 fail-closed 默认 | **v1**：`scope-set` 是文档化的升级路径，会保留 `mode`/`global`/`workspaceIds` 并写成 v2（`src/scope/store.ts:318-345`、`src/tools/boost.ts` 的 `scopeSetCommand`，`3ec82f3` 的 `:1012-1023`）；`shadow` **拒绝** v1，不做隐式升级（`src/tools/boost.ts` 的 `shadowCommand`，`3ec82f3` 的 `:1033-1042`）。**无法识别**：`scope-set` 与 `shadow` **都拒绝**（`src/scope/store.ts:336-341`），必须自己修文件（补 `"version": 2`）或把它移走后重设——插件不会替你覆盖 |
 | `ERR_SCOPE_FUTURE_VERSION` | `status.degraded` + `scope-get` 失败 `code` | scope 文件版本比本插件认识的新；只读 | 升级插件；不要用旧版本覆盖 |
 | `ERR_SCOPE_PARSE_FAILED` | `status.degraded` + `scope-get` 失败 `code` | scope 文件不是合法 scope 文档（坏 JSON、非对象、数组）。读按默认；**写一律拒绝**，`scope-set` / `shadow` 不会覆盖它——文件原样留在盘上 | 修文件或删除后重设。**插件不会替你覆盖**，所以「保留现场」是默认结果，不是需要你额外做的事 |
 | `ERR_SCOPE_READ_FAILED` | `status.degraded` + `scope-get` 失败 `code` | scope 文件存在但**读或写**失败：读它、`writeAtomic` 落盘、或 `ensureDirectory` 建目录任一步出错（权限、磁盘满、IO、目录被占）；fail-closed 默认 | 查文件与目录权限、剩余磁盘空间与异常条目；修好后重试 |
@@ -472,7 +473,7 @@ node scripts/shadow-report.mjs --dir "${BOOST_ROOT:-$DSH_HOME}/boost/receipts"  
 | 字段 | 含义 |
 |---|---|
 | `saveableRatio` | 只读白名单真正能兑现的替换比例：`whitelisted` 影子提交 / 全部替换决策 |
-| `byFamily` | 按**候选工具族**的命中率：`commits / decisions`。键是收据里的 `candidateTool`（门决定的族），不是刚执行的 `tool`；老收据没有该字段时回退到 `tool`。**例外**：`code:'no-candidate'` 的 skip 收据本来就没有 `candidateTool`（`src/hooks/post-execute.ts` 的 `decideSubstitution` containment 分支，当前在 1719 行），脚本按同一回退把它归到刚执行的 `tool` 的族——这些决策没有候选，`commits` 恒为 0，只抬高该族的 `decisions` 分母，所以读命中率时要知道分母含无候选决策。影子期绕过白名单，所以 bash/ssh 的潜力也计入 |
+| `byFamily` | 按**候选工具族**的命中率：`commits / decisions`。键是收据里的 `candidateTool`（门决定的族），不是刚执行的 `tool`；老收据没有该字段时回退到 `tool`。**例外**：`code:'no-candidate'` 的 skip 收据本来就没有 `candidateTool`（`src/hooks/post-execute.ts` 的 `decideSubstitution` containment 分支，`3ec82f3` 的 `:1719`），脚本按同一回退把它归到刚执行的 `tool` 的族——这些决策没有候选，`commits` 恒为 0，只抬高该族的 `decisions` 分母，所以读命中率时要知道分母含无候选决策。影子期绕过白名单，所以 bash/ssh 的潜力也计入 |
 | `candidateRecall` | 候选集召回：`commits / (commits + no-candidate)`，分母是**到达绑定/守卫判定的替换决策数**（`commit` 与 `no-candidate` 两种结局各计一次，一次决策一条，**不是**候选条数——同一决策可有多个候选）；`guard-trivial` 不提出候选，不进分母 |
 | `retrievalUpperBound` | 取回率上界：取回调用数 / 已应用投影回执数（取回回执本身不计入分母）。**只在 `projection: 'on'` 成立**：影子期只写 `kind:'shadow'` / `code:'projection-shadow'`，没有 `kind:'projection'` 回执，所以影子账上它按结构恒为 `0`，不能用它约束影子期取回损害 |
 
