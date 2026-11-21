@@ -64,6 +64,26 @@ export function shouldTruncate(text: string, params: ProjectionParams): boolean 
 }
 
 /** Cut `text` down to its head and tail windows, or `null` when that is not worth it. */
+/** The marker lines the design's §5.4-4 says must survive any projection. */
+const PRESERVED_SIGNAL = /^(?:\[exit code: -?\d+\]|exit_code\s*[:=]\s*-?\d+|is_error\s*[:=]\s*(?:true|false))$/i
+
+/**
+ * Marker lines from the omitted middle, capped so a pathological receipt cannot
+ * make the projection longer than what it replaced.
+ */
+function preservedSignals(middle: readonly string[]): string[] {
+  if (middle.length === 0) return []
+  const out: string[] = []
+  for (const line of middle.join('').split('\n')) {
+    const trimmed = line.trim()
+    if (trimmed === '' || !PRESERVED_SIGNAL.test(trimmed)) continue
+    if (out.includes(trimmed)) continue
+    out.push(trimmed)
+    if (out.length === 8) break
+  }
+  return out
+}
+
 export function truncate(text: string, params: ProjectionParams): Truncation | null {
   // UTF-16 length upper-bounds the code-point count: when it does not exceed
   // the trigger, neither can the real count.
@@ -87,11 +107,18 @@ export function truncate(text: string, params: ProjectionParams): Truncation | n
   const omittedCodePoints = codePoints.length - params.headChars - params.tailChars
   const omittedBytes = beforeBytes - Buffer.byteLength(head, 'utf8') - Buffer.byteLength(tail, 'utf8')
 
+  // Signals a reader must never lose, even when they sit in the middle that the
+  // two windows cut away: an error flag, an exit code, the `[exit code: N]`
+  // suffix the tool executor appends (design §5.4-4). They are re-emitted after
+  // the tail so the projection stays append-only from the reader's view.
+  const preserved = preservedSignals(codePoints.slice(params.headChars, codePoints.length - params.tailChars))
+
   // The replacement this layer can render: the head line plus the two windows.
   // The apply stage inserts the spill footer between the windows; that footer is
   // not known here, so this is a lower bound on the final projected length.
   const header = headLine(codePoints.length, Array.from(head).length, Array.from(tail).length)
-  const after = `${header}\n${head}\n${tail}`
+  const signals = preserved.length === 0 ? '' : `\n${preserved.join('\n')}`
+  const after = `${header}\n${head}\n${tail}${signals}`
   // A cut that would not shrink the receipt (misconfigured windows, or windows
   // that together swallow the whole text) is not worth taking; fall back to the
   // original rather than throwing on unvalidated config.

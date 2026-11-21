@@ -434,6 +434,9 @@ type DecisionContext = {
 /** Skip reasons that mean the projection machinery degraded, not "nothing to cut". */
 const PROJECTION_DEGRADATIONS: ReadonlySet<string> = new Set([
   'no-spill',
+  // `no-owner` is emitted by `projectApply`'s direct-call contract, not by this
+  // hook (design §5.4): the hook only calls it once an owner is known. Kept so
+  // a future caller cannot silently lose the mapping.
   'no-owner',
   'projection-skipped:no-footer',
   'spill-failed',
@@ -1003,21 +1006,23 @@ async function recordProjectionRetrieval(
 // ---------------------------------------------------------------------------
 
 /**
- * The conservative saving of skipping one model step: the last real request's
- * replayed context (`input + cacheRead`).
+ * The saving of skipping one model step: the last real request's `totalTokens`
+ * (`input + cacheRead + output`), which is what design §5.3 defines it as.
  *
- * The step that is skipped would have replayed at least this much: the context
- * only grows as receipts enter it. A missing ledger or sample is 0, never an
- * interpolation, so admission falls back to the model when it cannot measure
- * (design §5.3: measured, not estimated).
+ * All three parts are skipped when the model does not run: the replayed context
+ * is not sent and the response is not generated. The context only grows as
+ * receipts enter it, so the last request is a lower bound. A missing ledger or
+ * sample is 0, never an interpolation, so admission falls back to the model when
+ * it cannot measure (design §5.3: measured, not estimated).
  */
 function savedTokensOf(deps: HookDeps, sessionId: string): number {
   try {
     const last = sessionUsage(deps, sessionId)?.last()
     if (last === undefined) return 0
-    const { input, cacheRead } = last
-    if (!Number.isFinite(input) || !Number.isFinite(cacheRead) || input < 0 || cacheRead < 0) return 0
-    const total = input + cacheRead
+    const { input, cacheRead, output } = last
+    const parts = [input, cacheRead, output]
+    if (parts.some((part) => !Number.isFinite(part) || part < 0)) return 0
+    const total = input + cacheRead + output
     return Number.isFinite(total) ? total : 0
   } catch {
     return 0

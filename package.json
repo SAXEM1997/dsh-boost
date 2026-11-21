@@ -40,7 +40,8 @@
     "stats": "node scripts/session-stats.mjs",
     "ci": "npm run typecheck && npm test && npm run build",
     "verify:package": "node scripts/verify-package.mjs",
-    "prepublishOnly": "npm run ci && npm run verify:package -- --prebuilt"
+    "prepublishOnly": "npm run ci && npm run verify:package -- --prebuilt",
+    "prepare": "node scripts/prepare-build.mjs"
   },
   "devDependencies": {
     "@deepseek-ai/dsh-llm": "0.2.2-rc.4",

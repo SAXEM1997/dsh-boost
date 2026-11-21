@@ -204,3 +204,20 @@ test('tailChars: 0 不把整段文本当作 tail 复制（row 69）', () => {
   assert.equal(t.omittedBytes, Buffer.byteLength('o'.repeat(95), 'utf8'))
   assert.equal(t.after, `${renderHeadLine(t)}\nhhhhh\n`)
 })
+
+test('a marker inside the omitted middle survives the projection (design §5.4-4)', () => {
+  // The two windows cut the middle away; an exit code buried there is exactly
+  // the signal a reader must not lose.
+  const text = `head line\n${'x'.repeat(400)}\n[exit code: 3]\n${'y'.repeat(400)}\ntail line`
+  const result = truncate(text, { triggerChars: 100, headChars: 40, tailChars: 40 })
+  assert.ok(result)
+  assert.ok(result.after.includes('[exit code: 3]'), 'the exit code must survive')
+  assert.ok(result.after.includes('tail line'), 'the tail window is still there')
+})
+
+test('a marker outside the middle is not duplicated', () => {
+  const text = `[exit code: 0]\n${'x'.repeat(400)}\ntail`
+  const result = truncate(text, { triggerChars: 100, headChars: 40, tailChars: 40 })
+  assert.ok(result)
+  assert.equal(result.after.split('[exit code: 0]').length - 1, 1)
+})

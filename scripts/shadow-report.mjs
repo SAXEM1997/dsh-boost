@@ -16,15 +16,17 @@
  *   **candidate's** family (`candidateTool`, written by the shadow receipt),
  *   not the tool the model happened to execute; pre-schema receipts without
  *   the field fall back to `tool`.
- * - `candidateRecall` — the candidate set's recall. The design's §6.1 label is
- *   "候选集召回率": it asks how often the candidate set the plan **offered**
- *   contained a viable next call. The denominator is therefore the offered
- *   population (`commit` + `no-candidate`, the two shadow outcomes that
- *   require a non-trivial candidate), not "candidates that committed" — the
- *   latter would always be 1 and is a precision, not a recall. `guard-trivial`
- *   is excluded because an empty/trivial plan offered no candidate at all.
- * - `retrievalUpperBound` — retrieval calls / applied projection receipts
- *   (design §6.1's damage proxy, and the plan's "取回调用数 / 投影回执数").
+ * - `candidateRecall` — **not** recall: the commit yield. `commits /
+ *   (commits + no-candidate)`, i.e. of the receipts that offered a non-trivial
+ *   candidate set, how many produced a commit. Candidate-set recall — did the
+ *   plan offer the call the model actually made next? — is unmeasured: shadow
+ *   mode never compares the candidate set to the model's next call (design
+ *   §6.1). The name is kept for receipt compatibility; read it as a yield.
+ * - `retrievalUpperBound` — retrieval calls / applied projection receipts.
+ *   Despite the name this is a **lower bound on observed retrieval**, not an
+ *   upper bound on damage: it counts only exact locator hits, and a reader who
+ *   never finds the locator is invisible here (design §6.1). Treat it as "was
+ *   the original ever fetched", not "how much was lost".
  *   A retrieval receipt is itself a cost line, so it is not part of the
  *   projection denominator; otherwise one retrieval would read as 1/2.
  *   **This figure is on-mode-only.** Only `projection:'on'` writes

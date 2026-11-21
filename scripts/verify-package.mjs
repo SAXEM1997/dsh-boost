@@ -241,6 +241,10 @@ function run(command, args, options) {
     encoding: 'utf8',
     maxBuffer: 64 * 1024 * 1024,
     env: childEnv(),
+    // `.cmd` shims cannot be launched by execFile without a shell (Node docs,
+    // "Spawning .bat and .cmd files on Windows"), so the win32 branch above
+    // would otherwise make this gate fail on every Windows machine.
+    shell: process.platform === 'win32',
     ...options,
   })
 }
