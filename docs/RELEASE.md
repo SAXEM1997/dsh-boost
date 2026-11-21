@@ -101,7 +101,34 @@ npm run dev:ui         # 独立开发页，不需要宿主
   模块表里只有 `react/jsx-runtime`——文件在桩里能加载，进设置页就抛 `Cannot find module`。
 
 `test/client-bundle.test.ts` 用 `NODE_ENV=test` 构建并把产物**执行**在宿主的加载器桩上（不是
-正则匹配源码），所以上面两条都有测试钉住。
+正则匹配源码），所以上面两条都有测试钉住；它还断言 `apply` 确实向 `settings.section` 认领了座位
+（`name`/`id`/`order` 三者是契约，T5 只改 `label` 的**文本**）。
+
+### 1.0.1 两条不变式
+
+本包的发布门守两条不变式，**各自对应一套产物**，不能互相替代：
+
+1. **服务端**：`dist/` 里不得出现对 `@deepseek-ai/*` 的**静态** import。宿主包只以精确钉版的
+   devDependency 存在，装机时不会带出宿主树；静态 import 会让消费方在缺宿主树时
+   `ERR_MODULE_NOT_FOUND`。守卫是 `assertDeclarationsDoNotImportHostTypes`（声明文件侧）与
+   消费方的 `typecheck-no-host-stubs`（运行与类型两侧）。
+2. **客户端**：`lib/client.js` **只允许**通过 `require` 解析宿主平台模块，且必须带加载器信封。
+   宿主按 URL 把它当经典脚本加载，从不经过 Node 的解析器——所以任何 install 探针都看不见它能否
+   加载，只能在打包后的字节上断言。守卫是 `assertClientBundleText`：信封、`id` 等于包名、
+   `factory`、`apply`/`inject` 导出、`require("react…")` 存在、无内联 React、无
+   `jsx-dev-runtime`。
+
+第 2 条在门里是 `client-bundle-structure` 一项。它为什么必须单独存在：这条路径上的每一种坏法
+（漏信封、`id` 写错、React 被打进产物、用了 dev 的 JSX 转换）都会让文件在桩里**正常加载**，然后
+在设置页里失败。`test/verify-client.test.ts` 用构造产物逐个打红这六种坏法。
+
+端到端复现其中一种（`--prebuilt` 直接打当前树，不重建）：
+
+```bash
+sed -i '1s|window.__ModuleLoader__.load({|(function () {|' lib/client.js
+npm run verify:package -- --prebuilt   # exit 1，消息点名「no ... envelope」
+git checkout lib/client.js             # 或 npm run build:client 重建
+```
 
 ### 1.1 手工回退与维护
 

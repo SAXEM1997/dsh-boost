@@ -80,7 +80,7 @@ import {
 } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join, relative, resolve, sep } from 'node:path'
-import { fileURLToPath } from 'node:url'
+import { fileURLToPath, pathToFileURL } from 'node:url'
 import { JSON_SCHEMA, load as loadYaml } from 'js-yaml'
 import semver from 'semver'
 
@@ -327,6 +327,55 @@ function clientBundleOf(manifest, label) {
     )
   }
   return normalized
+}
+
+/**
+ * The structural contract of the browser half, checked against the text the
+ * tarball actually carries.
+ *
+ * Every assertion here corresponds to a way the file loads in a stub and then
+ * fails in the settings page, which is the one failure mode no install probe
+ * can see: the host resolves `./client` by URL, never through Node's resolver.
+ *
+ * Exported so a test can drive it with constructed artifacts; the gate calls it
+ * on the packed file. `id` is the package name, so a rename cannot pass.
+ */
+export function assertClientBundleText(text, id) {
+  if (!/window\.__ModuleLoader__\.load\(\{/.test(text)) {
+    throw new Error(
+      'client bundle has no `window.__ModuleLoader__.load({...})` envelope: ' +
+        'the host loads it as a classic script, so without the envelope nothing registers',
+    )
+  }
+  if (!text.includes(`id: ${JSON.stringify(id)}`)) {
+    throw new Error(`client bundle does not register under id ${JSON.stringify(id)}`)
+  }
+  if (!/factory:\s*\(?\s*\w+\s*\)?\s*=>/.test(text)) {
+    throw new Error('client bundle envelope has no `factory` taking the host module resolver')
+  }
+  for (const exported of ['apply', 'inject']) {
+    if (!new RegExp(`exports\\.${exported}\\s*=`).test(text)) {
+      throw new Error(`client bundle does not export \`${exported}\``)
+    }
+  }
+  if (!/\b\w+\("react(\/[^"]*)?"\)/.test(text)) {
+    throw new Error(
+      'client bundle never resolves React through the host module resolver: ' +
+        'the shell supplies one shared React instance and a second copy breaks hooks',
+    )
+  }
+  if (/Symbol\.for\(\s*["'`]react\./.test(text)) {
+    throw new Error(
+      'client bundle inlines React source (found `Symbol.for("react.…")`): ' +
+        'React must be external so the shell\'s single instance is used',
+    )
+  }
+  if (text.includes('jsx-dev-runtime')) {
+    throw new Error(
+      'client bundle requires `react/jsx-dev-runtime`: the build did not run with a ' +
+        'production JSX transform, and the host module table has no dev runtime',
+    )
+  }
 }
 
 /**
@@ -754,6 +803,16 @@ function verify({ tarball, tarballName, packed, prebuilt }) {
   const declarations = assertDeclarationsDoNotImportHostTypes(tarball, listed)
   checks.push({ name: 'declarations-host-free', install: null, files: declarations.length })
 
+  // The browser half is resolved by URL, never through Node's resolver, so no
+  // install probe above can see whether it loads. Its structure is asserted on
+  // the packed bytes instead.
+  const clientBundle = clientBundleOf(pkg, 'package.json')
+  if (clientBundle !== undefined) {
+    const text = run('tar', ['-xOzf', tarball, `package/${clientBundle}`], { cwd: root })
+    assertClientBundleText(text, pkg.name)
+    checks.push({ name: 'client-bundle-structure', install: null })
+  }
+
   const work = mkdtempSync(join(tmpdir(), 'dsh-boost-verify-'))
   let ok = false
   try {
@@ -885,9 +944,16 @@ function main() {
   }
 }
 
-try {
-  main()
-} catch (error) {
-  console.error(`verify-package: ${error instanceof Error ? error.message : String(error)}`)
-  process.exit(1)
+// Guarded so a test can import `assertClientBundleText` without running the
+// whole gate (which installs the tarball twice).
+const invokedDirectly =
+  process.argv[1] !== undefined && import.meta.url === pathToFileURL(process.argv[1]).href
+
+if (invokedDirectly) {
+  try {
+    main()
+  } catch (error) {
+    console.error(`verify-package: ${error instanceof Error ? error.message : String(error)}`)
+    process.exit(1)
+  }
 }

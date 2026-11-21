@@ -657,7 +657,7 @@ The source and docs live in the repository at
 | [Design](docs/superpowers/specs/2026-11-18-dsh-token-efficiency-design.md) | Goals, evidence, architecture, contracts, measurement, risks, release shape |
 | [Host contracts appendix](docs/superpowers/plans/2026-11-18-host-contracts.md) | Interface reference copied line by line from the host sources |
 | [Three-tier delegation research](docs/research/2026-11-18-three-tier-delegation.md) | 25 primary sources on caching, routing thresholds, compression, and verification |
-| [Release acceptance](docs/RELEASE.md) | The one-command `npm run verify:package` acceptance, the zero-peerDependencies state and install spec, the degradation-code matrix, the 20-task regression procedure (manual; the task set, runner, and locator-retrieval integrity check all remain undelivered), and the shadow week and stats recompute |
+| [Release acceptance](docs/RELEASE.md) | The one-command `npm run verify:package` acceptance, the two release-gate invariants (no static host import in `dist/`; the client artifact resolves host modules only through `require` and must carry the loader envelope), the zero-peerDependencies state and install spec, the degradation-code matrix, the 20-task regression procedure (manual; the task set, runner, and locator-retrieval integrity check all remain undelivered), and the shadow week and stats recompute |
 
 ## License
 

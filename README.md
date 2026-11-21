@@ -543,7 +543,7 @@ spill，报它只会制造噪音）；但**收据通道**不看当前模式—�
 | [设计稿](docs/superpowers/specs/2026-11-18-dsh-token-efficiency-design.md) | 目标、证据、架构、契约、度量、风险、发布形态 |
 | [宿主契约附录](docs/superpowers/plans/2026-11-18-host-contracts.md) | 逐条抄自宿主源码的接口准绳 |
 | [三层委派研究](docs/research/2026-11-18-three-tier-delegation.md) | 缓存、路由阈值、压缩、校验的 25 条一手来源 |
-| [发布验收](docs/RELEASE.md) | `npm run verify:package` 一条命令验收、零 peerDependencies 现状与安装规格、降级码矩阵、20 任务回退流程（人工；任务集、runner 与取回完整性检查均未交付）、影子周与统计复算 |
+| [发布验收](docs/RELEASE.md) | `npm run verify:package` 一条命令验收、两条发布门不变式（服务端 `dist/` 零静态宿主 import；客户端产物只经 `require` 解析宿主模块且必须带加载器信封）、零 peerDependencies 现状与安装规格、降级码矩阵、20 任务回退流程（人工；任务集、runner 与取回完整性检查均未交付）、影子周与统计复算 |
 
 ## 许可证
 
