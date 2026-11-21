@@ -8,16 +8,18 @@
  * - `tools/post-execute` first gates on the same cached scope judgement the
  *   protocol section reads, then canonicalises the result and runs a
  *   conservative invalidation check. It files the arriving receipt under
- *   `'root'`, works the substitution decision (`decide` → admission → pending
- *   queue / shadow receipt / fallback), then the double-projection guard, and
- *   finally projects the receipt when the scope document asks for it. Order is
- *   fixed: `next() → scope gate → canonicalise → invalidate → decide →
- *   (shadow receipt | admit and enqueue | fallback) → double-projection guard →
- *   projection → return the decision` (plan §Task 23b). A call with no
- *   `exec.agent` is not the plugin's to inspect: the downstream decision is
- *   returned untouched and a `skip:no-scope` receipt keeps the pass visible
- *   (design §5.5). A call carrying `exec.parent` is a PTC inner dispatch and
- *   returns before any of this: it is not the step's root receipt.
+ *   `'root'`, then — only when the decision leaves that receipt visible
+ *   (`projectionTargetOf`) — works the substitution decision (`decide` →
+ *   admission → pending queue / shadow receipt / fallback), then the
+ *   double-projection guard, and finally projects the receipt when the scope
+ *   document asks for it. Order is fixed: `next() → scope gate → canonicalise
+ *   → invalidate → visibility gate → decide → (shadow receipt | admit and
+ *   enqueue | fallback) → double-projection guard → projection → return the
+ *   decision` (plan §Task 23b). A call with no `exec.agent` is not the
+ *   plugin's to inspect: the downstream decision is returned untouched and a
+ *   `skip:no-scope` receipt keeps the pass visible (design §5.5). A call
+ *   carrying `exec.parent` is a PTC inner dispatch and returns before any of
+ *   this: it is not the step's root receipt.
  * - `llm/stream` is the model-request waterfall. Its body lives in
  *   `./llm-stream.ts` (Task 23c-1) and is re-exported below: it lets the
  *   plugin's own selector request through untouched, then answers a pending
@@ -1248,6 +1250,10 @@ async function settleRollover(deps: HookDeps, sessionId: string, turn: number): 
     candidateId,
     ...(dispatched.evidence ?? {}),
     saved_input_tokens: settled.saved_input_tokens,
+    // Row 7: the same pair of samples also yields the lower estimate; the
+    // settled line is the only place a measured saving exists, so both numbers
+    // travel together.
+    avoided_total_tokens: settled.avoided_total_tokens,
     cache_hit_delta: settled.cache_hit_delta,
     output_tokens: settled.output_tokens,
   })
@@ -1637,6 +1643,13 @@ async function decideSubstitution(
       ...(admission === undefined ? {} : { admitted: admission }),
     })
   } catch {
+    // A throwing gate silently disabled substitution for this receipt, so make
+    // it visible in `status.counts` (review row 24). The plan was already
+    // consumed above; nothing can fire later from this failure.
+    await appendReceipt(
+      deps,
+      ledgerEntry(ctx, 'skip', 'substitute-skipped:gate-error', { stepId: 'root' }),
+    )
     return
   }
 
@@ -2119,19 +2132,35 @@ async function projectDecision(
  * The decision + projection stage.
  *
  * Both seams live in one place so the listener's order is visible in one
- * function: decide, then the double-projection guard, then project. A shadow
- * substitution does not stop the projection: the two switches are independent
- * (design §5.2-5), and in projection-shadow mode the projection writes only
- * its accounting line.
+ * function: the receipt-visibility gate, then decide, then the
+ * double-projection guard, then project. A shadow substitution does not stop
+ * the projection: the two switches are independent (design §5.2-5), and in
+ * projection-shadow mode the projection writes only its accounting line.
  */
 async function applyDecision(
   deps: HookDeps,
   decision: PostExecuteDecision,
   ctx: DecisionContext,
 ): Promise<PostExecuteDecision> {
+  // Substitution is only legitimate while the receipt is what the model sees.
+  // `decide` and its guards were evaluated against `ctx.receipt.text`; a
+  // `block`, or an `accept` carrying a replacement `value`, hides that text, so
+  // a commit would dispatch a call whose evidence the model never received
+  // (review row 11). `projectionTargetOf` is the same visibility predicate
+  // projection uses: it rejects `block` and any `accept` with a `value`, and
+  // accepts an `accept` whose content is text (possibly rewritten).
+  //
+  // A hidden receipt still consumes the one-shot plan: the plan was written for
+  // the call that produced it, and keeping it would let it fire against a later
+  // receipt whose text it was not written for.
+  //
   // Projection below runs for a shadow commit too: the decision side never
   // suppresses the projection ledger.
-  await decideSubstitution(deps, ctx)
+  if (projectionTargetOf(decision, ctx.receipt, ctx.result) === undefined) {
+    clearPlan(deps, ctx.sessionId)
+  } else {
+    await decideSubstitution(deps, ctx)
+  }
 
   // Second-projection guard. Two host shapers are outer to this listener:
   //
@@ -2151,8 +2180,23 @@ async function applyDecision(
   //   to a receipt this listener already clipped. A family the plugin does not
   //   project leaves the host shaper untouched.
   //
-  // Both the receiver as it arrived and the decision that will enter history
-  // are checked (design §5.4).
+  // What these two checks can and cannot catch (review row 25):
+  //
+  // - The first reads `ctx.receipt.text`, captured before this listener
+  //   returns. The outer spill policy appends its footer to the decision
+  //   *after* this point, so this check can never see the host's own footer.
+  //   It can only fire when the tool's output already ends in a spill notice —
+  //   for example a `read` of a spill artifact, whose text carries the notice
+  //   literally. That is still a receipt that is already a preview, so
+  //   refusing to project it again is the intended, if narrow, guard.
+  // - The second sees a replacement an inner listener wrote into the decision.
+  //   An outer shaper's footer is invisible to it too.
+  //
+  // Neither check is full double-spill detection: at this point the host's
+  // footer does not exist yet, so projection and the outer spill policy can
+  // both act on one receipt. That is fail-safe, not prevention: the
+  // projection's own footer keeps the original retrievable, and the host's
+  // second notice points at the projected text.
   if (await isAlreadySpilled(deps, ctx.receipt.text)) return decision
   const downstreamText = decisionTextOf(decision) ?? ctx.receipt.text
   if (downstreamText !== ctx.receipt.text && await isAlreadySpilled(deps, downstreamText)) {

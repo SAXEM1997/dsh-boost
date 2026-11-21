@@ -145,13 +145,24 @@
  * `head line + head + spill footer + tail`. Both preserve the receipt's head
  * and tail, so "the anchor text is not present verbatim" alone would classify
  * our own projection as compaction and disable substitution whenever projection
- * is on. `carriesAnchor` therefore accepts the exact text, or a body holding
- * the anchor's head *and* tail probes **plus** one of the two rewrites' own
- * evidence: the prune marker (which then decides `pruned-reset`) or the
- * projection head line, whose `output N chars; showing first H and last T`
- * counts must name this anchor's length and windows. A full receipt with the
- * same probes but a different middle — a file edited and re-read — carries
- * neither, so it is a lost anchor (`compaction-reset`) rather than a
+ * is on. Two *outer* shapers also rewrite a receipt: `dsh-spill-policy` for
+ * non-`read` tools and `dsh-tool-fs-search` for `glob`/`grep`. The spill policy
+ * keeps a head and a tail and appends its footer after the tail; fs-search
+ * keeps the head of an over-cap page and appends its footer after it. Either
+ * way a rewrite can end in a notice instead of in the anchor's last code
+ * points.
+ *
+ * `carriesAnchor` therefore accepts the exact text, or a body holding the
+ * anchor's head *and* tail probes **plus** rewrite evidence: the prune marker
+ * (which then decides `pruned-reset`), the projection head line, whose
+ * `output N chars; showing first H and last T` counts must name this anchor's
+ * length and windows, or a spill-style footer from an outer shaper, with the
+ * anchor's head at the very start and its tail at the very end of the rewritten
+ * body (or before that trailing footer). A shaper that drops the tail — an
+ * over-cap fs-search page — is not a carrier: the model no longer holds the
+ * anchor's end, so the decision is refused. A full receipt with the same probes
+ * but a different middle — a file edited and re-read — carries none of that
+ * evidence, so it is a lost anchor (`compaction-reset`) rather than a
  * substitution against content the model no longer holds.
  *
  * Probes are measured in code points (a UTF-16 slice can split a surrogate
@@ -644,6 +655,66 @@ function prunedCarries(body: string, anchor: string): boolean {
 }
 
 /**
+ * The locator phrase every host spill notice carries.
+ *
+ * Both outer shapers end a rewrite with a parenthesised notice naming where the
+ * complete result lives: `dsh-spill-policy` renders `(Omitted N bytes. Full
+ * formatted result stored at: …)` and `dsh-tool-fs-search` renders `(Showing N
+ * of M paths. Full sorted result stored at: …)`. The counts and the sentence
+ * around them differ by shaper and result kind; the locator phrase is the part
+ * both always include.
+ */
+const SPILL_LOCATION = ' stored at: '
+
+/**
+ * Where a trailing host-shape spill footer starts, or `-1` when the body does
+ * not end in one.
+ *
+ * The footer is a final parenthesised block introduced by a blank line, and the
+ * locator phrase separates it from an ordinary parenthetical. This is a shape
+ * check, not authentication: the identity evidence remains the anchor's own
+ * head and tail, which the caller requires at the two ends of the rewritten
+ * body.
+ */
+function trailingSpillFooterStart(body: string): number {
+  if (!body.endsWith(')')) return -1
+  const start = body.lastIndexOf('\n\n(')
+  if (start === -1) return -1
+  return body.slice(start + 2).includes(SPILL_LOCATION) ? start : -1
+}
+
+/**
+ * Whether `core` is `anchor` rewritten by a foreign shaper.
+ *
+ * The anchor's head must sit at the very start and its tail at the very end of
+ * the rewritten body, and a spill footer must be the rewrite's evidence: either
+ * the trailing notice the caller stripped (`strippedFooter`), or one sitting
+ * between the two windows. A full receipt that merely shares the two probes —
+ * the edited-then-re-read collision `prunedCarries` exists to reject — has no
+ * footer, and a wrapper that embeds the anchor does not start with its head, so
+ * neither qualifies. The length guard rejects a body that is only the two
+ * windows with nothing rewritten between them.
+ */
+function foreignShaperCarries(
+  core: string,
+  anchor: string,
+  head: string,
+  tail: string,
+  strippedFooter: boolean,
+): boolean {
+  if (core === anchor) return false
+  if (head.length > 0 && !core.startsWith(head)) return false
+  if (tail.length > 0 && !core.endsWith(tail)) return false
+  if (core.length <= head.length + tail.length) return false
+  if (strippedFooter) return true
+  const middle = core.slice(head.length, core.length - tail.length)
+  const footerStart = middle.indexOf('\n\n(')
+  if (footerStart === -1) return false
+  const footerEnd = middle.indexOf(')', footerStart)
+  return footerEnd !== -1 && middle.slice(footerStart, footerEnd + 1).includes(SPILL_LOCATION)
+}
+
+/**
  * Whether `body` still carries `anchor`, verbatim or as a verified in-place
  * rewrite.
  *
@@ -653,11 +724,19 @@ function prunedCarries(body: string, anchor: string): boolean {
  * beginning and end, so a body holding both probes *and* the rewrite's own
  * evidence is the same receipt rewritten in place.
  *
+ * An outer shaper (`dsh-spill-policy` for non-`read`, `dsh-tool-fs-search` for
+ * `glob`/`grep`) also keeps the head and tail but appends its footer after the
+ * tail, so the model-visible body ends with the notice. That case is checked
+ * twice: the trailing notice is stripped and our own projection is verified on
+ * the remaining body, then the remaining body is accepted as a foreign rewrite
+ * only when it still starts with the anchor's head and ends with its tail.
+ *
  * Sharing the two probes alone is not identity: a file edited in the middle and
  * re-read produces a full receipt with the same 32-character head and tail but
  * a different body. Accepting it would substitute against content the model no
- * longer holds, so a probe match must be accompanied by the pruner marker or
- * our projection's head line. Anything else is a lost anchor (fail closed).
+ * longer holds, so a probe match must be accompanied by the pruner marker, our
+ * projection's head line, or a spill footer. Anything else is a lost anchor
+ * (fail closed).
  *
  * Probes are sliced by **code point**, exactly like `truncate`: a UTF-16 slice
  * can end on half a surrogate pair, and a lone surrogate is not a substring a
@@ -681,7 +760,16 @@ function carriesAnchor(
   const start = headLen > 0 ? body.indexOf(head) : 0
   if (headLen > 0 && start === -1) return false
   if (tailLen > 0 && body.indexOf(tail, start + headLen) === -1) return false
-  return prunedCarries(body, anchor) || ownProjectionCarries(body, anchor)
+  if (prunedCarries(body, anchor) || ownProjectionCarries(body, anchor)) return true
+
+  // An outer shaper's footer follows the rewrite, so the model-visible body
+  // ends with the notice rather than with the anchor's tail. Verify the same
+  // body with that notice removed; without one, the in-middle footer shape is
+  // checked instead.
+  const footerStart = trailingSpillFooterStart(body)
+  const core = footerStart === -1 ? body : body.slice(0, footerStart)
+  if (footerStart !== -1 && ownProjectionCarries(core, anchor)) return true
+  return foreignShaperCarries(core, anchor, head, tail, footerStart !== -1)
 }
 
 /**
@@ -1169,6 +1257,9 @@ async function settlePendingMark(deps: HookDeps, sessionId: string): Promise<voi
     // evidence the synth-time line carried, parked when that line was written.
     ...(fact?.evidence ?? {}),
     saved_input_tokens: settled.saved_input_tokens,
+    // Row 7: the settled line carries both estimates — the upper input figure
+    // and the lower whole-request figure from the plan's own request.
+    avoided_total_tokens: settled.avoided_total_tokens,
     cache_hit_delta: settled.cache_hit_delta,
     output_tokens: settled.output_tokens,
   })

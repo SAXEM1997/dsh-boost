@@ -897,6 +897,11 @@ test('跨回合结算：合成后的下一次真实请求写 substitute-settled 
     'the settled line pairs with the synthesis turn, not the request that happened to settle it',
   )
   assert.equal(settled.saved_input_tokens, 1000, 'input + cacheRead of the first after-mark request')
+  assert.equal(
+    settled.avoided_total_tokens,
+    'unknown',
+    'row 7: no request preceded the mark in this fixture, so the lower estimate is unknown',
+  )
   assert.equal(settled.output_tokens, 7)
   assert.equal(env.runtime.usageFor(SESSION).pendingCandidateId(), undefined)
 })
@@ -1122,6 +1127,87 @@ test('O6 代理对边界：投影头尾按码点切片，32 字符探测不切�
 
   assert.equal(env.host.nextCalls, 0)
   assert.equal(chunks.some((c) => c.type === 'tool-call-delta'), true)
+})
+
+// ---------------------------------------------------------------------------
+// Row 26: an outer shaper's footer is a carrier, not a lost anchor
+// ---------------------------------------------------------------------------
+
+/** The two 120-code-point windows a host spill policy retains around `[…]`. */
+function spillWindows(anchor: string): { head: string; tail: string } {
+  const points = Array.from(anchor)
+  return { head: points.slice(0, 120).join(''), tail: points.slice(-120).join('') }
+}
+
+test('row 26 spill policy 的尾部 footer：head + […] + tail + footer 仍是锚点', async () => {
+  const env = setup()
+  seedAnchored(env)
+  const { head, tail } = spillWindows(LONG_ANCHOR)
+  const spilled = `${head}\n\n[...]\n\n${tail}\n\n(Omitted 999 bytes. Full formatted result stored at: /spill/root.txt. Use read with offset/limit, or grep this path to search within it.)`
+
+  const chunks = await streamOnce(env, { messages: messagesWith(spilled) })
+
+  assert.equal(env.host.nextCalls, 0, 'a foreign footer must not look like compaction')
+  assert.equal(chunks.some((c) => c.type === 'tool-call-delta'), true)
+  assert.equal(env.receipts.some((r) => r.kind === 'reset'), false)
+})
+
+test('row 26 外来 footer 位于两窗之间（head + footer + tail）也认作改写', async () => {
+  const env = setup()
+  seedAnchored(env)
+  const { head, tail } = spillWindows(LONG_ANCHOR)
+  const rewritten = `${head}\n\n(Showing 100 of 200 paths. Full sorted result stored at: /spill/glob.txt. Use read.)\n${tail}`
+
+  const chunks = await streamOnce(env, { messages: messagesWith(rewritten) })
+
+  assert.equal(env.host.nextCalls, 0)
+  assert.equal(chunks.some((c) => c.type === 'tool-call-delta'), true)
+  assert.equal(env.receipts.some((r) => r.kind === 'reset'), false)
+})
+
+test('row 26 我们的投影 + 外层 footer：去掉尾部 notice 后仍按投影验证', async () => {
+  const env = setup()
+  seedAnchored(env)
+  const projected = projectedBody(LONG_ANCHOR, 32, 32)
+  const double = `${projected}\n\n(Omitted 10 bytes. Full formatted result stored at: /spill/projected.txt. Use read.)`
+
+  const chunks = await streamOnce(env, { messages: messagesWith(double) })
+
+  assert.equal(env.host.nextCalls, 0)
+  assert.equal(chunks.some((c) => c.type === 'tool-call-delta'), true)
+  assert.equal(env.receipts.some((r) => r.kind === 'reset'), false)
+})
+
+test('row 26 外来 footer 不能放宽成“正文任意位置含 head”：包装体仍 reset', async () => {
+  const env = setup({ chunks: [{ type: 'finish', reason: { kind: 'stop' } }] })
+  seedAnchored(env)
+  const { head, tail } = spillWindows(LONG_ANCHOR)
+  // A wrapper that embeds the anchor's windows, with a footer after them. The
+  // body does not *start* with the anchor's head, so it is a different receipt.
+  const wrapped = `a read of the session log follows\n${head}\n\n[...]\n\n${tail}\n\n(Omitted 999 bytes. Full formatted result stored at: /spill/log.txt. Use read.)`
+
+  const chunks = await streamOnce(env, { messages: messagesWith(wrapped) })
+
+  assert.equal(env.host.nextCalls, 1, 'a wrapper must not authorize a substitution')
+  assert.equal(chunks.some((c) => c.type === 'tool-call-delta'), false)
+  const reset = env.receipts.find((r) => r.kind === 'reset')
+  assert.equal(reset?.code, 'compaction-reset')
+  assert.equal(env.queue.peek(SESSION), undefined)
+})
+
+test('row 26 外来 footer 但尾部窗口缺失：不是同一回执，仍 reset', async () => {
+  const env = setup({ chunks: [{ type: 'finish', reason: { kind: 'stop' } }] })
+  seedAnchored(env)
+  const { head } = spillWindows(LONG_ANCHOR)
+  // fs-search's over-cap rewrite keeps the page's head but drops the tail; a
+  // footer alone is not identity evidence.
+  const truncated = `${head}\n\n(Showing 100 of 200 paths. Full sorted result stored at: /spill/glob.txt. Use read.)`
+
+  const chunks = await streamOnce(env, { messages: messagesWith(truncated) })
+
+  assert.equal(env.host.nextCalls, 1)
+  assert.equal(chunks.some((c) => c.type === 'tool-call-delta'), false)
+  assert.equal(env.receipts.find((r) => r.kind === 'reset')?.code, 'compaction-reset')
 })
 
 // ---------------------------------------------------------------------------

@@ -504,6 +504,60 @@ test('row 7 toolSet.view 抛错按不可验证处理：照常替换并记 no-too
   assert.ok(env.receipts.some((r) => r.code === 'substitute-skipped:no-toolset'))
 })
 
+test('row 24 decide 抛错写 substitute-skipped:gate-error，替换可见地关闭', async () => {
+  const env = setup()
+  // A plan whose `tool` read throws makes `decide` throw. That is a wiring bug,
+  // not a policy answer: the listener must survive, enqueue nothing, and leave
+  // a line `status.counts` can count.
+  const broken = {
+    id: 'A',
+    args: { file_path: '/x' },
+    guards: [{ text_contains: 'TRIGGER' }],
+    get tool(): string {
+      throw new Error('gate boom')
+    },
+  }
+  env.plans.set(SESSION, { goal: 'g', steps: [broken] })
+
+  const decision = await runPost(env.host, 'TRIGGER here')
+
+  assert.equal(decision.kind, 'accept', 'a throwing gate must not lose the tool output')
+  assert.equal(env.queue.peek(SESSION), undefined, 'a gate error enqueues nothing')
+  const note = env.receipts.find((r) => r.code === 'substitute-skipped:gate-error')
+  assert.ok(note, 'the broken gate must be visible in status.counts')
+  assert.equal(note.kind, 'skip')
+  assert.equal(note.stepId, 'root')
+})
+
+test('row 11 block 决定不入队、不写 substitute 收据，但计划仍一次性消费', async () => {
+  const env = setup()
+  env.plans.set(SESSION, { goal: 'g', steps: [candidate('A', 'TRIGGER')] })
+
+  const decision = await runPost(env.host, 'TRIGGER here', { kind: 'block' })
+
+  assert.equal(decision.kind, 'block', 'the inner listener decision is returned untouched')
+  assert.equal(env.queue.peek(SESSION), undefined, 'a hidden receipt must not justify a substitution')
+  assert.equal(env.usage.pendingCandidateId(), undefined, 'no usage mark is taken')
+  assert.equal(
+    env.receipts.some((r) => r.kind === 'substitute' || r.code === 'substituted'),
+    false,
+    'no substitution receipt may be written',
+  )
+  assert.equal(env.plans.has(SESSION), false, 'the one-shot plan is consumed even when hidden')
+})
+
+test('row 11 accept 带 replacement value 也不得替换', async () => {
+  const env = setup()
+  env.plans.set(SESSION, { goal: 'g', steps: [candidate('A', 'TRIGGER')] })
+
+  await runPost(env.host, 'TRIGGER here', { kind: 'accept', value: { replaced: true } })
+
+  assert.equal(env.queue.peek(SESSION), undefined, 'the model sees the value, not the guarded text')
+  assert.equal(env.usage.pendingCandidateId(), undefined)
+  assert.equal(env.receipts.some((r) => r.code === 'substituted'), false)
+  assert.equal(env.plans.has(SESSION), false)
+})
+
 test('O5 影子期也走 live visibility：越权会话不记影子（F2 复核）', async () => {
   const env = setup({
     doc: doc({ shadow: true }),
@@ -1801,6 +1855,11 @@ test('row 28: a rollover after the dispatch was accepted reports the skipped rou
   )
   assert.equal(settled.plan, 'g', 'the settled line keeps the plan evidence')
   assert.deepEqual(settled.guards, [{ text_contains: 'TRIGGER' }])
+  assert.equal(
+    settled.avoided_total_tokens,
+    200_001,
+    'row 7: the lower estimate comes from the request that produced the plan (100000 + 100000 + 1)',
+  )
 })
 
 test('row 26 翻转结算沿用派发回合，而不是翻转回合', async () => {

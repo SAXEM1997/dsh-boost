@@ -67,16 +67,36 @@ test('settle 消费标记：第二次 settle 返回 unknown/null/unknown，last 
   l.request({ input: 1000, cacheRead: 0, output: 0 })
   l.markSubstituted('A')
   l.request({ input: 100, cacheRead: 900, output: 400 })
-  assert.deepEqual(l.settle(), { saved_input_tokens: 1000, cache_hit_delta: 0.9, output_tokens: 400 })
-  assert.deepEqual(l.settle(), { saved_input_tokens: 'unknown', cache_hit_delta: null, output_tokens: 'unknown' })
+  assert.deepEqual(l.settle(), {
+    saved_input_tokens: 1000,
+    avoided_total_tokens: 1000,
+    cache_hit_delta: 0.9,
+    output_tokens: 400,
+  })
+  assert.deepEqual(l.settle(), {
+    saved_input_tokens: 'unknown',
+    avoided_total_tokens: 'unknown',
+    cache_hit_delta: null,
+    output_tokens: 'unknown',
+  })
   assert.deepEqual(l.last(), { input: 100, cacheRead: 900, output: 400 })
 })
 
 test('从未 mark 的 settle：unknown/null/unknown，且不消耗 last', () => {
   const l = new UsageLedger()
-  assert.deepEqual(l.settle(), { saved_input_tokens: 'unknown', cache_hit_delta: null, output_tokens: 'unknown' })
+  assert.deepEqual(l.settle(), {
+    saved_input_tokens: 'unknown',
+    avoided_total_tokens: 'unknown',
+    cache_hit_delta: null,
+    output_tokens: 'unknown',
+  })
   l.request({ input: 100, cacheRead: 900, output: 10 })
-  assert.deepEqual(l.settle(), { saved_input_tokens: 'unknown', cache_hit_delta: null, output_tokens: 'unknown' })
+  assert.deepEqual(l.settle(), {
+    saved_input_tokens: 'unknown',
+    avoided_total_tokens: 'unknown',
+    cache_hit_delta: null,
+    output_tokens: 'unknown',
+  })
   assert.deepEqual(l.last(), { input: 100, cacheRead: 900, output: 10 })
 })
 
@@ -125,7 +145,12 @@ test('后一次样本含 NaN/Infinity/负数：整条不可用，绝不产生 Na
     l.request(bad)
     assert.deepEqual(
       l.settle(),
-      { saved_input_tokens: 'unknown', cache_hit_delta: null, output_tokens: 'unknown' },
+      {
+        saved_input_tokens: 'unknown',
+        avoided_total_tokens: 1000,
+        cache_hit_delta: null,
+        output_tokens: 'unknown',
+      },
       `bad after-mark sample ${JSON.stringify(bad)}`,
     )
   }
@@ -207,6 +232,64 @@ test('字段有限但 input + cacheRead 溢出为 Infinity：仍按不可用样�
   l.request({ input: Number.MAX_VALUE, cacheRead: Number.MAX_VALUE, output: 1 })
   assert.deepEqual(
     l.settle(),
-    { saved_input_tokens: 'unknown', cache_hit_delta: null, output_tokens: 'unknown' },
+    {
+      saved_input_tokens: 'unknown',
+      avoided_total_tokens: 1000,
+      cache_hit_delta: null,
+      output_tokens: 'unknown',
+    },
   )
+})
+
+/* ------------------------------------------------------------------------- *
+ * Row 7: the lower estimate, `avoided_total_tokens`
+ * ------------------------------------------------------------------------- */
+
+test('avoided_total_tokens = 计划请求的 input + cacheRead + output，且不高于 saved', () => {
+  const l = new UsageLedger()
+  l.request({ input: 100, cacheRead: 900, output: 10 })      // 产出计划的那次请求
+  l.markSubstituted('A')
+  l.request({ input: 200, cacheRead: 1800, output: 400 })    // 下一条真实请求
+  const r = l.settle()
+  assert.equal(r.avoided_total_tokens, 1010, '100 + 900 + 10: 含 output，所以叫 total')
+  assert.equal(r.saved_input_tokens, 2000)
+  assert.ok(
+    typeof r.avoided_total_tokens === 'number' && r.avoided_total_tokens <= r.saved_input_tokens,
+    'the lower estimate must not exceed the upper one',
+  )
+})
+
+test('没有计划请求样本：avoided 侧 unknown，upper 侧照常测量（绝不拷贝）', () => {
+  const l = new UsageLedger()
+  l.markSubstituted('A')
+  l.request({ input: 200, cacheRead: 1800, output: 400 })
+  const r = l.settle()
+  assert.equal(r.avoided_total_tokens, 'unknown')
+  assert.equal(r.saved_input_tokens, 2000)
+})
+
+test('计划请求样本不可用：avoided 侧 unknown，不是 0 也不是后一次的数字', () => {
+  for (const bad of [
+    { input: NaN, cacheRead: 900, output: 10 },
+    { input: 100, cacheRead: 900, output: -1 },
+    { input: Number.MAX_VALUE, cacheRead: Number.MAX_VALUE, output: 1 },
+  ]) {
+    const l = new UsageLedger()
+    l.request(bad)
+    l.markSubstituted('A')
+    l.request({ input: 200, cacheRead: 1800, output: 400 })
+    const r = l.settle()
+    assert.equal(r.avoided_total_tokens, 'unknown', `bad pre-mark sample ${JSON.stringify(bad)}`)
+    assert.equal(r.saved_input_tokens, 2000)
+  }
+})
+
+test('没有后一次请求：upper 侧 unknown，但 avoided 侧仍报 lower estimate', () => {
+  const l = new UsageLedger()
+  l.request({ input: 100, cacheRead: 900, output: 10 })
+  l.markSubstituted('A')
+  const r = l.settle()
+  assert.equal(r.saved_input_tokens, 'unknown')
+  assert.equal(r.avoided_total_tokens, 1010)
+  assert.equal(r.output_tokens, 'unknown')
 })
