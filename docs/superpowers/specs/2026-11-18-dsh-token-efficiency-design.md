@@ -215,7 +215,7 @@
 
 | 杠杆 | 省下 | 是否乘剩余步数 |
 |---|---|---|
-| 跳过一次调用 | 该步请求的 `totalTokens`（含 cacheRead）；多候选时再**减去 Jev 的输入 + 输出上限**：输出上限是 `selector.maxTokens`（默认 512），输入按实际发送的 system prompt + 候选清单 + 回执文本用宿主 estimator 计价（`selectorChargeOf` = `maxTokens + estimate(input)`，不是固定 512） | **否**，只作用于该步请求 |
+| 跳过一次调用 | 该步请求的 `totalTokens`（含 cacheRead）；多候选时再**减去 Jev 的输入 + 输出上限**：输出上限是 `selector.maxTokens`（默认 512），输入按实际发送的 system prompt + 候选清单 + 回执文本用宿主 estimator 计价（`selectorChargeOf` = `maxTokens + estimate(input)`，不是固定 512） | **否**，只作用于该步请求。**这是定义，不是可测的数**：被跳过的请求从未发生，收据只能从两侧夹住它——`saved_input_tokens` 取后一次请求（含被替换调用自己的结果，**上界**）、`avoided_total_tokens` 取前一次请求的 `input + cacheRead + output`（不含该结果，**下界**），真实节省落在两者之间（§5.3、§6） |
 | 缩小进入上下文的内容 | 被裁 token ×（1 + 剩余步数） | 是 |
 | 模型蒸馏（二期） | 上式再减去：蒸馏调用的输入 + 输出 | 是，但要先减开销 |
 
