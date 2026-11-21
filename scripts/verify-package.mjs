@@ -288,6 +288,43 @@ function sourceFiles() {
 }
 
 /**
+ * The browser-half bundle a manifest declares, normalized to a package-relative
+ * path, or `undefined` when this package ships no client half.
+ *
+ * `dsh.client` is what makes the host's module scanner see this package, and
+ * `exports["./client"]` is the file it then loads; the host THROWS at
+ * composition time when the first is present and the second is missing. Both
+ * directions are enforced here so a broken install fails at pack time rather
+ * than in someone's settings page. Deriving the path from the field keeps the
+ * allowlist honest: no filename is hardcoded.
+ */
+function clientBundleOf(manifest, label) {
+  const declared = manifest?.dsh?.client
+  const target = manifest?.exports?.['./client']
+  if (declared === undefined && target === undefined) return undefined
+  if (declared === undefined) {
+    throw new Error(`${label}: exports["./client"] is declared but dsh.client is not`)
+  }
+  if (target === undefined) {
+    throw new Error(`${label}: dsh.client is declared but exports["./client"] is not`)
+  }
+  if (typeof target !== 'string') {
+    throw new Error(`${label}: exports["./client"] must be a string, got ${typeof target}`)
+  }
+  const normalized = target.startsWith('./') ? target.slice(2) : target
+  if (
+    normalized === '' ||
+    normalized.startsWith('/') ||
+    normalized.split('/').includes('..')
+  ) {
+    throw new Error(
+      `${label}: exports["./client"] must be a non-empty package-relative path, got ${JSON.stringify(target)}`,
+    )
+  }
+  return normalized
+}
+
+/**
  * The exact set of paths the tarball may contain. `dist/` is derived from
  * `src/` (one `.js`, `.js.map` and `.d.ts` per source), so a missing build
  * output and an unexpected post-pack file are both visible. Locales are the
@@ -297,6 +334,8 @@ function sourceFiles() {
 function expectedTarballEntries() {
   const expected = new Set(ROOT_ENTRIES)
   expected.add(`package/${bundlePatchOf(pkg, 'package.json')}`)
+  const clientBundle = clientBundleOf(pkg, 'package.json')
+  if (clientBundle !== undefined) expected.add(`package/${clientBundle}`)
   for (const file of sourceFiles()) {
     const stem = file.replace(/\.ts$/, '')
     expected.add(`package/dist/${stem}.js`)

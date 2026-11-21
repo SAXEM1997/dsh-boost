@@ -1,0 +1,143 @@
+/**
+ * Ticket T1 (spec #2): the client half's artifact, tested as a FILE.
+ *
+ * Seam S-2 from the spec. The assertions are behavioural rather than textual:
+ * the bundle is EXECUTED against a stand-in for the host's module loader, which
+ * is the only thing that answers "will this file load in the settings page?".
+ * A regex over the source can be satisfied by a file that still throws on load.
+ *
+ * The bundle is built into a temporary directory rather than `lib/`, so this
+ * test neither depends on `npm run build` having run first nor repairs the
+ * committed artifact it is inspecting.
+ */
+import test from 'node:test'
+import assert from 'node:assert/strict'
+import { spawnSync } from 'node:child_process'
+import { mkdtemp, readFile, rm } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+import vm from 'node:vm'
+
+const root = new URL('..', import.meta.url).pathname
+
+/** What the host's loader hands a bundle: `{ id, chunk, factory }`. */
+interface Registration {
+  id: string
+  factory: (require: (specifier: string) => unknown) => Record<string, unknown>
+}
+
+/**
+ * Builds the client bundle into a fresh directory and returns its text.
+ *
+ * `BOOST_CLIENT_OUT_DIR` is the config's redirect (see `ui/vite.config.ts`);
+ * without it the build would write `lib/client.js` in place.
+ */
+async function buildBundle(): Promise<string> {
+  const outDir = await mkdtemp(join(tmpdir(), 'boost-client-'))
+  try {
+    const result = spawnSync(
+      process.execPath,
+      [
+        join(root, 'node_modules', 'vite', 'bin', 'vite.js'),
+        'build',
+        '--config',
+        join(root, 'ui', 'vite.config.ts'),
+        '--mode',
+        'client',
+      ],
+      {
+        cwd: root,
+        encoding: 'utf8',
+        // `NODE_ENV=test` is the hostile case, not an accident: vite picks the
+        // JSX transform from NODE_ENV at BUILD TIME, and a test runner or a dev
+        // shell sets it to `test`/`development`. Left at the ambient value the
+        // build happens to be production and the dev-runtime assertion below
+        // would pass for the wrong reason.
+        env: { ...process.env, NODE_ENV: 'test', BOOST_CLIENT_OUT_DIR: outDir },
+      },
+    )
+    assert.equal(result.status, 0, `vite build failed:\n${result.stdout ?? ''}${result.stderr ?? ''}`)
+    return await readFile(join(outDir, 'client.js'), 'utf8')
+  } finally {
+    await rm(outDir, { recursive: true, force: true })
+  }
+}
+
+/**
+ * Runs the bundle the way the host does: a global `__ModuleLoader__` that
+ * captures the registration, and a `require` that records what was asked for.
+ *
+ * The `require` stub throws on an unknown specifier, which is what the host's
+ * frozen module table does — so a bundle that asks for something the shell does
+ * not carry fails here, not in the settings page.
+ */
+function loadBundle(bundle: string): {
+  registration: Registration
+  requested: string[]
+  exports: Record<string, unknown>
+} {
+  const requested: string[] = []
+  const registrations: Registration[] = []
+  const context = vm.createContext({
+    window: {
+      __ModuleLoader__: {
+        load(registration: Registration) {
+          registrations.push(registration)
+        },
+      },
+    },
+    console: { warn() {}, error() {} },
+  })
+  vm.runInContext(bundle, context)
+
+  assert.equal(registrations.length, 1, 'the bundle must register exactly one module')
+  const registration = registrations[0]!
+  const loaded = registration.factory((specifier: string) => {
+    requested.push(specifier)
+    if (specifier === 'react' || specifier.startsWith('react/')) return {}
+    throw new Error(`Cannot find module '${specifier}'`)
+  })
+  return { registration, requested, exports: loaded }
+}
+
+test('client bundle registers under the package name the host expects', async () => {
+  const { registration } = loadBundle(await buildBundle())
+  // `id` must match the graph row being executed, which is the package name.
+  assert.equal(registration.id, 'dsh-boost')
+})
+
+test('client bundle exposes apply and inject to cordis', async () => {
+  const bundle = await buildBundle()
+  const { registration } = loadBundle(bundle)
+  const exports = registration.factory(() => ({}))
+  assert.equal(typeof exports['apply'], 'function')
+  // Spread into this realm: the bundle's array comes from the vm context and
+  // carries that context's `Array.prototype`, which `deepEqual` distinguishes.
+  assert.deepEqual([...(exports['inject'] as string[])], ['slots'])
+})
+
+test('client bundle loads React through the host module table, never inlined', async () => {
+  const bundle = await buildBundle()
+  const { requested } = loadBundle(bundle)
+  // The host's frozen module table is the ONLY place React comes from; a second
+  // copy inside this file is a different React instance and breaks hooks.
+  assert.ok(
+    requested.some((specifier) => specifier === 'react' || specifier.startsWith('react/')),
+    `the bundle never asked the host for React (asked for: ${requested.join(', ') || 'nothing'})`,
+  )
+  // React's own source defines these symbols; externalised, nothing here does.
+  assert.doesNotMatch(bundle, /Symbol\.for\(\s*["'`]react\./)
+})
+
+test('client bundle never asks for the dev JSX runtime', async () => {
+  const bundle = await buildBundle()
+  const { requested } = loadBundle(bundle)
+  // A dev-mode build emits `react/jsx-dev-runtime`, which the host's module
+  // table does not carry: the file loads in a stub and throws in the settings
+  // page. The build must be production for the JSX TRANSFORM, not merely for
+  // the `define` substitution.
+  assert.deepEqual(
+    requested.filter((specifier) => specifier.includes('jsx-dev-runtime')),
+    [],
+  )
+})

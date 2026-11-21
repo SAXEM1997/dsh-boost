@@ -1,0 +1,23 @@
+/**
+ * The settings page's own styles.
+ *
+ * SCOPED DELIBERATELY. This stylesheet is injected into the HOST page's
+ * document head, not a sandboxed frame, so a bare `button {}` rule restyles
+ * every button in the host UI — a plugin must not do that. Every top-level
+ * selector in this file is therefore rooted at a plugin-owned class in the
+ * `boost-` namespace.
+ */
+.boost-settings {
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+  padding: 16px;
+  color: inherit;
+  font-size: 13px;
+  line-height: 1.6;
+}
+
+.boost-settings h2 {
+  margin: 0;
+  font-size: 16px;
+}

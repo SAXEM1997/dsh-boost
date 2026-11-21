@@ -37,10 +37,12 @@ npm run verify:package
    将来若有人把 `prepare` 改成无条件重建，这条也不会让它在断言之前悄悄重建（并“修复”）工作树。
    显式构建后打包，包内容就是这次构建的产物；干净 clone 上即使 `dist/` 不存在也能跑，因为构建
    发生在打包之前。
-2. **exact allowlist**：每一个 tar 条目都必须由四类来源之一解释——固定根文件（`package.json`、
-   `LICENSE`、`NOTICE`、两份 README）、`dsh.bundle.patch` 指向的 patch 文件、`locale/*.json`、或
-   `src/**/*.ts` 对应的一个 `dist/**.js` + `.js.map`（声明文件只发 `dist/index.d.ts` 与
-   `dist/types.d.ts` 两个；其余内部 `.d.ts` 被 `files` 的 `!dist/**/*.d.ts` 排除）。多出 `package/dist/ghost.js`
+2. **exact allowlist**：每一个 tar 条目都必须由五类来源之一解释——固定根文件（`package.json`、
+   `LICENSE`、`NOTICE`、两份 README）、`dsh.bundle.patch` 指向的 patch 文件、`locale/*.json`、
+   `exports["./client"]` 指向的客户端产物（仅当 `dsh.client` 声明时；两者必须同时存在或同时缺席，
+   缺一半会在 allowlist 之前点名），或 `src/**/*.ts` 对应的一个 `dist/**.js` + `.js.map`
+   （声明文件只发 `dist/index.d.ts` 与 `dist/types.d.ts` 两个；其余内部 `.d.ts` 被 `files` 的
+   `!dist/**/*.d.ts` 排除）。多出 `package/dist/ghost.js`
    之类的条目立即失败并点名；少一个也失败并列出缺失项。这是精确集合，不是“必需项齐全 + 禁止前缀
    不出现”。patch 条目不是硬编码的 `cordis.patch.yml`：脚本从 `package.json` 的
    `dsh.bundle.patch` 派生它，字段缺失、不是字符串或指向不存在的文件都会红；指向不存在的文件时，
@@ -78,6 +80,28 @@ npm run verify:package
 `prepublishOnly` 现在就是 `npm run ci && npm run verify:package -- --prebuilt`（`ci` = typecheck +
 test + build）；`--prebuilt` 让 allowlist 描述 `ci` 刚构建的那棵树，而不是在验收里再重建。所以
 **不带 flags 的** `npm publish` 本身会跑完这道门。但 npm 仍有两个旁路，见 §6.3。
+
+### 1.0 客户端半：构建与开发页
+
+设置页的浏览器产物是 `lib/client.js`（单个 CJS 文件，外包宿主的
+`window.__ModuleLoader__.load({ id, factory })` 信封）。它**不**由 `tsc` 产出，而是由 `vite`：
+
+```bash
+npm run build:client   # 产出 lib/client.js
+npm run dev:ui         # 独立开发页，不需要宿主
+```
+
+`npm run build` 已经包含 `build:client`，所以 `ci` 与 `prepublishOnly` 都会构建它。`lib/` 与
+`dist/` 一样不入库（`.gitignore`），发布时由构建产出。
+
+构建的两个不可省之处，改动前先读 `ui/vite.config.ts` 的注释：
+
+- **React 必须 external**。宿主以共享单例提供 React 18，bundle 里再打一份就是第二个实例，hooks 会崩。
+- **构建必须按 production 出 JSX 转换**。开发模式会发 `require("react/jsx-dev-runtime")`，而宿主的
+  模块表里只有 `react/jsx-runtime`——文件在桩里能加载，进设置页就抛 `Cannot find module`。
+
+`test/client-bundle.test.ts` 用 `NODE_ENV=test` 构建并把产物**执行**在宿主的加载器桩上（不是
+正则匹配源码），所以上面两条都有测试钉住。
 
 ### 1.1 手工回退与维护
 
