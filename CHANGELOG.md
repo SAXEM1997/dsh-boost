@@ -10,6 +10,22 @@ Design rationale lives in `docs/superpowers/specs/`; the release-acceptance proc
 
 ## [Unreleased]
 
+### 修复 Fixed
+
+- **scope 文件不再被静默覆盖。** 坏 JSON / 非对象 / 数组（`ERR_SCOPE_PARSE_FAILED`）以及「版本缺失或非数值、且没有可识别的 v1 字段」（`ERR_SCOPE_UNKNOWN_VERSION`）两种情况下，`scope-set` 与 `shadow` 现在**拒绝写入**并把文件原样留在盘上；此前会以默认文档为基底覆盖它，`workspaceIds` 会变成空数组。带可识别字段的 v1 文件仍按原路升级并保留 `mode` / `global` / `workspaceIds`。
+- **`engines.dsh` 从精确 `0.2.2-rc.4` 改为 `>=0.2.2-rc.4 <0.2.3-0`。** 宿主按 `includePrerelease` 判定并在不满足时**直接停用插件**，而 `0.2.2-rc.5` 在本插件触及的九个包里与 rc.4 逐字节相同——精确钉法会让一个兼容宿主上的插件静默不加载。
+- **装配不全不再看起来健康。** 七个会话监听改为逐个独立挂载，失败者记名并进 `missingMounts`；此前它们共用一个裸 catch，首个抛错会静默丢掉其余六个（包括 `session/disposed`，于是每会话状态在进程生命周期内泄漏）。
+- **被替换或销毁的宿主服务不再被永久缓存。** `llm` 与 `workspaceRegistry` 此前只 memo 首次成功的绑定，provider 换掉后仍用旧对象；现在失败即重置、销毁即失效。
+- **合成调用会按本步的工具准入集过滤。** 候选工具不在 `exec.toolSet` 里就弃权，避免派发一个宿主会以 `UNKNOWN_TOOL` 拒绝的调用；取不到准入集时照常替换，但记 `substitute-skipped:no-toolset` 让这种不可验证状态可见。
+- **共享运行时借不到时按耗尽处理。** 此前「预算被别的会话持有」与「没接线预算」都返回 `undefined`，前者被当成无上限，导致每回合步数上限静默失效。
+- **翻转结算用派发回合记账**，被 `tools/pre-execute` 拒绝的合成派发在翻转时也会报告被跳过的模型回合（此前丢弃，少报一次真实节省）。
+- **锚点存储冷或抛错时 fail closed**：提交后没有锚点记录、或读取抛错，都走 reset 而不是在无法验证「模型是否还持有证据」时合成。
+- **`tools/execute` 跳过 PTC 内层调用**，与 `tools/post-execute` 一致。
+- **`verify:package` 现在解析 `cordis.patch.yml`**（`insert` 非空、`id`/`name` 等于包名、`config` 是对象），不再只查文件存在；`--prebuilt` 让 allowlist 描述 CI 刚构建的那棵树，而不是重新构建它；`prepare` 已移除，`npm publish` 自己的 pack 也不会重建。
+- **`shadow-report.mjs`**：`--help` 退出 0；目录不存在时以 2 退出，需要空报告要显式 `--allow-empty`。
+- **`.npmrc` 与 lockfile 改钉 `registry.npmjs.org`**，与 `publishConfig` 同源；CI 断言不残留镜像 URL。此前发布校验查的是镜像，镜像的 `latest` 滞后，一次失败的发布可以看起来是成功的。
+- 文档：`^0.1.0` 不是安全的钉法（npmjs 是 0.1.1、镜像是 0.1.0）；页脚 190/192 字符、死区从 743 起；收据按「决定」写，无计划的 `write`/`edit` 不落收据；分片轮转与 256 上限按编码后的会话名计；宿主 home 默认是 `~/.dsh`；20 任务门是人工流程且任务集不随包发布；发布门是**实现者**的决定而非用户裁决。
+
 ## [0.1.1] - 2026-11-21
 
 第二轮与第三轮审查（各六个独立维度）的修复。**没有行为退化，但有三处会让功能静默失效的缺陷被修掉。**
