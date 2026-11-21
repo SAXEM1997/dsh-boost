@@ -11,7 +11,7 @@ read-only substitution**.
 ## What it does
 
 DSH replays the whole history on every model request. Across the 300 longest sessions measured
-locally (`npm run --silent stats` — without `--silent`, npm prints its `> dsh-boost@0.1.1 stats`
+locally (`npm run --silent stats` — without `--silent`, npm prints its `> dsh-boost@0.1.2 stats`
 banner to stdout, so use `--silent` or `node scripts/session-stats.mjs` for machine-readable
 output; snapshot at `2026-11-19T03:13:21Z`): 54,141 steps and 54,088 requests,
 10,575,904,022 raw tokens in total. The mean is 195,340 tokens per step and 195,531 per request
@@ -50,11 +50,14 @@ The **ex-ante estimate** for v1 is **3.5% (lower bound) to 10.0% (ideal upper bo
 300-session corpus, and its substitution component (2.70%) is a **ceiling** that must not be
 counted as a floor. The honest net floor is about **0.4%** (projection gross ~0.8% minus ~0.4%
 fixed per-request overhead). It is not a guarantee, and not a figure the shipped
-`session-snapshot.json` can recompute (the snapshot stores aggregate counts only, not the
-components of the estimate) — **nothing in the deliverable can recompute it**. Nor can the shadow
-week turn the range into a measured percentage: the shadow report outputs four ratios only (see
-"Shadow week"), with no total-token denominator, and `boost status` carries absolute values only;
-replacing the range with measurements needs a denominator statistic that a later version must add.
+`session-snapshot.json` can recompute: the snapshot stores per-session aggregates plus each
+session's `requestTokens` / `receiptChars` arrays, `valueTransfer` / `whitelist` counts, and
+its per-family `toolChars` totals, but it has **no per-receipt family bytes** — the projection
+components the estimate needs cannot be assembled from it, so **nothing in the deliverable can
+recompute it**. Nor can the shadow week turn the range into a measured percentage: the shadow
+report outputs four ratios only (see "Shadow week"), with no total-token denominator, and
+`boost status` carries absolute values only; replacing the range with measurements needs a
+denominator statistic that a later version must add.
 
 ## Requirements
 
@@ -77,28 +80,29 @@ replacing the range with measurements needs a denominator statistic that a later
 directory:
 
 ```bash
-# install from the registry: npmjs has latest = 0.1.1 (this repository's
+# install from the registry: npmjs has latest = 0.1.2 (this repository's
 # .npmrc and lockfile are pinned to npmjs too — see below)
-dsh plugin --profile <name> add dsh-boost@^0.1.1 --registry=https://registry.npmjs.org/
+dsh plugin --profile <name> add dsh-boost@^0.1.2 --registry=https://registry.npmjs.org/
 
 # or from a local checkout (build first; dist/ is not committed)
 npm run build
 dsh plugin --profile <name> add /absolute/path/to/dsh-boost
 ```
 
-For the web profile: `dsh plugin --profile web add dsh-boost@^0.1.1 --registry=https://registry.npmjs.org/`.
+For the web profile: `dsh plugin --profile web add dsh-boost@^0.1.2 --registry=https://registry.npmjs.org/`.
 `dsh plugin` forwards the operation to pnpm, so pnpm must be on `PATH`.
 
-> **The two registries carry different versions, so `^0.1.0` is not a safe pin.**
-> `registry.npmjs.org` has three version records: `0.1.1` (current `latest`), `0.1.0`, and
-> `0.0.0-stage`, a placeholder npm creates on a package's first publish. The
-> `registry.npmmirror.com` currently has only `0.1.0` (its `latest` is 0.1.0 too) — this
-> repository's `.npmrc` and lockfile are pinned to npmjs, but your global npm config may not be.
-> The same `^0.1.0` therefore resolves to 0.1.1 on npmjs and to 0.1.0 on
-> the mirror — and a mirror user installs a build missing ten of 0.1.1's fixes, several of which
-> repair silent failures. Use `dsh-boost@^0.1.1` (or `@latest`), and pass
-> `--registry=https://registry.npmjs.org/` explicitly when the registry matters; while the mirror
-> has not synced 0.1.1, `@^0.1.1` without that flag fails to resolve.
+> **Both registries now carry 0.1.2, so `^0.1.2` is a safe pin.**
+> `registry.npmjs.org` and `registry.npmmirror.com` each have four version records: `0.1.2` (the
+> current `latest` on both), `0.1.1`, `0.1.0`, and `0.0.0-stage`, the placeholder npm creates on a
+> package's first publish — **do not install `0.0.0-stage`**; it is not a usable build. 0.1.2
+> carries the scope-overwrite fix: corrupt JSON (including a non-object or an array) and an
+> unrecognizable version are no longer silently overwritten with the default document. Use
+> `dsh-boost@^0.1.2` (or `@latest`). This repository's `.npmrc` and lockfile are pinned to npmjs,
+> but **your machine's global npm config** may still point at a mirror that has not synced 0.1.2:
+> that is local configuration, not this repository's state. Pass
+> `--registry=https://registry.npmjs.org/` explicitly when the registry matters; against a lagging
+> mirror, `@^0.1.2` fails to resolve until the sync lands.
 
 The package is ESM (`"type": "module"`) and the `.` entry of `exports` also maps `require` /
 `default`: on Node >= 24.9, `require('dsh-boost')` loads the very same code as `import`. Nothing
@@ -223,10 +227,12 @@ above a workspace is selected, so 778 is the true per-request cost there.
 
 The design chose **shadow first**: record for a week — no synthesized turns, no skipped calls,
 projection priced but never applied — then decide whether to project and substitute for real.
-**"Changes nothing the model sees" would be false**: whenever a workspace is visible the protocol
-section (379 tokens) is injected into the system prompt, and a multi-candidate plan still makes a
-**real selector call** (a separate auxiliary model request). By design the shadow week saves
-nothing; it produces only the four ratios below.
+**"Changes nothing the model sees" would be false**: the `boost` tool schema (399 tokens) is
+registered whenever the plugin is assembled, and whenever a workspace is visible the protocol
+section (379 tokens) is also injected into the system prompt — **778 per request** in the
+recommended setup; a multi-candidate plan still makes a **real selector call** (a separate
+auxiliary model request). The shadow week saves no tokens; it produces only the four ratios below.
+Under `selected + []` the protocol section is empty and the fixed cost is still **399**.
 
 Of those ratios, `saveableRatio`, `byFamily`, and `candidateRecall` can decide **whether the
 substitution side is worth turning on**: how many substitution decisions the whitelist could
@@ -237,8 +243,12 @@ a normal release and does not gate on shadow-week savings — and that call was 
 period; they did not rule on whether shadow results should gate a release. They also **cannot measure savings**: the report has no total-token denominator, and
 `retrievalUpperBound` is structurally `0` during the shadow week (it only counts applied
 `projection:'on'` retrievals), so it cannot even bound projection's retrieval damage. Projection
-is released on the visibility contract (the original stays retrievable through the footer) and
-post-hoc detection, not on shadow labels.
+is released on the visibility contract alone (the original stays retrievable through the footer),
+not on shadow labels — and **not on post-hoc detection**: v1 has no mis-truncation detector.
+`src/admission/retrieval.ts` only counts exact-locator retrievals, and design §6.1 itself records
+that the damage metric was never delivered and that retrieval counts are not a damage bound. The
+only guard is that the model can retrieve the original; a retrieval being attempted is a signal,
+not proof that nothing was wrongly cut.
 `scope.json` has two independent switches:
 
 | Switch | Value | Behaviour |
@@ -265,7 +275,8 @@ The recommended sequence:
    (recall of the candidate set), and `retrievalUpperBound` (retrieval upper bound; structurally
    `0` during the shadow week because nothing is projected for real).
 3. **Turn on projection**: projection is not released on shadow labels (its basis is the
-   visibility contract and post-hoc detection); once the host spill backend is available, keep
+   visibility contract — the original stays retrievable through the footer; v1 has no
+   mis-truncation detector); once the host spill backend is available, keep
    `shadow: true` and set `projection` to `'on'`:
 
    ```json
@@ -542,11 +553,15 @@ evidence" degraded path would be unreachable.
   v1 ships **no tool that measures duplicate-call rate**: the "shadow-week duplication
   statistic" the design reserved as its restart trigger was never delivered; `shadow-report.mjs`
   does not produce it.
-- **The shadow week saves nothing by design**: it only records (the protocol section is still
-  injected and the selector is still called); its output is four ratios, not saved tokens.
+- **The shadow week saves no tokens**: it only records (the protocol section is still injected
+  and the selector is still called), and the recommended setup still costs 778 per request
+  (`selected + []` costs 399); its output is four ratios, not saved tokens.
 - **v1 does not judge "better results"**: there is a token ledger and a **manual** 20-task
   regression procedure (the task set does not ship with the package; see `docs/RELEASE.md` §3),
-  no quality metric; whether substituted outcomes are better is unjudgeable in v1.
+  no quality metric; whether substituted outcomes are better is unjudgeable in v1. The procedure
+  itself is not fully delivered either: neither the smoke runner (`test/regression/run.mjs`) nor
+  the same section's locator-retrieval integrity check exists, and `test/regression/` holds only
+  `.gitkeep` — so the "no data loss" invariant in its pass predicate is **unverified** in v1.
 - **Projection is truncation, not refinement**: it keeps the head and tail and drops the middle;
   the before/after token difference in the ledger measures *shorter*, not *more relevant*. The
   dropped middle may be exactly what the next decision needs — with `projection: 'on'` the
@@ -582,7 +597,7 @@ The source and docs live in the repository at
 | [Design](docs/superpowers/specs/2026-11-18-dsh-token-efficiency-design.md) | Goals, evidence, architecture, contracts, measurement, risks, release shape |
 | [Host contracts appendix](docs/superpowers/plans/2026-11-18-host-contracts.md) | Interface reference copied line by line from the host sources |
 | [Three-tier delegation research](docs/research/2026-11-18-three-tier-delegation.md) | 25 primary sources on caching, routing thresholds, compression, and verification |
-| [Release acceptance](docs/RELEASE.md) | The one-command `npm run verify:package` acceptance, the zero-peerDependencies state and install spec, the degradation-code matrix, the 20-task regression procedure (manual; the task set does not ship), and the shadow week and stats recompute |
+| [Release acceptance](docs/RELEASE.md) | The one-command `npm run verify:package` acceptance, the zero-peerDependencies state and install spec, the degradation-code matrix, the 20-task regression procedure (manual; the task set, runner, and locator-retrieval integrity check all remain undelivered), and the shadow week and stats recompute |
 
 ## License
 

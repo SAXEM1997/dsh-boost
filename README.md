@@ -8,7 +8,7 @@
 ## 它解决什么
 
 DSH 每次模型请求都会回放全部历史。本机 300 个最长会话的实测聚合（`npm run --silent stats`——不带
-`--silent` 时 npm 会把 `> dsh-boost@0.1.1 stats` 横幅打进 stdout，机器解析请用 `--silent` 或直接
+`--silent` 时 npm 会把 `> dsh-boost@0.1.2 stats` 横幅打进 stdout，机器解析请用 `--silent` 或直接
 `node scripts/session-stats.mjs`；快照时刻 `2026-11-19T03:13:21Z`）：54,141 步、54,088 个请求，合计 10,575,904,022 raw token。按步均值
 195,340 token，按请求均值 195,531、中位 187,681；97.01% 的输入是缓存读。工具回执是体积主体
 （bash 61.75%、read 22.13%、ssh 10.01%），而下一步真正会用到的部分通常远小于回执本身。
@@ -36,7 +36,9 @@ v1 的**事前估算**区间是 **3.5%（下界）– 10.0%（理想上界）**�
 **3.5% 不是保底**——它是设计阶段对一个 300 会话语料做离线估算得到的下界，其中替换账的
 2.70% 是**上限**，不能算进保底；诚实的净保底只有约 **0.4%**（投影侧毛额约 0.8% 减去每请求
 固定开销约 0.4%）。这个区间不是保证，也不是从交付的 `session-snapshot.json` 能复算出来的
-数字（快照只存聚合计数，没有估算用的分项）——交付物里**没有任何工具能复算它**。影子周也
+数字：快照按会话存了聚合计数，也存了每个会话的 `requestTokens` / `receiptChars` 数组、
+`valueTransfer` / `whitelist` 计数，以及该会话按工具族归因的 `toolChars` 字符总量，但
+**没有逐回执的族别字节**，估算所需的投影分项仍然凑不出来——交付物里**没有任何工具能复算它**。影子周也
 **不能**把这个区间变成实测百分比：影子报告只输出四个比例（见「影子周」一节），没有总 token
 分母，`boost status` 也只有绝对值；区间要被实测取代，得等后续版本补上分母统计。
 
@@ -58,26 +60,26 @@ v1 的**事前估算**区间是 **3.5%（下界）– 10.0%（理想上界）**�
 `dsh plugin` 要求指定 profile，剩下的参数原样转发给该 profile 目录里的 pnpm：
 
 ```bash
-# 从 registry 安装：npmjs 上的 latest 是 0.1.1（本仓库 .npmrc 与 lockfile
+# 从 registry 安装：npmjs 上的 latest 是 0.1.2（本仓库 .npmrc 与 lockfile
 # 也已钉在 npmjs，见下）
-dsh plugin --profile <name> add dsh-boost@^0.1.1 --registry=https://registry.npmjs.org/
+dsh plugin --profile <name> add dsh-boost@^0.1.2 --registry=https://registry.npmjs.org/
 
 # 或从本地 checkout 安装（先构建；dist/ 不入库）
 npm run build
 dsh plugin --profile <name> add /absolute/path/to/dsh-boost
 ```
 
-例如 web profile：`dsh plugin --profile web add dsh-boost@^0.1.1 --registry=https://registry.npmjs.org/`。
+例如 web profile：`dsh plugin --profile web add dsh-boost@^0.1.2 --registry=https://registry.npmjs.org/`。
 `dsh plugin` 把操作转发给 pnpm，所以 pnpm 必须在 PATH 上。
 
-> **两个 registry 的版本不同，`^0.1.0` 不是安全的钉法。** `registry.npmjs.org` 上有三条版本记录：
-> `0.1.1`（当前 `latest`）、`0.1.0`，以及首次发布时 npm 自动创建的占位版本 `0.0.0-stage`。而
-> `registry.npmmirror.com` 目前只有 `0.1.0`（它的 `latest` 也是 0.1.0）——本仓库已把 `.npmrc`
-> 与 lockfile 改钉 npmjs，但你机器上的全局 npm 配置可能仍指向镜像。同一个
-> `^0.1.0` 在 npmjs 解析到 0.1.1、在镜像解析到 0.1.0——镜像用户会装到缺少 0.1.1 十项修复的
-> 构建，其中几项是静默失效修复。请用 `dsh-boost@^0.1.1`（或 `@latest`），并在意 registry 时
-> 显式传 `--registry=https://registry.npmjs.org/`；镜像尚未同步 0.1.1 时，不带该 flag 的
-> `@^0.1.1` 会解析失败。
+> **两个 registry 现在都到 0.1.2，`^0.1.2` 是安全的钉法。** `registry.npmjs.org` 与
+> `registry.npmmirror.com` 各有四条版本记录：`0.1.2`（两边都是当前 `latest`）、`0.1.1`、
+> `0.1.0`，以及首次发布时 npm 自动创建的占位版本 `0.0.0-stage`——**不要安装 `0.0.0-stage`**，
+> 它不是可用构建。0.1.2 修掉了 scope 文件被静默覆盖的问题：坏 JSON（含非对象或数组）与
+> 无法识别的版本不再被默认文档覆盖。请用 `dsh-boost@^0.1.2`（或 `@latest`）。本仓库已把 `.npmrc`
+> 与 lockfile 钉在 npmjs，但**你机器上的全局 npm 配置**可能仍指向一个尚未同步 0.1.2 的镜像：
+> 那是本机配置，不是本仓库的状态。在意 registry 时显式传
+> `--registry=https://registry.npmjs.org/`；镜像滞后时，`@^0.1.2` 会在同步前解析失败。
 
 包是 ESM（`"type": "module"`），`exports` 的 `.` 条目同时映射 `require` / `default`：Node ≥ 24.9
 下 `require('dsh-boost')` 与 `import` 加载同一份代码，装好的包里**不做任何构建**（`files` 只带
@@ -187,9 +189,10 @@ scope**：`boost` 工具 schema（399）只要插件装配就常驻——`boost`
 ## 影子周
 
 设计选择**影子优先**：先用一周只记账（不合成回合、不跳过调用，投影只记账不改内容），再决定
-是否真的投影与替换。**「什么都不改」并不成立**：只要有可见工作区，协议段（379 token）就会
-注入系统提示；多候选计划仍会**真实调用一次选择器**（一次独立的辅助模型请求）。影子周按设计
-零节省，它只产出下一节的四个比例。
+是否真的投影与替换。**「什么都不改」并不成立**：`boost` 工具 schema（399 token）只要插件装配
+就常驻；只要有可见工作区，协议段（379 token）还会注入系统提示——推荐配置下每请求固定成本
+**778**；多候选计划仍会**真实调用一次选择器**（一次独立的辅助模型请求）。影子周不省任何
+token，它只产出下一节的四个比例；`selected + []` 下协议段为空，固定成本仍有 **399**。
 
 其中 `saveableRatio`、`byFamily`、`candidateRecall` 能决定的是**替换侧是否值得打开**：
 白名单能兑现多少替换决策、命中落在哪些工具族、候选集召回多高——也就是替换打开后会不会
@@ -197,8 +200,10 @@ scope**：`boost` 工具 schema（399）只要插件装配就常驻——`boost`
 门；这个决定是**实现者在设计阶段做的，不是用户裁决**——用户只接受了为期一周的影子期，没有
 裁定影子结果是否该当发布门。它们也**不能测出节省**：报告没有总 token 分母，
 `retrievalUpperBound` 在影子期结构性为 `0`（它只统计 `projection:'on'` 的已应用投影取回），
-连投影的取回损害都约束不了；投影的放行依据是可见性契约（原文可经页脚取回）与事后检测，
-不是影子标签。
+连投影的取回损害都约束不了。投影的放行依据只有可见性契约（原文可经页脚取回），不是影子
+标签，也**不是事后检测**：v1 没有误截检测器——`src/admission/retrieval.ts` 只按精确 locator
+统计取回次数，设计稿 §6.1 也写明损害度量未交付、取回计数不是损害上界。唯一的护栏是模型
+能取回原文；而「发生过取回」只是信号，不是「没有误截」的证明。
 `scope.json` 里有两个独立开关：
 
 | 开关 | 取值 | 行为 |
@@ -220,8 +225,8 @@ scope**：`boost` 工具 schema（399）只要插件装配就常驻——`boost`
    是每一次替换决策，不只是白名单调用；影子期全族记账，bash/ssh 的潜力看 `byFamily`）、`byFamily`（按候选工具族的命中率）、
    `candidateRecall`（候选集召回）、`retrievalUpperBound`（取回率上界；影子期没有真正投影，
    结构上恒为 `0`）。
-3. **打开投影**：投影的放行不靠影子标签（依据是可见性契约与事后检测），确认宿主 spill
-   后端可用后，保持 `shadow: true`，把 `projection` 改成 `'on'`：
+3. **打开投影**：投影的放行不靠影子标签（依据是可见性契约：原文可经页脚取回；v1 没有
+   误截检测器），确认宿主 spill 后端可用后，保持 `shadow: true`，把 `projection` 改成 `'on'`：
 
    ```json
    { "cmd": "scope-set", "body": { "projection": "on" }, "baseRevision": 1 }
@@ -457,10 +462,12 @@ spill，报它只会制造噪音）；但**收据通道**不看当前模式—�
 - **不去重、不合并工具调用**（设计 N5）——这条完全没开工，且 v1 **没有任何工具能测出重复
   调用率**：设计稿里用来触发重启判定的「影子周重复率统计」没有交付，`shadow-report.mjs`
   不产出它。
-- **影子周按设计零节省**：只记账（协议段照注入、选择器照调用），它的产出是四个比例，
-  不是省下的 token。
-- **v1 不评判「结果更好」**：只有 token 账目和一套**人工**的 20 任务回退流程（任务集不随包发布，见 `docs/RELEASE.md` §3），没有任何质量指标；「替换后
-  结果质量」在 v1 是不可判的。
+- **影子周不省 token**：只记账（协议段照注入、选择器照调用），推荐配置下每请求仍固定花
+  778（`selected + []` 为 399）；它的产出是四个比例，不是省下的 token。
+- **v1 不评判「结果更好」**：只有 token 账目和一套**人工**的 20 任务回退流程（任务集不随包发布，
+  见 `docs/RELEASE.md` §3），没有任何质量指标；「替换后结果质量」在 v1 是不可判的。这套流程
+  本身也没交付完整：冒烟 runner（`test/regression/run.mjs`）与同一节的取回完整性检查都未实现，
+  `test/regression/` 只有 `.gitkeep`，因此 pass 谓词里的「无数据丢失」不变量在 v1 **未经核实**。
 - **投影是截断，不是精炼**：它保留头尾、丢掉中段；账本里的 before/after token 差量的是
   「变短」，不是「变相关」。被丢掉的中段可能正是下一步决策要用的内容——`projection: 'on'`
   下原文可经页脚 locator 取回，但取回要花一次工具调用，且 v1 没有指标区分「精炼」与
@@ -490,7 +497,7 @@ spill，报它只会制造噪音）；但**收据通道**不看当前模式—�
 | [设计稿](docs/superpowers/specs/2026-11-18-dsh-token-efficiency-design.md) | 目标、证据、架构、契约、度量、风险、发布形态 |
 | [宿主契约附录](docs/superpowers/plans/2026-11-18-host-contracts.md) | 逐条抄自宿主源码的接口准绳 |
 | [三层委派研究](docs/research/2026-11-18-three-tier-delegation.md) | 缓存、路由阈值、压缩、校验的 25 条一手来源 |
-| [发布验收](docs/RELEASE.md) | `npm run verify:package` 一条命令验收、零 peerDependencies 现状与安装规格、降级码矩阵、20 任务回退流程（人工，任务集不随包发布）、影子周与统计复算 |
+| [发布验收](docs/RELEASE.md) | `npm run verify:package` 一条命令验收、零 peerDependencies 现状与安装规格、降级码矩阵、20 任务回退流程（人工；任务集、runner 与取回完整性检查均未交付）、影子周与统计复算 |
 
 ## 许可证
 
