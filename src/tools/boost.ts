@@ -409,8 +409,8 @@ export interface BoostStatus {
      */
     substitution: number
     /**
-     * **Lower** estimate: Σ numeric `avoided_total_tokens` over settled
-     * substitutions.
+     * **Lower** estimate: Σ numeric `avoided_total_tokens` over receipts that
+     * carry the field.
      *
      * The producer writes the skipped request's own total (`before.input +
      * before.cacheRead + before.output`), so this is the avoided cost itself
@@ -655,15 +655,18 @@ async function aggregate(
     if (receipt.kind === 'substitute-settled') {
       const saved = receipt.saved_input_tokens
       if (typeof saved === 'number' && Number.isFinite(saved)) substitution += saved
-      // The lower estimate is the skipped request's own total. Track presence
-      // separately from the value: a receipt carrying `0` is a measurement,
-      // while no receipt carrying the field means "not measured" and the key
-      // is omitted from `status` rather than reported as zero (review row 7).
-      const avoided = receipt.avoided_total_tokens
-      if (typeof avoided === 'number' && Number.isFinite(avoided)) {
-        substitutionAvoided += avoided
-        avoidedSeen = true
-      }
+    }
+
+    // The lower estimate is the skipped request's own total, summed over every
+    // receipt that carries it (the settled line is its producer). Presence is
+    // tracked separately from the value: a receipt carrying `0` is a
+    // measurement, while no receipt carrying the field means "not measured"
+    // and the key is omitted from `status` rather than reported as zero
+    // (review row 7).
+    const avoided = receipt.avoided_total_tokens
+    if (typeof avoided === 'number' && Number.isFinite(avoided)) {
+      substitutionAvoided += avoided
+      avoidedSeen = true
     }
 
     if (receipt.kind !== 'projection') continue
