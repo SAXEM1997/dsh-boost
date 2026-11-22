@@ -48,6 +48,12 @@ const REREAD_CODES = new Set([
 ])
 
 interface ScopeFormProps {
+  /**
+   * Whether the host resolved a spill backend, read from the same status the
+   * panels use. `undefined` means status could not be read, so the notice
+   * states the requirement without claiming it is met.
+   */
+  hasSpill?: boolean
   payload: StatePayload
   scopeCode: string | undefined
   onReload: () => void
@@ -68,7 +74,7 @@ function BlockedBy({ reasons }: { reasons: DisableReason[] }): ReactNode {
   )
 }
 
-export function ScopeForm({ payload, scopeCode, onReload }: ScopeFormProps): ReactNode {
+export function ScopeForm({ payload, scopeCode, hasSpill, onReload }: ScopeFormProps): ReactNode {
   const t = useT()
   const c = copyOf(t)
   const workspaces: WorkspaceListing | undefined = payload.workspaces
@@ -179,7 +185,7 @@ export function ScopeForm({ payload, scopeCode, onReload }: ScopeFormProps): Rea
                 checked={isTicked(draft, entry)}
                 onChange={() => toggleWorkspace(entry)}
               />
-              <span>{entry.path}</span>
+              <span>{entry.title === undefined ? entry.path : `${entry.title} — ${entry.path}`}</span>
             </label>
           ))
         )}
@@ -216,7 +222,9 @@ export function ScopeForm({ payload, scopeCode, onReload }: ScopeFormProps): Rea
         <div className="boost-settings__notice" role="note" data-notice="projection-on">
           <strong>{c.LABEL_PROJECTION_ON_PRECONDITIONS}</strong>
           <ul>
-            <li>{c.HINT_PROJECTION_ON_SPILL}</li>
+            <li>
+              {hasSpill === true ? c.HINT_PROJECTION_ON_SPILL_OK : c.HINT_PROJECTION_ON_SPILL}
+            </li>
           </ul>
           <p>{c.HINT_PROJECTION_ON_ROLLBACK}</p>
         </div>

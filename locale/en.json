@@ -14,7 +14,7 @@
   "ADVICE_FOR_CODE.ERR_HTTP_WORKSPACES_UNAVAILABLE": "The workspace list could not be read, so saving is disabled. This is not 'no workspaces' — the host offered no registry, or reading it threw.",
   "ADVICE_FOR_CODE.ERR_SCOPE_ABORTED": "The request was cancelled. Nothing on disk changed.",
   "ADVICE_FOR_CODE.ERR_SCOPE_FUTURE_VERSION": "The document on disk was written by a newer plugin. This version will not touch it. Upgrade the plugin.",
-  "ADVICE_FOR_CODE.ERR_SCOPE_LOCKED": "Another process holds the write lock. Save again shortly.",
+  "ADVICE_FOR_CODE.ERR_SCOPE_LOCKED": "The write lock is not available: usually another writer holds it, but the lock file may also fail to be created (permissions or disk). Make sure no other `boost` is writing, then retry.",
   "ADVICE_FOR_CODE.ERR_SCOPE_PARSE_FAILED": "The document on disk is not valid JSON. This version will not touch it. Inspect scope.json in the boost directory by hand.",
   "ADVICE_FOR_CODE.ERR_SCOPE_READ_FAILED": "The scope document on disk could not be read, so the baseline is unknown. Check permissions on the boost directory.",
   "ADVICE_FOR_CODE.ERR_SCOPE_REVISION_CONFLICT": "The document on disk changed elsewhere, so this save was rejected. Use 'Re-read' to start from the new document — your unsaved changes are lost, so that call is yours.",
@@ -48,7 +48,7 @@
   "HINT_PROJECTION_GROSS_REPLAY": "Each receipt's saving multiplied by its own (1 + horizon), summed. This is the figure the net is derived from.",
   "HINT_PROJECTION_NET": "Net = replay gross − retrieval content cost − retrieval call cost. Replay uses each receipt's own horizon, not the current one; so the two gross figures above are not the same number, and only the replay one lines up with the net.",
   "HINT_PROJECTION_ON_ROLLBACK": "To roll back, set projection back to `shadow` and save; or call the `boost` tool with `cmd: \"scope-set\"` and `body: {\"projection\": \"shadow\"}`. The change applies to subsequent requests with no host restart.",
-  "HINT_PROJECTION_ON_SPILL": "The host has a spill backend. Without one, projection is skipped: `boost status` lists `ERR_HOST_NO_SPILL` among the degraded codes and this page shows the same line.",
+  "HINT_PROJECTION_ON_SPILL": "Projection needs a spill backend: the original has to land somewhere, or the truncated text is the only copy. The host did not resolve one — `boost status` reports `ERR_HOST_NO_SPILL`. Install one (`dsh-spill-local` or your own) and restart.",
   "HINT_SAVED_LOWER": "The lower bound is the skipped request's own total usage: it excludes how many more times it would have been replayed, so the true saving is higher.",
   "HINT_SAVED_UPPER": "The upper bound is the next request's input: it counts the replaced call's result as saved, so the true saving is lower.",
   "HINT_SHADOW_MEANS": "Shadow mode: the plugin still decides and records receipts, but never changes what reaches the model.",
@@ -92,10 +92,13 @@
   "SECTION_STATUS": "Status",
   "TITLE": "Token efficiency",
   "UNAVAILABLE_REGISTRY": "The scope document could not be read, so this section is read-only for now.",
-  "UNKNOWN": "unknown error",
+  "UNKNOWN": "not measured",
   "meta": {
     "description": "Cut DeepSeek Harness token usage by projecting tool receipts and substituting deterministic read-only calls.",
     "title": "dsh-boost"
   },
-  "STATUS_UNAVAILABLE": "Status could not be read: the figures below are unread, not empty"
+  "STATUS_UNAVAILABLE": "Status could not be read: the figures below are unread, not empty",
+  "ADVICE_FOR_CODE.ERR_RECEIPTS_UNREADABLE": "Some receipt shards could not be read, so the totals are low. Shards are never pruned automatically, so this is usually permissions or disk: check the boost directory, or move the whole receipts directory aside and start over.",
+  "ADVICE_FOR_CODE.ERR_HOST_NO_SPILL": "The host has no usable spill backend, so projection keeps only the truncated text and does not save the original. Install a spill backend (`dsh-spill-local` or your own) and restart.",
+  "HINT_PROJECTION_ON_SPILL_OK": "The host resolved a spill backend (`status.hasSpill`), so the original will be saved there once projection is on."
 }

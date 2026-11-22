@@ -795,12 +795,15 @@ test('row 6: a failing workspaceRegistry is re-resolved after the provider is re
 
 test('row 6: ctx.effect cleanup invalidates the soft service bindings', async (t) => {
   const services = new Map<string, unknown>([['workspaceRegistry', TEST_REGISTRY]])
-  let cleanup: (() => void) | undefined
+  // Collect every effect, not just the last one: `apply` registers more than
+  // one disposer (the service memos and the settings route), and cordis runs
+  // them in reverse on unload.
+  const cleanups: (() => void)[] = []
   const app = await appliedHost(t, {
     services,
     beforeApply: (host) => {
       host.effect = (run: () => () => void) => {
-        cleanup = run()
+        cleanups.push(run())
       }
     },
   })
@@ -809,10 +812,10 @@ test('row 6: ctx.effect cleanup invalidates the soft service bindings', async (t
 
   const first = await assembleSection(app.host, agent)
   assert.match(first.sections[0].text, /<CHISEL_PLAN>/)
-  assert.equal(typeof cleanup, 'function', 'apply must register a disposal effect')
+  assert.ok(cleanups.length > 0, 'apply must register disposal effects')
 
   services.set('workspaceRegistry', { list: () => [], resolveByPath: async () => undefined })
-  cleanup?.()
+  for (const dispose of [...cleanups].reverse()) dispose()
   const second = await assembleSection(app.host, agent)
   assert.equal(second.sections[0].text, '')
 })

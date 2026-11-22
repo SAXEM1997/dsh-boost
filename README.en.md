@@ -12,7 +12,7 @@ read-only substitution**.
 ## What it does
 
 DSH replays the whole history on every model request. Across the 300 longest sessions measured
-locally (`npm run --silent stats` — without `--silent`, npm prints its `> dsh-boost@0.2.1 stats`
+locally (`npm run --silent stats` — without `--silent`, npm prints its `> dsh-boost@0.2.2 stats`
 banner to stdout, so use `--silent` or `node scripts/session-stats.mjs` for machine-readable
 output; snapshot at `2026-11-19T03:13:21Z`): 54,141 steps and 54,088 requests,
 10,575,904,022 raw tokens in total. The mean is 195,340 tokens per step and 195,531 per request
@@ -85,19 +85,19 @@ denominator statistic that a later version must add.
 directory:
 
 ```bash
-# install from the registry: npmjs has latest = 0.2.0 (this repository's
+# install from the registry: npmjs has latest = 0.2.2 (this repository's
 # .npmrc and lockfile are pinned to npmjs too — see below)
-dsh plugin --profile <name> add dsh-boost@^0.2.0 --registry=https://registry.npmjs.org/
+dsh plugin --profile <name> add dsh-boost@^0.2.2 --registry=https://registry.npmjs.org/
 
 # or from a local checkout (build first; dist/ is not committed)
 npm run build
 dsh plugin --profile <name> add /absolute/path/to/dsh-boost
 ```
 
-For the web profile: `dsh plugin --profile web add dsh-boost@^0.2.0 --registry=https://registry.npmjs.org/`.
+For the web profile: `dsh plugin --profile web add dsh-boost@^0.2.2 --registry=https://registry.npmjs.org/`.
 `dsh plugin` forwards the operation to pnpm, so pnpm must be on `PATH`.
 
-> **`^0.2.0` is the current safe pin.** `registry.npmjs.org` has `latest` at `0.2.0`, with
+> **`^0.2.2` is the current safe pin.** `registry.npmjs.org` has `latest` at `0.2.2`, with
 > `0.1.4`, `0.1.3`, `0.1.2`, `0.1.1`, `0.1.0` behind it, plus `0.0.0-stage`, the placeholder npm
 > creates on a package's first publish — **do not install `0.0.0-stage`**; it is not a usable
 > build. `0.2.0` adds the settings page (`dsh.client`, the `./client` export, the

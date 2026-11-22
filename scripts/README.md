@@ -6,7 +6,7 @@ checkout with the development dependencies installed.
 
 ## Session statistics
 
-`npm run stats` prints npm's own banner (`> dsh-boost@0.1.3 stats` and the
+`npm run stats` prints npm's own banner (`> dsh-boost@0.2.2 stats` and the
 command line) on **stdout** before the JSON, so it must not be piped directly.
 For a machine-readable stream use one of the quiet forms:
 
@@ -37,13 +37,14 @@ The release path is three explicit steps, in this order:
 ```bash
 npm run ci                            # typecheck, tests, and one clean build
 npm run verify:package -- --prebuilt  # pack and verify exactly that dist
-npm publish                           # no `prepare` hook rebuilds it
+npm publish                           # `prepare` runs, but both halves exist, so it is a no-op
 ```
 
 `prepublishOnly` is `npm run ci && npm run verify:package -- --prebuilt`, so a
-release cannot skip the gate. `package.json` no longer publishes a `prepare`
-script: npm 11 warns when a tarball install runs one, and a stricter consumer
-that runs it without devDependencies would fail. Relying on `prepublishOnly`
+release cannot skip the gate. `package.json` publishes `prepare`, because a git install has neither half
+built. It builds only the half that is missing, and `npm pack --ignore-scripts`
+skips it, so the tarball still describes exactly the tree `npm run build` left.
+Relying on `prepublishOnly`
 for the release build also means `npm publish`'s own pack step cannot rebuild
 the tree after verification.
 

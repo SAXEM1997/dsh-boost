@@ -1707,7 +1707,7 @@ export function apply(ctx: PluginContext, config: unknown): void {
       // a route that could not mount is a different fault with a different
       // remedy (the tool is the control surface; the route is only the page).
       try {
-        registerHttpApi(
+        const disposeRoute = registerHttpApi(
           ctx,
           {
             status: () => runBoost({ ...boostDeps, args: { cmd: 'status' } }),
@@ -1729,6 +1729,10 @@ export function apply(ctx: PluginContext, config: unknown): void {
           },
           message => ctx.logger?.warn?.(message),
         )
+        // The route is not fiber-tied: `webServer.register` holds it, and a
+        // re-register of the same (kind, path) throws. Hand the disposer to the
+        // fiber so an unload or an HMR remount takes the route back out.
+        ;(ctx as unknown as EffectContext).effect?.(() => disposeRoute, 'dsh-boost: settings route')
       } catch (error) {
         ctx.logger?.warn?.(
           `dsh-boost: ${ERR_BOOST_HTTP_MOUNT_FAILED}: settings page has no data route (${messageOf(error)})`,

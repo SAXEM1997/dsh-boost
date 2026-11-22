@@ -66,6 +66,15 @@ test('the gate rejects a bundle that does not export inject', () => {
   assert.throws(() => assertClientBundleText(text, PACKAGE_NAME), /does not export `inject`/)
 })
 
+test('the gate accepts a host package resolved through require', () => {
+  // The sanctioned form must pass: `dsh.client.external` plus `require` is how a
+  // bundle is supposed to reach a host package.
+  const text = mutated((s) =>
+    s.replace('exports.apply =', 'const tools = require("@deepseek-ai/dsh-tools");\n    exports.apply ='),
+  )
+  assert.doesNotThrow(() => assertClientBundleText(text, PACKAGE_NAME))
+})
+
 test('the gate rejects a bundle that never resolves React through the host', () => {
   const text = mutated((s) => s.replace('require("react/jsx-runtime")', 'jsxRuntime'))
   assert.throws(() => assertClientBundleText(text, PACKAGE_NAME), /never resolves React/)
@@ -77,9 +86,9 @@ test('the gate rejects a bundle that pulls in a host package', () => {
   // would otherwise be unenforced for everything except React.
   // React still resolves through the host — this bundle additionally pulls a
   // host package, which is the case the React clause alone cannot see.
-  const text = mutated((s) =>
-    s.replace('exports.apply =', 'const tools = require("@deepseek-ai/dsh-tools");\n    exports.apply ='),
-  )
+  // The bare form: a host package named outside `require`, which is what an
+  // inlined copy looks like after the bundler drops the specifier's call site.
+  const text = mutated((s) => s.replace('exports.apply =', 'const tools = "@deepseek-ai/dsh-tools";\n    exports.apply ='))
   assert.throws(() => assertClientBundleText(text, PACKAGE_NAME), /@deepseek-ai/)
 })
 

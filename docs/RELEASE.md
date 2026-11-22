@@ -1,6 +1,6 @@
 # dsh-boost 发布验收
 
-本文是 `dsh-boost` 0.2.1 的发布验收手册（版本以 `package.json` 为准）。它覆盖四件事：
+本文是 `dsh-boost` 0.2.2 的发布验收手册（版本以 `package.json` 为准）。它覆盖四件事：
 
 1. `npm run verify:package` 一条命令的打包与产物验收（§1），以及零 peerDependencies 现状下
    两条降级路径的验收方式（§2）；
@@ -32,7 +32,7 @@ npm run verify:package
 
 1. 脚本显式跑 `npm run build`，再用 `npm pack --ignore-scripts` 打出真实 tarball。
    `--ignore-scripts` 的作用不是挡住重建——`prepare` 现在存在（`scripts/prepare-build.mjs`：
-   只在 `dist/index.js` 缺失时构建，供 git 安装使用；`scripts/` 不进 tarball），但
+   只在 `dist/index.js`（或 `lib/client.js`）缺失时构建，供 git 安装使用；`scripts/` 不进 tarball），但
    `--ignore-scripts` 会跳过它，所以 tarball 只描述上一条 `npm run build` 留下的那棵树；
    将来若有人把 `prepare` 改成无条件重建，这条也不会让它在断言之前悄悄重建（并“修复”）工作树。
    显式构建后打包，包内容就是这次构建的产物；干净 clone 上即使 `dist/` 不存在也能跑，因为构建
@@ -153,8 +153,7 @@ git checkout lib/client.js             # 或 npm run build:client 重建
 - `version` 必须存在，否则 `npm pack` 在第一步就报 `Invalid package, must have name and version`。
 - `files` 与实际布局一致：`scripts/`、`test/`、`src/` 是 dev-only，**不**进包（`files` 只带
   `dist`、`locale`、`cordis.patch.yml`、两份 README、`LICENSE`、`NOTICE`）；`dist/` 由
-  `npm run build`（clean + `tsc`）构建；`prepare`（`scripts/prepare-build.mjs`）只在
-  `dist/index.js` 缺失时构建（git 安装用），`dist` 已存在时是 no-op，所以 `npm publish` 的
+  `npm run build`（clean + `tsc` + 客户端）构建；`prepare`（`scripts/prepare-build.mjs`）按缺失的那一半分别构建（git 安装用）——`dist/index.js` 与 `lib/client.js` 都在时是 no-op，所以 `npm publish` 的
   pack 步骤不会重建已构建的树；sourcemap 以 `inlineSources` 内联源码，装好的包没有 `src/`
   也能对上源码。
 
@@ -342,10 +341,11 @@ tarball 会拉进 `dsh-spill-policy@rc.5` 并 `ERESOLVE`（当时实测 exit 1�
   不是 API 已改的证明；改名仍可能让插件失效）。区间内但不是验证过的 `0.2.2-rc.4`（如 `rc.5` /
   `0.2.2`）只记 info、不发码——`0.2.2-rc.5` 与本插件触及的九个包逐字节相同。
 
-安装规格：**`dsh-boost@^0.2.1`**。registry 上有八条版本记录，其中一条是占位版本，不要把它当成
+安装规格：**`dsh-boost@^0.2.2`**。registry 上有九条版本记录，其中一条是占位版本，不要把它当成
 “更早的 API”：
 
-- `0.2.1` — 当前 `latest`；通读评审后的一轮修复，其中三条是 0.2.0 带着发布的行为错误（状态面板读高一层信封、危险提示挂错开关、写失败被报成读失败）；
+- `0.2.2` — 当前 `latest`；第二轮通读后的修复，其中三条是 0.2.1 带着发布的（写失败码被 `SCOPE_CODES` 吞成 `ERR_BOOST_INTERNAL`、git 安装缺 `lib/client.js`、`/state` 失败被渲染成「一切正常」）；
+- `0.2.1` — 第一轮通读后的修复，其中三条是 0.2.0 带着发布的行为错误（状态面板读高一层信封、危险提示挂错开关、写失败被报成读失败）；
 - `0.2.0` — 首个带设置页的版本；新增设置页（`dsh.client`、`./client` 出口、`/dsh-boost/api` 路由、
   随包发布的 `lib/client.js`）与中英双语；`0.1.x` 没有设置页；
 - `0.1.4` — 上一版；替换节省下界不再可能高于上界（上下文缩小即丢下界），投影页脚救出被切断
@@ -371,7 +371,7 @@ tarball 会拉进 `dsh-spill-policy@rc.5` 并 `ERESOLVE`（当时实测 exit 1�
 
 建议（可选，不属于发布门）：给占位版本加一条弃用说明，让误装的人看到原因——
 `npm deprecate dsh-boost@0.0.0-stage "npm first-publish placeholder" --registry=https://registry.npmjs.org/`。
-它只写该版本的 deprecation 元数据，不改 `latest`、不影响 `^0.2.1` 的解析；本文档只建议，
+它只写该版本的 deprecation 元数据，不改 `latest`、不影响 `^0.2.2` 的解析；本文档只建议，
 不代替发布者执行。
 
 本节取代旧版安装矩阵（rc.4 / rc.5 两侧对照、含一行 `ERESOLVE` 失败）：那张表记录的是 **peer
@@ -404,7 +404,7 @@ for p in $pkgs; do diff -r "$d/0.2.2-rc.4/$p/lib" "$d/0.2.2-rc.5/$p/lib" >/dev/n
 是第三类观察面，不是工具返回值。§2.1、§2.2 是可构造的门的验收细则；本表是操作者看到某个码时的
 速查。收据流里的 `projection-skipped:no-spill` / `projection-skipped:no-footer` 是**输入**，
 分别映射成 `ERR_HOST_NO_SPILL` / `ERR_HOST_NO_SPILL_NOTICE`，本身不是稳定码。本表的代码行号以
-0.2.1 的发布 commit `1640b8c` 为准；源码继续演进时按函数名/命令名定位（行号可能已移动）。
+0.2.2 的发布 commit `db3da9b` 为准；源码继续演进时按函数名/命令名定位（行号可能已移动）。
 
 `ERR_HTTP_*` 是**设置页数据路由**的响应体码，不是 `status.degraded` 的成员：路由的每次失败都以
 JSON 体返回一个码，页面据码决定说什么。`ERR_CLIENT_*` 是页面自己产生的两个码（读不到路由、
@@ -615,7 +615,7 @@ node scripts/shadow-report.mjs --dir "${BOOST_ROOT:-$DSH_HOME}/boost/receipts"  
 
 复算（手工可重复，不碰会话目录；CI 只做发布门 `ci` + `verify:package`，不跑统计复算，见 §6.1）。
 机器可读的管道用下面两种之一：不带 `--silent` 的 `npm run stats` 会把 npm 的
-`> dsh-boost@0.2.1 stats` 横幅打进 **stdout**（stderr 重定向拦不住），直接接 `jq` 之类会破：
+`> dsh-boost@0.2.2 stats` 横幅打进 **stdout**（stderr 重定向拦不住），直接接 `jq` 之类会破：
 
 ```bash
 npm run --silent stats
@@ -683,7 +683,7 @@ DSH 宿主后的行为、§3 的 20 任务回退流程（人工）、§5 的统�
 
 `--ignore-scripts` and `npm publish <tgz>` skip the gate entirely; the only defence is running
 `npm run verify:package` on the commit you tag. 具体地，`npm publish --ignore-scripts` 不跑
-`prepublishOnly`，`npm publish ./dsh-boost-0.2.1.tgz` 对 tarball 发布也不跑包内任何脚本；两者都能
+`prepublishOnly`，`npm publish ./dsh-boost-0.2.2.tgz` 对 tarball 发布也不跑包内任何脚本；两者都能
 把没有 `dist/index.js` 的 8 文件空包推到 registry（本机 npm 11.19.1 实测：无 `dist/` 的干净 clone
 上 `npm publish --dry-run --ignore-scripts` exit 0，8 files / 29,532 字节，约 29.5 kB；该数是按
 0.1.1 的载荷量的，0.1.2 改了两份 README 与版本号，数字会略有出入）。`prepublishOnly` 只保护

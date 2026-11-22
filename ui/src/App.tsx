@@ -132,10 +132,15 @@ export function App() {
   // A failed status envelope must not read as health: without this the panels
   // below would say "no degraded items" and "no receipts yet" — a confident
   // wrong answer, which is worse than showing nothing.
-  const statusCode =
-    status !== null && typeof status === 'object' && (status as { ok?: unknown }).ok === false
+  // Three ways status can be unusable: the envelope failed (`ok:false` with a
+  // code), the payload is missing altogether, or it is not an object. All three
+  // must stop the health claims — only `ok:true` earns "nothing is degraded".
+  const statusOk = status !== null && typeof status === 'object' && (status as { ok?: unknown }).ok === true
+  const statusCode = statusOk
+    ? undefined
+    : status !== null && typeof status === 'object'
       ? String((status as { code?: unknown }).code ?? '')
-      : undefined
+      : ''
 
   const saved = pick(status, 'saved')
   const degraded = pick(status, 'degraded')
@@ -190,6 +195,7 @@ export function App() {
             <ScopeForm
               payload={result.data}
               scopeCode={pick(scope, 'code') as string | undefined}
+              hasSpill={typeof pick(status, 'hasSpill') === 'boolean' ? (pick(status, 'hasSpill') as boolean) : undefined}
               onReload={() => load()}
             />
           ) : null}

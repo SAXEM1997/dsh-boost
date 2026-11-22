@@ -74,6 +74,7 @@ import {
   mkdtempSync,
   readFileSync,
   readdirSync,
+  realpathSync,
   rmSync,
   statSync,
   writeFileSync,
@@ -364,11 +365,17 @@ export function assertClientBundleText(text, id) {
         'the shell supplies one shared React instance and a second copy breaks hooks',
     )
   }
-  if (/@deepseek-ai\//.test(text)) {
+  // The invariant is "host modules resolve through `require`", not "no host
+  // module may be named": `require("@deepseek-ai/x")` is the sanctioned form,
+  // and a copy that is actually inlined erases the specifier entirely, so this
+  // clause can only police the literal form. Strip the allowed calls, then
+  // reject any remaining mention.
+  const withoutRequires = text.replace(/\brequire\(\s*["'`][^"'`]*["'`]\s*\)/g, 'require()')
+  if (/@deepseek-ai\//.test(withoutRequires)) {
     throw new Error(
-      'client bundle mentions an @deepseek-ai/* package: the shell already provides the host ' +
-        'packages, so importing one inlines a second copy. Declare it in `dsh.client.external` ' +
-        'and resolve it through `require` instead',
+      'client bundle names an @deepseek-ai/* package outside `require(...)`: the shell already ' +
+        'provides the host packages, so a bare import inlines a second copy. Declare it in ' +
+        '`dsh.client.external` and resolve it through `require`',
     )
   }
   if (/Symbol\.for\(\s*["'`]react\./.test(text)) {
@@ -953,10 +960,28 @@ function main() {
 
 // Guarded so a test can import `assertClientBundleText` without running the
 // whole gate (which installs the tarball twice).
-const invokedDirectly =
-  process.argv[1] !== undefined && import.meta.url === pathToFileURL(process.argv[1]).href
+/**
+ * Is this file the entry point the process was started with?
+ *
+ * `import.meta.url` is the resolved path, so comparing it to a raw
+ * `pathToFileURL(argv[1])` misses when the gate is started through a symlink —
+ * and a release gate that quietly does nothing is worse than no gate. Resolve
+ * argv[1] first, and if it cannot be resolved fall back to comparing basenames
+ * so an unresolvable path still runs the checks instead of skipping them.
+ */
+function invokedDirectly() {
+  const entry = process.argv[1]
+  if (entry === undefined) return false
+  let resolved
+  try {
+    resolved = realpathSync(entry)
+  } catch {
+    resolved = resolve(entry)
+  }
+  return import.meta.url === pathToFileURL(resolved).href
+}
 
-if (invokedDirectly) {
+if (invokedDirectly()) {
   try {
     main()
   } catch (error) {

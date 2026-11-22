@@ -80,8 +80,9 @@ export function listWorkspaces(registry: unknown): WorkspaceListing {
     for (const entry of entries) {
       const id = (entry as { id?: unknown } | null | undefined)?.id
       const path = (entry as { path?: unknown } | null | undefined)?.path
+      const title = (entry as { title?: unknown } | null | undefined)?.title
       if (typeof id !== 'string' || typeof path !== 'string') continue
-      out.push({ id, path })
+      out.push(typeof title === 'string' && title !== '' ? { id, path, title } : { id, path })
     }
     return { available: true, entries: out }
   } catch {

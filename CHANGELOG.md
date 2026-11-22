@@ -10,6 +10,19 @@ Design rationale lives in `docs/superpowers/specs/`; the release-acceptance proc
 
 ## [Unreleased]
 
+## [0.2.3] - 2026-11-22
+
+### 修复 Fixed
+
+- **宿主包子句拦错了方向**：上一版让门拒绝任何提及 `@deepseek-ai/*` 的产物，而 `require("@deepseek-ai/x")` 正是文档允许的形式——门在禁止文档要求的写法，且它自己也看不见真正的问题（内联后 specifier 消失）。现在只拒绝 `require(...)` 之外的提及，并补一条「经 `require` 解析必须通过」的正例。
+- **工作区名字被丢在路由里**：宿主的 `Workspace` 有 `title`，`listWorkspaces` 把它丢了，页面只能画路径。现在一路带到页面，优先显示 `名字 — 路径`。
+- **spill 前置条件翻之前查不到**：提示文案说「页面上也会显示这一条」，但 `ERR_HOST_NO_SPILL` 只在 `projection:'on'` 时出现，翻之前那一屏的降级列表是空的。现在提示直接读 `status.hasSpill`：拿到了就说拿到了，没拿到就说没拿到。
+- **状态缺失也被当成健康**：上一版只处理了 `ok:false`，`status` 整个缺失或不是对象时仍会渲染「宿主提供了全部服务」。现在只有 `ok:true` 才允许这么说。
+- **设置页路由的生命周期没人管**：`registerHttpApi` 的 disposer 被丢弃，而 `webServer.register` 不是 fiber 托管的——卸载或 HMR 重挂时路由留在原地，再挂一次就因重复注册抛错。现在交给 `ctx.effect`。
+- **本地化文案与代码不符**：`ERR_RECEIPTS_UNREADABLE` 说「旧分片被丢弃」（实际从不清理）、`ERR_HOST_NO_SPILL` 说装 `dsh-spill`（后端是 `dsh-spill-local`）、`ERR_SCOPE_LOCKED` 只说「另一个进程拿着锁」（锁文件建不出来也用这个码）、`UNKNOWN` 写成「未知错误」却用来标未测量的数字（改为「未测量」）。
+- **发布门可经软链静默不跑**：`invokedDirectly` 直接比较 `import.meta.url` 与 `pathToFileURL(argv[1])`，经软链两者不同 → exit 0、什么都没检查。现在先 `realpathSync` 再比。
+- 版本与计数：两份 README 的 `latest` 与安装规格、RELEASE 的标题/版本列表/发布 commit、`scripts/README` 的版本、`CHANGELOG` 的键数（94→95）与「九种坏法」、`prepare` 的文档描述（现在两半分别按需构建）。
+
 ## [0.2.2] - 2026-11-22
 
 ### 修复 Fixed
@@ -21,7 +34,7 @@ Design rationale lives in `docs/superpowers/specs/`; the release-acceptance proc
 - **投影提示标题说「两件事」但只渲染一条**：`shadow` 与 `content[].thinking` 的那条 400 提示已经移到影子模式开关上，标题跟着改成「一件事」。
 - **客户端不变式只对 React 成立**：发布门原来只查 React 是否经 `require` 解析，`@deepseek-ai/*` 被内联也能过。现在门会拒绝任何提及宿主包的产物，并补一条负例。
 - **槽位 disposer 被丢弃**：`slots.inject` 的返回值没接，HMR 重挂会叠出第二个设置分区。现在交给 `ctx.effect` 管生命周期。
-- 版本与文档：`README` 的 `latest`、安装规格、RELEASE 的版本列表与发布 commit、`CHANGELOG` 的键数（92→94）、README.en 被表格切断的段落、「六种坏法」实为八条。
+- 版本与文档：`README` 的 `latest`、安装规格、RELEASE 的版本列表与发布 commit、`CHANGELOG` 的键数（92→94）、README.en 被表格切断的段落、「六种坏法」实为九条。
 
 ## [0.2.1] - 2026-11-22
 
@@ -49,7 +62,7 @@ Design rationale lives in `docs/superpowers/specs/`; the release-acceptance proc
 
 - **设置页**（`settings.section`，id `boost`）：在宿主的设置面板里读写 `scope.json` 的四个字段，走与 `boost scope-set` 同一个 CAS；只读列出 `boost status` 的全部面板（降级码与处置、节省区间上下界、收据计数、常驻开销、生效配置）。
 - **数据路由** `/dsh-boost/api`：`GET /state`、`POST /scope`。同源栅栏（`Host` 白名单防 DNS rebinding；写要求 `Origin`，读放行缺失的 `Origin`——同源 `GET` 本来就不带它）。
-- **中英双语**：`locale/{zh,en}.json` 各 94 个 UI 键，跟随宿主 `locale` 服务；宿主没有这个服务时页面仍可用，固定中文并 `console.warn` 一次。
+- **中英双语**：`locale/{zh,en}.json` 各 95 个 UI 键，跟随宿主 `locale` 服务；宿主没有这个服务时页面仍可用，固定中文并 `console.warn` 一次。
 - 两个危险开关各有自己的提示，**只提示，不做硬门**：投影切到 `on` 时提示 spill 前置条件；关掉影子模式时提示盯一次含 `content[].thinking` 的 400（那个 400 来自合成回合，只有替换才会触发，与投影无关）。两处都给回滚办法。
 - 发布门新增两条不变式：服务端 `dist/` 零静态宿主 import；客户端产物只经 `require` 解析宿主模块且必须带加载器信封。两者都有能失败的负例。
 - 新码：`ERR_HTTP_{METHOD,NOT_FOUND,FORBIDDEN,INTERNAL,BODY,WORKSPACES_UNAVAILABLE}`、`ERR_CLIENT_{NETWORK,SHAPE}`、`ERR_BOOST_HTTP_MOUNT_FAILED`、`ERR_SCOPE_WRITE_FAILED`（写盘失败与读盘失败分开：前者不该建议重读，那会丢掉一份好草稿）。

@@ -11,6 +11,14 @@
 export interface WorkspaceEntry {
   id: string
   path: string
+  /**
+   * The host's display name for the workspace, when it has one.
+   *
+   * `@deepseek-ai/dsh-workspace`'s `Workspace` carries `title`; it is optional
+   * here because the field is not guaranteed across host versions, and the page
+   * falls back to the path.
+   */
+  title?: string
 }
 
 /**
