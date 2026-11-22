@@ -7,7 +7,7 @@
 import { HTTP_API_PREFIX } from '../../src/shared/api-prefix'
 import type { StatePayload, WorkspaceListing } from '../../src/shared/api-types.js'
 
-export type { StatePayload, WorkspaceEntry, WorkspaceListing } from '../../src/shared/api-types'
+export type { StatePayload, WorkspaceEntry, WorkspaceListing } from '../../src/shared/api-types.js'
 
 /** Success carries the payload; failure carries a code and nothing else. */
 export type StateResult = { ok: true; data: StatePayload } | { ok: false; code: string }

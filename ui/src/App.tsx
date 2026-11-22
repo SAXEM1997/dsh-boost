@@ -194,7 +194,7 @@ export function App() {
             <ScopeForm
               payload={result.data}
               scopeCode={pick(scope, 'code') as string | undefined}
-              onSaved={() => load()}
+              onReload={() => load()}
             />
           ) : null}
 

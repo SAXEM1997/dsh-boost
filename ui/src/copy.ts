@@ -14,7 +14,6 @@ export const INTRO =
 
 export const SECTION_STATUS = '运行状态'
 export const SECTION_SCOPE = '作用域'
-export const SECTION_WORKSPACES = '工作区'
 export const SECTION_CONFIG = '生效配置'
 
 export const LABEL_DEGRADED = '降级项'
@@ -42,28 +41,20 @@ export const HINT_OVERHEAD =
   '每次请求的常驻成本：协议段 + 工具 schema。它不随会话变化，也不被任何节省抵消。'
 
 export const UNKNOWN = '未测量'
-export const NOT_APPLICABLE = '—'
 
 export const LABEL_MODE = '模式'
-export const LABEL_WORKSPACE_IDS = '已选工作区'
 export const LABEL_SHADOW = '影子模式'
 export const LABEL_PROJECTION = '投影'
-export const LABEL_REVISION = '修订号'
 
 export const MODE_SELECTED = '仅选中的工作区'
 export const MODE_GLOBAL = '全部工作区'
 export const ON = '开'
 export const OFF = '关'
-export const PROJECTION_OFF = '不投影'
-export const PROJECTION_SHADOW = '影子（只记账）'
-export const PROJECTION_ON = '投影并替换回执'
 
-export const NO_WORKSPACES_SELECTED = '还没有选中任何工作区：插件对任何会话都不生效。'
-export const NO_WORKSPACES_IN_REGISTRY = '宿主的注册表里没有工作区。这不是「没选中」，是宿主那边确实一个都没有。'
 export const CONFIG_UNAVAILABLE = '读不到生效配置：路由返回的 config 不是对象。页面不会把它显示成一张空表。'
 export const SECTION_COUNTS = '收据计数'
 export const NO_RECEIPTS = '还没有任何收据：插件在这个宿主上还没有产生过一次决策。'
-export const WORKSPACES_UNAVAILABLE =
+const WORKSPACES_UNAVAILABLE =
   '读不到工作区列表，所以保存被禁用。这不是「没有工作区」——是宿主没有提供注册表，或它读的时候抛错了。'
 
 export const LABEL_CONFIG_KEY = '键'
@@ -119,7 +110,7 @@ export const ADVICE_FOR_CODE: Record<string, string> = {
   ERR_BOOST_INTERNAL: '插件内部出错，磁盘上的文档没有被改动。看宿主日志。',
   ERR_CLIENT_NETWORK: '页面没能连上插件的路由。它可能没有挂上——看宿主日志里有没有 webServer。',
   ERR_CLIENT_SHAPE: '插件返回的数据形状和这个页面预期的不一样，多半是版本不匹配。',
-  ERR_HTTP_METHOD: '这个地址只接受读：写通道在保存那条路上，不在这里。',
+  ERR_HTTP_METHOD: '这个方法用错了：/state 只接受读，/scope 只接受 POST。页面自己不会发错，多半是别的调用方。',
   ERR_HTTP_NOT_FOUND: '插件没有这个子路径：页面与服务端的版本可能不一致。',
   ERR_HTTP_INTERNAL: '服务端读状态时抛了：通常是宿主服务在自己内部出错。看宿主日志。',
   ERR_HTTP_FORBIDDEN: '请求被同源栅栏拒绝：Host 不在受信列表里，或 Origin 与 Host 不一致。',
@@ -144,5 +135,4 @@ export const LABEL_UNMATCHED_IDS = '已勾选但注册表里没有'
 /** The wire values, which are not the labels above. */
 export const MODE_VALUE_SELECTED = 'selected'
 export const MODE_VALUE_GLOBAL = 'global'
-export const PROJECTIONS: readonly string[] = ['off', 'shadow', 'on']
 export const UNAVAILABLE_REGISTRY = '读不到作用域文档，这一块暂时只读。'

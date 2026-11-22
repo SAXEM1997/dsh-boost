@@ -393,6 +393,18 @@ for p in $pkgs; do diff -r "$d/0.2.2-rc.4/$p/lib" "$d/0.2.2-rc.5/$p/lib" >/dev/n
 JSON 体返回一个码，页面据码决定说什么。`ERR_CLIENT_*` 是页面自己产生的两个码（读不到路由、
 返回体形状不认识），只出现在页面上，不经过网络。
 
+路由是**一个** prefix 注册（`/dsh-boost/api`），两个端点：
+
+| 端点 | 方法 | 作用 |
+|---|---|---|
+| `/state` | `GET` / `HEAD` | 页面读的全部数据：`status`、`scope`、`workspaces`、`config`，与 `boost status` / `scope-get` 同一份计算 |
+| `/scope` | `POST` | 写四个可写字段，走 `scope-set` 的校验与 CAS；体是 `{ body, baseRevision }`，上限 64 KiB |
+
+两者都过同源栅栏（`src/http/fence.ts`），但**写要求 `Origin`**：浏览器对同源 `GET` 不发 `Origin`，
+对写一定会发，所以「读放行缺失的 `Origin`、写要求它」既能挡住跨站写，又不会把页面自己的读挡掉。
+`Host` 必须是 loopback 或宿主的 `trustedHosts` 之一，防的是 DNS rebinding——只比 `Origin` 与 `Host`
+挡不住它，因为攻击者可以把两者都设成自己的域名。
+
 | 码 | 观察面 | 可观察症状 | 操作者动作 |
 |---|---|---|---|
 | `ERR_HOST_NO_WORKSPACE_REGISTRY` | `status.degraded` | cwd 永远映射不到工作区，一切 fail-closed，“装上了却什么都不发生” | 宿主未提供 workspaceRegistry；换正确宿主 |
@@ -424,7 +436,8 @@ JSON 体返回一个码，页面据码决定说什么。`ERR_CLIENT_*` 是页面
 | `ERR_HOST_NO_SYSTEM_PROMPT_ASSEMBLE` | 加载日志警告（一次） | 首个 `agent/pre-step` 到达前从未观察到 `system-prompt/assemble`：协议段无法预热/打补丁（事件可能被改名或移除）。事件名同时进 `missingMounts`，所以 `status.degraded` 里看到的是 `ERR_BOOST_PARTIAL_MOUNT` | 核对宿主提示装配事件；升级宿主，或接受协议段不可用 |
 | `ERR_HOST_NO_AGENT_PRE_STEP` | 加载日志警告（一次） | 首个**主** `llm/stream` 前没有该会话的 `agent/pre-step`：步进时钟无法推进，替换不可能（带 `purpose` 的辅助请求不触发）。同样进 `missingMounts` | 升级宿主；此宿主上替换不可用，投影仍可用 |
 | `ERR_HTTP_FORBIDDEN` | 设置页路由的响应体（403） | 请求被同源栅栏拒绝：`Host` 既不是 loopback 也不在宿主的 `trustedHosts` 里；或 `sec-fetch-site: cross-site`；或 `Origin` 与 `Host` 指向不同的 authority；或 `Origin` 在但解析不了 | 用受信的 Host 打开页面（宿主启动时的 `--trusted-host`）；反向代理没把 `Host` 透传过来时，页面与路由看到的是两个 authority |
-| `ERR_HTTP_METHOD` | 设置页路由的响应体（405） | 对只读路由发了 `GET`/`HEAD` 以外的方法。写通道在保存那条路上，不在这条路上 | 检查调用方；这不是权限问题，是路由不提供写 |
+| `ERR_HTTP_METHOD` | 设置页路由的响应体（405） | 对 `/state` 发了写，或对 `/scope` 发了 `GET`/`HEAD`/`POST` 以外的方法 | 检查调用方；这不是权限问题，是路由不提供那种方法 |
+| `ERR_HTTP_BODY` | 设置页路由的响应体（400） | 写请求的体不是合法 JSON，或超过 64 KiB | 检查调用方；页面自己不会发出这种请求 |
 | `ERR_HTTP_NOT_FOUND` | 设置页路由的响应体（404） | 前缀匹配上了但子路径不认识：页面与服务端版本不一致 | 升级插件到页面与产物同一个版本 |
 | `ERR_HTTP_INTERNAL` | 设置页路由的响应体（500） | `status`/`scope` 的计算在路由里抛了（宿主服务的 getter 抛错）。四个字段一个都不会返回 | 看宿主日志；这是 bug 级失败，不是配置问题 |
 | `ERR_HTTP_WORKSPACES_UNAVAILABLE` | 设置页路由的响应体（`workspaces.available === false`） | 宿主没有 workspace 注册表，或 `list()` 抛错/返回的不是数组。页面因此**禁用保存**，并说明「读不到」而不是渲染空列表 | 与 `ERR_HOST_NO_WORKSPACE_REGISTRY` / `ERR_HOST_WORKSPACE_REGISTRY_BROKEN` 同源，处置见那两行 |

@@ -88,13 +88,13 @@ import type { Receipt, ReceiptStore } from '../receipts/store.js'
 const ERR_BOOST_UNKNOWN_CMD = 'ERR_BOOST_UNKNOWN_CMD'
 
 /** Stable failure code: a required argument (`baseRevision`) is missing or malformed. */
-const ERR_BOOST_INVALID_ARGS = 'ERR_BOOST_INVALID_ARGS'
+export const ERR_BOOST_INVALID_ARGS = 'ERR_BOOST_INVALID_ARGS'
 
 /** Stable failure code: `body` is not a valid, writable scope patch. */
-const ERR_BOOST_INVALID_BODY = 'ERR_BOOST_INVALID_BODY'
+export const ERR_BOOST_INVALID_BODY = 'ERR_BOOST_INVALID_BODY'
 
 /** Stable failure code: an unexpected internal failure, so the tool still answers. */
-const ERR_BOOST_INTERNAL = 'ERR_BOOST_INTERNAL'
+export const ERR_BOOST_INTERNAL = 'ERR_BOOST_INTERNAL'
 
 /** Every scope failure code, for passing the store's codes through unchanged. */
 const SCOPE_CODES: ReadonlySet<string> = new Set([

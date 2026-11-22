@@ -13,17 +13,20 @@
 import { useCallback, useEffect, useMemo, useState, type ReactNode } from 'react'
 import { saveScope } from './api'
 import {
+  PROJECTIONS,
   disableReasons,
   draftOf,
   isDirty,
+  isTicked,
   patchOf,
-  pathUnmatched,
+  unmatchedDraftIds,
   seedOf,
   staleWorkspaceIds,
+  toggleTicked,
   type ScopeDraft,
-  type ScopeSeed,
+  type ScopeDocument,
 } from './draft'
-import type { StatePayload, WorkspaceListing } from './api'
+import type { StatePayload, WorkspaceEntry, WorkspaceListing } from './api'
 import type { DisableReason } from './draft'
 import {
   ACTION_REREAD,
@@ -44,20 +47,32 @@ import {
   LABEL_WORKSPACES,
   MODE_VALUE_GLOBAL,
   MODE_VALUE_SELECTED,
-  PROJECTIONS,
   SAVED,
   SECTION_SCOPE,
   UNAVAILABLE_REGISTRY,
   adviceFor,
 } from './copy'
 
-/** The three values `projection` may take, in the order the control offers them. */
-type Projection = ScopeDraft['projection']
+/**
+ * Failures a re-read can actually fix.
+ *
+ * Offered only here: a network or body error is not cured by re-seeding, and
+ * the button discards the draft, so it must not appear next to a failure the
+ * user can simply retry.
+ */
+const REREAD_CODES = new Set([
+  'ERR_SCOPE_REVISION_CONFLICT',
+  'ERR_SCOPE_LOCKED',
+  'ERR_SCOPE_READ_FAILED',
+  'ERR_SCOPE_UNKNOWN_VERSION',
+  'ERR_SCOPE_FUTURE_VERSION',
+  'ERR_SCOPE_PARSE_FAILED',
+])
 
 interface ScopeFormProps {
   payload: StatePayload
   scopeCode: string | undefined
-  onSaved: (data: unknown) => void
+  onReload: () => void
 }
 
 /** Renders one reason a save is blocked. Every one of them is independent. */
@@ -74,9 +89,9 @@ function BlockedBy({ reasons }: { reasons: DisableReason[] }): ReactNode {
   )
 }
 
-export function ScopeForm({ payload, scopeCode, onSaved }: ScopeFormProps): ReactNode {
+export function ScopeForm({ payload, scopeCode, onReload }: ScopeFormProps): ReactNode {
   const workspaces: WorkspaceListing | undefined = payload.workspaces
-  const [seed, setSeed] = useState<ScopeSeed | undefined>(() => seedOf(payload.scope))
+  const [seed, setSeed] = useState<ScopeDocument | undefined>(() => seedOf(payload.scope))
   const [draft, setDraft] = useState<ScopeDraft | undefined>(() => {
     const initial = seedOf(payload.scope)
     return initial === undefined ? undefined : draftOf(initial)
@@ -97,24 +112,15 @@ export function ScopeForm({ payload, scopeCode, onSaved }: ScopeFormProps): Reac
   const reasons = useMemo(() => disableReasons(payload.scope, workspaces), [payload.scope, workspaces])
   const dirty = draft !== undefined && seed !== undefined && isDirty(draft, seed)
   const stale = staleWorkspaceIds(seed, workspaces)
-  const unmatched = draft === undefined ? [] : pathUnmatched(draft, workspaces)
+  const unmatched = draft === undefined ? [] : unmatchedDraftIds(draft, workspaces)
   const entries = workspaces?.available === true ? workspaces.entries : []
 
   const update = useCallback((patch: Partial<ScopeDraft>) => {
     setDraft(current => (current === undefined ? current : { ...current, ...patch }))
   }, [])
 
-  const toggleWorkspace = useCallback((id: string) => {
-    setDraft(current => {
-      if (current === undefined) return current
-      const has = current.workspaceIds.includes(id)
-      return {
-        ...current,
-        workspaceIds: has
-          ? current.workspaceIds.filter(entry => entry !== id)
-          : [...current.workspaceIds, id],
-      }
-    })
+  const toggleWorkspace = useCallback((entry: WorkspaceEntry) => {
+    setDraft(current => (current === undefined ? current : toggleTicked(current, entry)))
   }, [])
 
   const save = useCallback(async () => {
@@ -124,12 +130,14 @@ export function ScopeForm({ payload, scopeCode, onSaved }: ScopeFormProps): Reac
     const result = await saveScope(patchOf(draft), seed.revision)
     setSaving(false)
     if (result.ok) {
-      onSaved(result.data)
+      // A successful save changes the revision, so the seed must be re-read:
+      // the next save has to present the revision it just created.
+      onReload()
       return
     }
     // The draft is deliberately untouched here.
     setFailure(result.code)
-  }, [draft, seed, onSaved])
+  }, [draft, seed, onReload])
 
   if (draft === undefined || seed === undefined) {
     return (
@@ -138,6 +146,7 @@ export function ScopeForm({ payload, scopeCode, onSaved }: ScopeFormProps): Reac
         <p className="boost-settings__muted" data-code={scopeCode ?? ''}>
           {scopeCode === undefined ? UNAVAILABLE_REGISTRY : adviceFor(scopeCode)}
         </p>
+        <BlockedBy reasons={reasons} />
       </section>
     )
   }
@@ -186,8 +195,8 @@ export function ScopeForm({ payload, scopeCode, onSaved }: ScopeFormProps): Reac
             <label key={entry.id} className="boost-settings__workspace">
               <input
                 type="checkbox"
-                checked={draft.workspaceIds.includes(entry.path)}
-                onChange={() => toggleWorkspace(entry.path)}
+                checked={isTicked(draft, entry)}
+                onChange={() => toggleWorkspace(entry)}
               />
               <span>{entry.path}</span>
             </label>
@@ -215,7 +224,7 @@ export function ScopeForm({ payload, scopeCode, onSaved }: ScopeFormProps): Reac
               type="radio"
               name="boost-projection"
               checked={draft.projection === option}
-              onChange={() => update({ projection: option as Projection })}
+              onChange={() => update({ projection: option })}
             />
             {option}
           </label>
@@ -252,9 +261,11 @@ export function ScopeForm({ payload, scopeCode, onSaved }: ScopeFormProps): Reac
             {LABEL_SAVE_FAILED} <code>{failure}</code>
           </p>
           <p className="boost-settings__muted">{adviceFor(failure)}</p>
-          <button type="button" onClick={() => onSaved(undefined)}>
-            {ACTION_REREAD}
-          </button>
+          {REREAD_CODES.has(failure) ? (
+            <button type="button" onClick={() => onReload()}>
+              {ACTION_REREAD}
+            </button>
+          ) : null}
         </div>
       ) : null}
 

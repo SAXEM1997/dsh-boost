@@ -5,7 +5,7 @@
  * check against the spec, and a rule buried in JSX cannot be checked without a
  * DOM. Nothing here touches React or the network.
  */
-import type { StatePayload, WorkspaceListing } from '../../src/shared/api-types.js'
+import type { StatePayload, WorkspaceEntry, WorkspaceListing } from '../../src/shared/api-types.js'
 
 /** The four fields the page may write. */
 export interface ScopeDraft {
@@ -21,8 +21,8 @@ export interface ScopeDocument extends ScopeDraft {
   revision: number
 }
 
-/** A document this page is willing to write over. */
-export type ScopeSeed = ScopeDocument
+/** The three projection modes, in the order the control offers them. */
+export const PROJECTIONS: readonly ScopeDraft['projection'][] = ['off', 'shadow', 'on']
 
 const isMode = (value: unknown): value is ScopeDraft['mode'] => value === 'selected' || value === 'global'
 const isProjection = (value: unknown): value is ScopeDraft['projection'] =>
@@ -35,7 +35,7 @@ const isProjection = (value: unknown): value is ScopeDraft['projection'] =>
  * over": a defaulted draft here would let the operator save a document the
  * plugin refused to read, overwriting whatever made it unreadable.
  */
-export function seedOf(scope: unknown): ScopeSeed | undefined {
+export function seedOf(scope: unknown): ScopeDocument | undefined {
   if (scope === null || typeof scope !== 'object') return undefined
   const envelope = scope as { ok?: unknown; data?: unknown }
   if (envelope.ok !== true || envelope.data === null || typeof envelope.data !== 'object') return undefined
@@ -60,17 +60,12 @@ export function seedOf(scope: unknown): ScopeSeed | undefined {
 }
 
 /** The draft a seed implies: the document's own values, in the form's shape. */
-export function draftOf(seed: ScopeSeed): ScopeDraft {
-  return {
-    mode: seed.mode,
-    workspaceIds: [...seed.workspaceIds],
-    shadow: seed.shadow,
-    projection: seed.projection,
-  }
+export function draftOf(seed: ScopeDocument): ScopeDraft {
+  return patchOf(seed)
 }
 
 /** Whether the draft differs from the document it was seeded from. */
-export function isDirty(draft: ScopeDraft, seed: ScopeSeed): boolean {
+export function isDirty(draft: ScopeDraft, seed: ScopeDocument): boolean {
   if (draft.mode !== seed.mode) return true
   if (draft.shadow !== seed.shadow) return true
   if (draft.projection !== seed.projection) return true
@@ -104,18 +99,24 @@ export function disableReasons(scope: unknown, workspaces: WorkspaceListing | un
   const reasons: DisableReason[] = []
   const envelope = (scope ?? {}) as { ok?: unknown; code?: unknown }
   const code = typeof envelope.code === 'string' ? envelope.code : ''
-  if (VERSION_CODES.has(code)) reasons.push({ id: 'version-unsupported', code })
+  const unreadable = envelope.ok !== true
+  // Disjoint on purpose. A version failure is a document this page must not
+  // touch; a read failure that is not a version failure is a document it could
+  // not obtain. Both block saving, for different reasons with different
+  // remedies, and either can coincide with a broken registry.
+  if (unreadable && VERSION_CODES.has(code)) {
+    reasons.push({ id: 'version-unsupported', code })
+  } else if (unreadable) {
+    reasons.push({ id: 'not-writable', code: code === '' ? 'ERR_SCOPE_READ_FAILED' : code })
+  }
   if (workspaces !== undefined && workspaces.available === false) {
     reasons.push({ id: 'workspaces-unavailable', code: workspaces.code })
-  }
-  if (envelope.ok !== true) {
-    reasons.push({ id: 'not-writable', code: code === '' ? 'ERR_SCOPE_UNREADABLE' : code })
   }
   return reasons
 }
 
 /** Ids the saved document names that the registry does not have. */
-export function staleWorkspaceIds(seed: ScopeSeed | undefined, workspaces: WorkspaceListing | undefined): string[] {
+export function staleWorkspaceIds(seed: ScopeDocument | undefined, workspaces: WorkspaceListing | undefined): string[] {
   if (seed === undefined || workspaces === undefined || workspaces.available !== true) return []
   const known = new Set(workspaces.entries.map(entry => entry.id))
   return seed.workspaceIds.filter(id => !known.has(id))
@@ -127,7 +128,7 @@ export function staleWorkspaceIds(seed: ScopeSeed | undefined, workspaces: Works
  * Separate from {@link staleWorkspaceIds}: those are inert ids already saved,
  * these are ids the operator is about to save and whose path cannot be shown.
  */
-export function pathUnmatched(draft: ScopeDraft, workspaces: WorkspaceListing | undefined): string[] {
+export function unmatchedDraftIds(draft: ScopeDraft, workspaces: WorkspaceListing | undefined): string[] {
   if (workspaces === undefined || workspaces.available !== true) return []
   const known = new Set(workspaces.entries.map(entry => entry.id))
   return draft.workspaceIds.filter(id => !known.has(id))
@@ -140,6 +141,30 @@ export function patchOf(draft: ScopeDraft): ScopeDraft {
     workspaceIds: [...draft.workspaceIds],
     shadow: draft.shadow,
     projection: draft.projection,
+  }
+}
+
+/**
+ * Whether the draft has this workspace ticked.
+ *
+ * Compares the entry's ID, never its path: `workspaceIds` is matched against a
+ * workspace id by the plugin's own visibility check, so writing a path there
+ * would produce a document that never activates anything — silently, because
+ * both are strings. The whole reason this lives here rather than inline in the
+ * component is that no test can reach a JSX comparison.
+ */
+export function isTicked(draft: ScopeDraft, entry: WorkspaceEntry): boolean {
+  return draft.workspaceIds.includes(entry.id)
+}
+
+/** The draft with this workspace ticked or unticked, by id. */
+export function toggleTicked(draft: ScopeDraft, entry: WorkspaceEntry): ScopeDraft {
+  const has = draft.workspaceIds.includes(entry.id)
+  return {
+    ...draft,
+    workspaceIds: has
+      ? draft.workspaceIds.filter(id => id !== entry.id)
+      : [...draft.workspaceIds, entry.id],
   }
 }
 

@@ -18,6 +18,7 @@
  */
 import { HTTP_API_PREFIX } from '../shared/api-prefix.js'
 import type { StatePayload, WorkspaceEntry, WorkspaceListing } from '../shared/api-types.js'
+import { ERR_BOOST_INTERNAL, ERR_BOOST_INVALID_ARGS, ERR_BOOST_INVALID_BODY } from '../tools/boost.js'
 import { isTrustedWebRequest } from './fence.js'
 
 export type { StatePayload, WorkspaceEntry, WorkspaceListing } from '../shared/api-types.js'
@@ -171,8 +172,8 @@ async function readBody(req: HttpRequestLike): Promise<{ ok: true; text: string 
  */
 function writeStatusFor(code: string): number {
   if (code === ERR_HTTP_BODY) return 400
-  if (code === 'ERR_BOOST_INVALID_BODY' || code === 'ERR_BOOST_INVALID_ARGS') return 400
-  if (code === 'ERR_BOOST_INTERNAL') return 500
+  if (code === ERR_BOOST_INVALID_BODY || code === ERR_BOOST_INVALID_ARGS) return 400
+  if (code === ERR_BOOST_INTERNAL) return 500
   // Every remaining scope code means "this write cannot be applied to the
   // document as it stands": stale revision, held lock, unreadable or
   // unrecognised file. All of them are resolved by looking at the document.

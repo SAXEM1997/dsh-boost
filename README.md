@@ -469,7 +469,8 @@ horizon 重放，并计入 `projection_horizon_reestimated`；`projection_horizo
 | 码 | 出现位置 | 含义 |
 |---|---|---|
 | `ERR_HTTP_FORBIDDEN` | 路由响应体（403） | 同源栅栏拒绝：`Host` 既非 loopback 也不在 `webStartup.trustedHosts` 里，或 `sec-fetch-site: cross-site`，或 `Origin` 与 `Host` 不同 authority，或 `Origin` 解析不了 |
-| `ERR_HTTP_METHOD` | 路由响应体（405） | 对只读路由发了 `GET`/`HEAD` 以外的方法 |
+| `ERR_HTTP_METHOD` | 路由响应体（405） | 对 `/state` 发了写，或对 `/scope` 发了 `GET`/`HEAD`/`POST` 以外的方法 |
+| `ERR_HTTP_BODY` | 路由响应体（400） | 写请求的体不是合法 JSON，或超过 64 KiB |
 | `ERR_HTTP_NOT_FOUND` | 路由响应体（404） | 前缀匹配上了但子路径不认识：页面与服务端版本不一致 |
 | `ERR_HTTP_INTERNAL` | 路由响应体（500） | 读 `status`/`scope` 时宿主服务的 getter 抛错；四块内容一个都不返回 |
 | `ERR_HTTP_WORKSPACES_UNAVAILABLE` | 路由响应体（`workspaces.available === false`） | 没有注册表，或 `list()` 抛错：页面禁用保存并说明「读不到」，不渲染空列表 |

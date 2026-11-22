@@ -559,7 +559,8 @@ The settings page's data route has codes of its own, and they are **not** member
 | Code | Where | Meaning |
 |---|---|---|
 | `ERR_HTTP_FORBIDDEN` | route body (403) | Same-origin fence refused: `Host` is neither loopback nor in `webStartup.trustedHosts`, or `sec-fetch-site: cross-site`, or `Origin` and `Host` name different authorities, or `Origin` does not parse |
-| `ERR_HTTP_METHOD` | route body (405) | Something other than `GET`/`HEAD` reached the read-only route |
+| `ERR_HTTP_METHOD` | route body (405) | A write reached `/state`, or something other than `GET`/`HEAD`/`POST` reached `/scope` |
+| `ERR_HTTP_BODY` | route body (400) | The write body is not valid JSON, or exceeds 64 KiB |
 | `ERR_HTTP_NOT_FOUND` | route body (404) | The prefix matched but the sub-path is unknown: page and server are different versions |
 | `ERR_HTTP_INTERNAL` | route body (500) | A host service getter threw while reading `status`/`scope`; none of the four blocks is returned |
 | `ERR_HTTP_WORKSPACES_UNAVAILABLE` | route body (`workspaces.available === false`) | No registry, or `list()` threw: the page disables saving and says the list could not be read rather than rendering an empty one |
