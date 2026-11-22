@@ -9,7 +9,7 @@
 ## 它解决什么
 
 DSH 每次模型请求都会回放全部历史。本机 300 个最长会话的实测聚合（`npm run --silent stats`——不带
-`--silent` 时 npm 会把 `> dsh-boost@0.2.2 stats` 横幅打进 stdout，机器解析请用 `--silent` 或直接
+`--silent` 时 npm 会把 `> dsh-boost@0.2.3 stats` 横幅打进 stdout，机器解析请用 `--silent` 或直接
 `node scripts/session-stats.mjs`；快照时刻 `2026-11-19T03:13:21Z`）：54,141 步、54,088 个请求，合计 10,575,904,022 raw token。按步均值
 195,340 token，按请求均值 195,531、中位 187,681；97.01% 的输入是缓存读。工具回执是体积主体
 （bash 61.75%、read 22.13%、ssh 10.01%），而下一步真正会用到的部分通常远小于回执本身。
@@ -64,25 +64,25 @@ v1 的**事前估算**区间是 **3.5%（下界）– 10.0%（理想上界）**�
 `dsh plugin` 要求指定 profile，剩下的参数原样转发给该 profile 目录里的 pnpm：
 
 ```bash
-# 从 registry 安装：npmjs 上的 latest 是 0.2.2（本仓库 .npmrc 与 lockfile
+# 从 registry 安装：npmjs 上的 latest 是 0.2.3（本仓库 .npmrc 与 lockfile
 # 也已钉在 npmjs，见下）
-dsh plugin --profile <name> add dsh-boost@^0.2.2 --registry=https://registry.npmjs.org/
+dsh plugin --profile <name> add dsh-boost@^0.2.3 --registry=https://registry.npmjs.org/
 
 # 或从本地 checkout 安装（先构建；dist/ 不入库）
 npm run build
 dsh plugin --profile <name> add /absolute/path/to/dsh-boost
 ```
 
-例如 web profile：`dsh plugin --profile web add dsh-boost@^0.2.2 --registry=https://registry.npmjs.org/`。
+例如 web profile：`dsh plugin --profile web add dsh-boost@^0.2.3 --registry=https://registry.npmjs.org/`。
 `dsh plugin` 把操作转发给 pnpm，所以 pnpm 必须在 PATH 上。
 
-> **`^0.2.2` 是当前的安全钉法。** `registry.npmjs.org` 上 `latest` 是 `0.2.2`，历史版本依次是
+> **`^0.2.3` 是当前的安全钉法。** `registry.npmjs.org` 上 `latest` 是 `0.2.3`，历史版本依次是
 > `0.1.4`、`0.1.3`、`0.1.2`、`0.1.1`、`0.1.0`，以及首次发布时 npm 自动创建的占位版本
 > `0.0.0-stage`——**不要安装 `0.0.0-stage`**，它不是可用构建。`0.2.0` 新增了设置页（`dsh.client` 与 `./client` 出口、`/dsh-boost/api` 路由、随包发布的
 > `lib/client.js`）与中英双语，`0.2.1` 修了页面上三处会读到错误数值或错误提示的缺陷；`0.1.4` 及更早**没有设置页**，`^0.1.4` 也不会解析到 `0.2.x`（`^` 不跨大版本），所以从
-> `0.1.x` 升上来要显式写 `@^0.2.2`。本仓库已把 `.npmrc` 与 lockfile 钉在 npmjs，但**你机器上
-> 的全局 npm 配置**可能仍指向一个尚未同步 `0.2.2` 的镜像：那是本机配置，不是本仓库的状态。
-> 在意 registry 时显式传 `--registry=https://registry.npmjs.org/`；镜像滞后时 `@^0.2.2` 会在
+> `0.1.x` 升上来要显式写 `@^0.2.3`。本仓库已把 `.npmrc` 与 lockfile 钉在 npmjs，但**你机器上
+> 的全局 npm 配置**可能仍指向一个尚未同步 `0.2.3` 的镜像：那是本机配置，不是本仓库的状态。
+> 在意 registry 时显式传 `--registry=https://registry.npmjs.org/`；镜像滞后时 `@^0.2.3` 会在
 > 同步前解析失败。
 
 ## 设置页
@@ -475,7 +475,7 @@ horizon 重放，并计入 `projection_horizon_reestimated`；`projection_horizo
 | `locale` | 软（`ctx.get('locale')`） | 设置页**跟随宿主语言**（中英双语，导航项标签一起换）；缺这个服务时回落中文并 `console.warn` 说明一次，页面照常可用；投影、替换与 `boost` 工具不受影响 |
 | `webServer` | 软（动态注入 `ctx.inject(['webServer'], …)`） | **设置页读不到数据**：路由没挂上，页面显示 `ERR_CLIENT_NETWORK` 并提示去看宿主日志。投影、替换与 `boost` 工具**完全不受影响**——这是唯一一个缺失只影响页面的依赖。挂上之后 `Host` 的受信名单来自 `webStartup.trustedHosts`（读不到就只信 loopback），所以反向代理没透传 `Host` 时页面会被 `ERR_HTTP_FORBIDDEN` 挡住 |
 | `win32` 平台 | 运行时检查 `isPosixOnly()` | 拒绝替换，投影照常；`status.degraded` 带 `ERR_HOST_PLATFORM_UNSUPPORTED` |
-| 宿主版本线 | 启动时读 `@deepseek-ai/dsh-app-boot` 的版本 | 版本**落在 `engines.dsh` 区间外**（`>=0.2.2-rc.4 <0.2.3-0`）时日志警告 `ERR_HOST_VERSION_MISMATCH`，插件照常加载（advisory，不是 `status.degraded` 码）；区间内但不是验证过的 `0.2.2-rc.4`（如 `rc.5` / `0.2.2`）只记 info、不发码；版本读不到或区间无法解析时也只记 info |
+| 宿主版本线 | 启动时读 `@deepseek-ai/dsh-app-boot` 的版本 | 版本**落在 `engines.dsh` 区间外**（`>=0.2.2-rc.4 <0.2.3-0`）时日志警告 `ERR_HOST_VERSION_MISMATCH`，插件照常加载（advisory，不是 `status.degraded` 码）；区间内但不是验证过的 `0.2.2-rc.4`（如 `rc.5` / `0.2.3`）只记 info、不发码；版本读不到或区间无法解析时也只记 info |
 | 收据分片可读性 | `boost status` 全量扫描（非依赖） | 至少一个收据分片读不出来（EACCES、名为 `x.jsonl` 的目录等）时 `status.degraded` 带 `ERR_RECEIPTS_UNREADABLE`；`status` 仍是**全量聚合**——健康分片照常计数——所以数字可能不完整。查 `<dshHome>/boost/receipts/` 的权限与异常条目，修复后重跑并对比计数 |
 | 收据分片数量 | `boost status` 全量扫描（非依赖） | 分片超过 256 个时 `status` 只统计按编码名排序的前 256 个，`status.degraded` 带 `ERR_RECEIPTS_TRUNCATED`，所有计数因此是**下界**；分片永不自动删除，可归档/移走旧会话分片后重跑 `status` |
 | 提示段装配瀑布 | 出站请求探测（非依赖） | 宿主的 `complete: true` 提示段在装配瀑布之后替换了整个系统提示、协议段没有到达请求时，`status.degraded` 带 `ERR_HOST_COMPLETE_SECTION`；受影响请求上替换与投影 fail-closed（工作区明明可见插件却不动作）。找出宿主里覆盖瀑布的 complete 段（通常属于另一个插件）并移除，或接受这些请求上不动作 |

@@ -12,7 +12,7 @@ read-only substitution**.
 ## What it does
 
 DSH replays the whole history on every model request. Across the 300 longest sessions measured
-locally (`npm run --silent stats` — without `--silent`, npm prints its `> dsh-boost@0.2.2 stats`
+locally (`npm run --silent stats` — without `--silent`, npm prints its `> dsh-boost@0.2.3 stats`
 banner to stdout, so use `--silent` or `node scripts/session-stats.mjs` for machine-readable
 output; snapshot at `2026-11-19T03:13:21Z`): 54,141 steps and 54,088 requests,
 10,575,904,022 raw tokens in total. The mean is 195,340 tokens per step and 195,531 per request
@@ -85,19 +85,19 @@ denominator statistic that a later version must add.
 directory:
 
 ```bash
-# install from the registry: npmjs has latest = 0.2.2 (this repository's
+# install from the registry: npmjs has latest = 0.2.3 (this repository's
 # .npmrc and lockfile are pinned to npmjs too — see below)
-dsh plugin --profile <name> add dsh-boost@^0.2.2 --registry=https://registry.npmjs.org/
+dsh plugin --profile <name> add dsh-boost@^0.2.3 --registry=https://registry.npmjs.org/
 
 # or from a local checkout (build first; dist/ is not committed)
 npm run build
 dsh plugin --profile <name> add /absolute/path/to/dsh-boost
 ```
 
-For the web profile: `dsh plugin --profile web add dsh-boost@^0.2.2 --registry=https://registry.npmjs.org/`.
+For the web profile: `dsh plugin --profile web add dsh-boost@^0.2.3 --registry=https://registry.npmjs.org/`.
 `dsh plugin` forwards the operation to pnpm, so pnpm must be on `PATH`.
 
-> **`^0.2.2` is the current safe pin.** `registry.npmjs.org` has `latest` at `0.2.2`, with
+> **`^0.2.3` is the current safe pin.** `registry.npmjs.org` has `latest` at `0.2.3`, with
 > `0.1.4`, `0.1.3`, `0.1.2`, `0.1.1`, `0.1.0` behind it, plus `0.0.0-stage`, the placeholder npm
 > creates on a package's first publish — **do not install `0.0.0-stage`**; it is not a usable
 > build. `0.2.0` adds the settings page (`dsh.client`, the `./client` export, the
@@ -571,7 +571,7 @@ to load. `llm` is soft (only the selector uses it); when absent the selector fal
 | `win32` platform | runtime `isPosixOnly()` check | Substitution is refused, projection still works; `status.degraded` reports `ERR_HOST_PLATFORM_UNSUPPORTED` |
 | `locale` | soft (`ctx.get('locale')`) | The settings page **follows the host language** (Chinese and English, the nav label included); without this service it falls back to Chinese with one `console.warn`, and the page still works; projection, substitution and the `boost` tool are unaffected |
 | `webServer` | soft (dynamic `ctx.inject(['webServer'], …)`) | **The settings page has no data**: the route is not mounted and the page shows `ERR_CLIENT_NETWORK` with a pointer to the host log. Projection, substitution and the `boost` tool are **unaffected** — this is the only dependency whose absence costs only the page. Once mounted, the trusted `Host` list comes from `webStartup.trustedHosts` (loopback-only when unreadable), so a reverse proxy that drops `Host` is stopped by `ERR_HTTP_FORBIDDEN` |
-| Host version line | startup check of the `@deepseek-ai/dsh-app-boot` version | A version **outside the `engines.dsh` range** (`>=0.2.2-rc.4 <0.2.3-0`) logs `ERR_HOST_VERSION_MISMATCH` and loads anyway — advisory only, not a `status.degraded` code. A version inside the range but not the verified `0.2.2-rc.4` (such as `rc.5` / `0.2.2`) logs an info line, no code; an undeterminable version or an unparseable range also logs info only |
+| Host version line | startup check of the `@deepseek-ai/dsh-app-boot` version | A version **outside the `engines.dsh` range** (`>=0.2.2-rc.4 <0.2.3-0`) logs `ERR_HOST_VERSION_MISMATCH` and loads anyway — advisory only, not a `status.degraded` code. A version inside the range but not the verified `0.2.2-rc.4` (such as `rc.5` / `0.2.3`) logs an info line, no code; an undeterminable version or an unparseable range also logs info only |
 | Receipt shard readability | `boost status` full scan (not a dependency) | When at least one receipt shard cannot be read (EACCES, a directory named `x.jsonl`, …), `status.degraded` carries `ERR_RECEIPTS_UNREADABLE`; `status` stays a **total over the healthy shards** — they are still counted — so the figures may be incomplete. Check permissions and stray entries in `<dshHome>/boost/receipts/`, fix, and re-run `status`, comparing counts |
 | Receipt shard count | `boost status` full scan (not a dependency) | When more than 256 shards exist, `status` counts only the first 256 by encoded name and `status.degraded` carries `ERR_RECEIPTS_TRUNCATED`; every count is therefore a **lower bound**. Shards are never pruned automatically; archive or move old session shards and re-run `status` |
 | Prompt assembly waterfall | outgoing-request probe (not a dependency) | When the host's `complete: true` prompt section replaces the assembled system prompt after the waterfall and the protocol section never reaches the request, `status.degraded` carries `ERR_HOST_COMPLETE_SECTION`; substitution and projection fail closed for the affected requests (the plugin stays inert although the workspace is visible). Find the complete section overriding the waterfall (usually another plugin's) and remove it, or accept the inaction on those requests |

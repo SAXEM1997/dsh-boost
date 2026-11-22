@@ -36,7 +36,7 @@
   "DEGRADED_ADVICE.ERR_HOST_SPILL_UNUSABLE": "spill 后端存在但不可用（没有 saveText）：投影被跳过。",
   "DEGRADED_ADVICE.ERR_HOST_VERSION_MISMATCH": "宿主版本与 engines.dsh 的区间不符：本包没有在这个版本上验证过。",
   "DEGRADED_ADVICE.ERR_HOST_WORKSPACE_REGISTRY_BROKEN": "工作区注册表在，但 list() 抛错：工作区列表读不到。",
-  "DEGRADED_ADVICE.ERR_RECEIPTS_TRUNCATED": "收据流超过分片上限，旧分片被丢弃：`boost status` 的合计只覆盖还在的分片。",
+  "DEGRADED_ADVICE.ERR_RECEIPTS_TRUNCATED": "收据分片太多，只读了前 256 个，总数会偏低。分片不会被自动清理——把旧的 boost/receipts 目录移走后重新开始。",
   "DEGRADED_ADVICE.ERR_RECEIPTS_UNREADABLE": "有收据分片读不出来：那一部分的账没有算进去，合计偏低。",
   "DEGRADED_FALLBACK": "未收录的码：查 docs/RELEASE.md 的稳定码表。",
   "EMPTY_GLOBAL": "所有工作区都会生效，下面这份名单只作为记录保留。",
@@ -48,7 +48,7 @@
   "HINT_PROJECTION_GROSS_REPLAY": "每条回执的节省乘以它自己的 (1 + horizon) 再求和。这个数才是净额的被减数。",
   "HINT_PROJECTION_NET": "净额 = 重放毛额 − 取回内容成本 − 取回调用成本。回放用每条回执自己的 horizon，不是当前值；所以上面两个毛额不是同一个数，净额只与重放那个对齐。",
   "HINT_PROJECTION_ON_ROLLBACK": "回滚：把「投影」改回 `shadow` 并保存；或调 `boost` 工具，`cmd: \"scope-set\"`、`body: {\"projection\": \"shadow\"}`。改动对后续请求立即生效，不需要重启宿主。",
-  "HINT_PROJECTION_ON_SPILL": "投影需要 spill 后端：原文要落盘，否则截断后的文本就是唯一副本。宿主当前没解析出后端——`boost status` 的降级项会写 `ERR_HOST_NO_SPILL`。装一个（`dsh-spill-local` 或你们自己的实现）后重启。",
+  "HINT_PROJECTION_ON_SPILL": "投影需要 spill 后端：原文要落盘，否则截断后的文本就是唯一副本。宿主当前没解析出后端（`status.hasSpill` 为 false）。装一个（`dsh-spill-local` 或你们自己的实现）后重启。",
   "HINT_SAVED_LOWER": "下界是被跳过那次请求自己的总用量：它不含「后续还会回放多少次」，所以真实节省高于这个数。",
   "HINT_SAVED_UPPER": "上界是「下一次请求的输入」：它把被替换调用的结果也算进了节省，所以真实节省低于这个数。",
   "HINT_SHADOW_MEANS": "影子模式：插件照常决策并记账，但不真的改动发给模型的内容。",
@@ -100,5 +100,6 @@
   "STATUS_UNAVAILABLE": "状态读取失败，下面的数字不是「没有」，而是没读到",
   "ADVICE_FOR_CODE.ERR_RECEIPTS_UNREADABLE": "有些收据分片读不出来，总数会偏低。分片不会被自动清理，所以这通常是权限或磁盘问题——检查 boost 目录，或把整个 receipts 目录移走后重新开始。",
   "ADVICE_FOR_CODE.ERR_HOST_NO_SPILL": "宿主没有可用的 spill 后端，投影因此只保留截断后的文本、不保存原文。装一个 spill 后端（`dsh-spill-local` 或你们自己的实现）后重启。",
-  "HINT_PROJECTION_ON_SPILL_OK": "宿主已解析出 spill 后端（`status.hasSpill`），投影开启后原文会落到那里。"
+  "HINT_PROJECTION_ON_SPILL_OK": "宿主解析出了 spill 后端（`status.hasSpill` 为 true），原文会落到那里。注意这只证明后端在，不证明它写得进去——真写不进去时 `boost status` 会报 `ERR_HOST_SPILL_UNUSABLE`。",
+  "HINT_PROJECTION_ON_SPILL_UNKNOWN": "投影需要 spill 后端：原文要落盘，否则截断后的文本就是唯一副本。现在读不到 `status.hasSpill`，无法确认宿主有没有——先修好状态读取，或装一个（`dsh-spill-local` 或你们自己的实现）。"
 }

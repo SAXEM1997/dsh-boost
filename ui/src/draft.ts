@@ -182,3 +182,28 @@ export function payloadOf(value: unknown): unknown {
   const envelope = value as { ok?: unknown; data?: unknown }
   return envelope.ok === true ? envelope.data : value
 }
+
+/** What a `/state` sub-result turned out to be. */
+export interface Envelope {
+  /** True only when the route returned `{ ok: true, data }`. */
+  ok: boolean
+  /** The failure code when `ok` is false and the envelope carried one. */
+  code?: string
+  /** The unwrapped payload when `ok` is true. */
+  data?: unknown
+}
+
+/**
+ * Reads a `/state` sub-result as an envelope.
+ *
+ * The page must ask *the envelope* whether the read succeeded. Asking the
+ * unwrapped payload is the bug this function exists to prevent: a payload is a
+ * `BoostStatus` and carries no `ok`, so the question answers "no" forever and
+ * every panel renders as unreadable.
+ */
+export function envelopeOf(value: unknown): Envelope {
+  if (value === null || typeof value !== 'object') return { ok: false }
+  const envelope = value as { ok?: unknown; code?: unknown; data?: unknown }
+  if (envelope.ok === true) return { ok: true, data: envelope.data }
+  return typeof envelope.code === 'string' ? { ok: false, code: envelope.code } : { ok: false }
+}

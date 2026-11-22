@@ -223,7 +223,11 @@ export function ScopeForm({ payload, scopeCode, hasSpill, onReload }: ScopeFormP
           <strong>{c.LABEL_PROJECTION_ON_PRECONDITIONS}</strong>
           <ul>
             <li>
-              {hasSpill === true ? c.HINT_PROJECTION_ON_SPILL_OK : c.HINT_PROJECTION_ON_SPILL}
+              {hasSpill === true
+                ? c.HINT_PROJECTION_ON_SPILL_OK
+                : hasSpill === false
+                  ? c.HINT_PROJECTION_ON_SPILL
+                  : c.HINT_PROJECTION_ON_SPILL_UNKNOWN}
             </li>
           </ul>
           <p>{c.HINT_PROJECTION_ON_ROLLBACK}</p>

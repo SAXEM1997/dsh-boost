@@ -36,7 +36,7 @@
   "DEGRADED_ADVICE.ERR_HOST_SPILL_UNUSABLE": "The spill backend exists but is unusable (no saveText): projection was skipped.",
   "DEGRADED_ADVICE.ERR_HOST_VERSION_MISMATCH": "The host version is outside engines.dsh: this package was not verified against it.",
   "DEGRADED_ADVICE.ERR_HOST_WORKSPACE_REGISTRY_BROKEN": "The workspace registry exists but list() throws: the workspace list cannot be read.",
-  "DEGRADED_ADVICE.ERR_RECEIPTS_TRUNCATED": "The receipt stream passed the shard cap and old shards were dropped: the status totals cover only the shards still present.",
+  "DEGRADED_ADVICE.ERR_RECEIPTS_TRUNCATED": "Too many receipt shards: only the first 256 were read, so the totals are low. Shards are never pruned automatically — move the old boost/receipts directory aside and start over.",
   "DEGRADED_ADVICE.ERR_RECEIPTS_UNREADABLE": "A receipt shard could not be read: its share is missing from the totals, which read low.",
   "DEGRADED_FALLBACK": "Code not in the table: see the stable-code list in docs/RELEASE.md.",
   "EMPTY_GLOBAL": "Every workspace is in scope; the list below is kept only as a record.",
@@ -48,7 +48,7 @@
   "HINT_PROJECTION_GROSS_REPLAY": "Each receipt's saving multiplied by its own (1 + horizon), summed. This is the figure the net is derived from.",
   "HINT_PROJECTION_NET": "Net = replay gross − retrieval content cost − retrieval call cost. Replay uses each receipt's own horizon, not the current one; so the two gross figures above are not the same number, and only the replay one lines up with the net.",
   "HINT_PROJECTION_ON_ROLLBACK": "To roll back, set projection back to `shadow` and save; or call the `boost` tool with `cmd: \"scope-set\"` and `body: {\"projection\": \"shadow\"}`. The change applies to subsequent requests with no host restart.",
-  "HINT_PROJECTION_ON_SPILL": "Projection needs a spill backend: the original has to land somewhere, or the truncated text is the only copy. The host did not resolve one — `boost status` reports `ERR_HOST_NO_SPILL`. Install one (`dsh-spill-local` or your own) and restart.",
+  "HINT_PROJECTION_ON_SPILL": "Projection needs a spill backend: the original has to land somewhere, or the truncated text is the only copy. The host did not resolve one (`status.hasSpill` is false). Install one (`dsh-spill-local` or your own) and restart.",
   "HINT_SAVED_LOWER": "The lower bound is the skipped request's own total usage: it excludes how many more times it would have been replayed, so the true saving is higher.",
   "HINT_SAVED_UPPER": "The upper bound is the next request's input: it counts the replaced call's result as saved, so the true saving is lower.",
   "HINT_SHADOW_MEANS": "Shadow mode: the plugin still decides and records receipts, but never changes what reaches the model.",
@@ -100,5 +100,6 @@
   "STATUS_UNAVAILABLE": "Status could not be read: the figures below are unread, not empty",
   "ADVICE_FOR_CODE.ERR_RECEIPTS_UNREADABLE": "Some receipt shards could not be read, so the totals are low. Shards are never pruned automatically, so this is usually permissions or disk: check the boost directory, or move the whole receipts directory aside and start over.",
   "ADVICE_FOR_CODE.ERR_HOST_NO_SPILL": "The host has no usable spill backend, so projection keeps only the truncated text and does not save the original. Install a spill backend (`dsh-spill-local` or your own) and restart.",
-  "HINT_PROJECTION_ON_SPILL_OK": "The host resolved a spill backend (`status.hasSpill`), so the original will be saved there once projection is on."
+  "HINT_PROJECTION_ON_SPILL_OK": "The host resolved a spill backend (`status.hasSpill` is true), so the original will land there. That proves the backend is present, not that it can write — `boost status` reports `ERR_HOST_SPILL_UNUSABLE` when it cannot.",
+  "HINT_PROJECTION_ON_SPILL_UNKNOWN": "Projection needs a spill backend: the original has to land somewhere, or the truncated text is the only copy. `status.hasSpill` cannot be read right now, so there is no telling whether the host has one — fix the status read first, or install one (`dsh-spill-local` or your own)."
 }

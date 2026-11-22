@@ -1,6 +1,6 @@
 # dsh-boost 发布验收
 
-本文是 `dsh-boost` 0.2.2 的发布验收手册（版本以 `package.json` 为准）。它覆盖四件事：
+本文是 `dsh-boost` 0.2.3 的发布验收手册（版本以 `package.json` 为准）。它覆盖四件事：
 
 1. `npm run verify:package` 一条命令的打包与产物验收（§1），以及零 peerDependencies 现状下
    两条降级路径的验收方式（§2）；
@@ -120,7 +120,7 @@ npm run dev:ui         # 独立开发页，不需要宿主
 
 第 2 条在门里是 `client-bundle-structure` 一项。它为什么必须单独存在：这条路径上的每一种坏法
 （漏信封、`id` 写错、React 被打进产物、用了 dev 的 JSX 转换）都会让文件在桩里**正常加载**，然后
-在设置页里失败。`test/verify-client.test.ts` 用构造产物逐个打红这八种坏法。
+在设置页里失败。`test/verify-client.test.ts` 用构造产物逐个打红这九种坏法。
 
 端到端复现其中一种（`--prebuilt` 直接打当前树，不重建）：
 
@@ -326,7 +326,7 @@ grep -c '"code":"ERR_HOST_NO_TOKENMETER"' "$DSH_HOME"/boost/receipts/*.jsonl
 
 `package.json` **不声明任何 `peerDependencies` / `peerDependenciesMeta`**。四个
 `@deepseek-ai/*`（`dsh-llm`、`dsh-tools`、`dsh-spill-policy`、`dsh-token-meter`）只以精确钉版
-出现在 `devDependencies`（`0.2.2-rc.4`，不跟随范围）。
+出现在 `devDependencies`（`0.2.3-rc.4`，不跟随范围）。
 删除的原因：npm 11 会把声明的 peerOptional **直接装上**——在 rc.4 宿主树里装带 peer 的旧
 tarball 会拉进 `dsh-spill-policy@rc.5` 并 `ERESOLVE`（当时实测 exit 1），“optional 标记允许
 宿主不装”的初衷反被堵死。删除之后的事实：
@@ -335,16 +335,16 @@ tarball 会拉进 `dsh-spill-policy@rc.5` 并 `ERESOLVE`（当时实测 exit 1�
 - 模块**不依赖它们也能加载**：`dsh-llm` / `dsh-tools` 在运行时是纯 type import；
   `@deepseek-ai/dsh-token-meter/estimate` 与 `@deepseek-ai/dsh-spill-policy/notice` 是带兜底的
   动态 import，从**宿主树**解析——宿主提供它们，解析不到走降级（§2.1、§2.2）；
-- 与宿主的兼容性由 `engines.dsh`（区间 `>=0.2.2-rc.4 <0.2.3-0`，按宿主自己的 `includePrerelease` 语义）声明；`engines.node` 是
-  `>=24.9.0`（对齐宿主 `@deepseek-ai/dsh@0.2.2-rc.4` 的 Node 下限）。加载时若解析到的宿主版本
+- 与宿主的兼容性由 `engines.dsh`（区间 `>=0.2.3-rc.4 <0.2.3-0`，按宿主自己的 `includePrerelease` 语义）声明；`engines.node` 是
+  `>=24.9.0`（对齐宿主 `@deepseek-ai/dsh@0.2.3-rc.4` 的 Node 下限）。加载时若解析到的宿主版本
   **落在区间外**，插件告警 `ERR_HOST_VERSION_MISMATCH` 但**仍然加载**（advisory：版本不符是风险，
-  不是 API 已改的证明；改名仍可能让插件失效）。区间内但不是验证过的 `0.2.2-rc.4`（如 `rc.5` /
-  `0.2.2`）只记 info、不发码——`0.2.2-rc.5` 与本插件触及的九个包逐字节相同。
+  不是 API 已改的证明；改名仍可能让插件失效）。区间内但不是验证过的 `0.2.3-rc.4`（如 `rc.5` /
+  `0.2.3`）只记 info、不发码——`0.2.3-rc.5` 与本插件触及的九个包逐字节相同。
 
-安装规格：**`dsh-boost@^0.2.2`**。registry 上有九条版本记录，其中一条是占位版本，不要把它当成
+安装规格：**`dsh-boost@^0.2.3`**。registry 上有九条版本记录，其中一条是占位版本，不要把它当成
 “更早的 API”：
 
-- `0.2.2` — 当前 `latest`；第二轮通读后的修复，其中三条是 0.2.1 带着发布的（写失败码被 `SCOPE_CODES` 吞成 `ERR_BOOST_INTERNAL`、git 安装缺 `lib/client.js`、`/state` 失败被渲染成「一切正常」）；
+- `0.2.3` — 当前 `latest`；第二轮通读后的修复，其中三条是 0.2.1 带着发布的（写失败码被 `SCOPE_CODES` 吞成 `ERR_BOOST_INTERNAL`、git 安装缺 `lib/client.js`、`/state` 失败被渲染成「一切正常」）；
 - `0.2.1` — 第一轮通读后的修复，其中三条是 0.2.0 带着发布的行为错误（状态面板读高一层信封、危险提示挂错开关、写失败被报成读失败）；
 - `0.2.0` — 首个带设置页的版本；新增设置页（`dsh.client`、`./client` 出口、`/dsh-boost/api` 路由、
   随包发布的 `lib/client.js`）与中英双语；`0.1.x` 没有设置页；
@@ -371,27 +371,27 @@ tarball 会拉进 `dsh-spill-policy@rc.5` 并 `ERESOLVE`（当时实测 exit 1�
 
 建议（可选，不属于发布门）：给占位版本加一条弃用说明，让误装的人看到原因——
 `npm deprecate dsh-boost@0.0.0-stage "npm first-publish placeholder" --registry=https://registry.npmjs.org/`。
-它只写该版本的 deprecation 元数据，不改 `latest`、不影响 `^0.2.2` 的解析；本文档只建议，
+它只写该版本的 deprecation 元数据，不改 `latest`、不影响 `^0.2.3` 的解析；本文档只建议，
 不代替发布者执行。
 
 本节取代旧版安装矩阵（rc.4 / rc.5 两侧对照、含一行 `ERESOLVE` 失败）：那张表记录的是 **peer
 还存在时**的安装行为，自 `0567347` 起不再适用；§1 的 `verify:package` 与上面的裸装事实是现行
 依据。
 
-#### `0.2.2-rc.5` 逐字节复核（2026-11-21）
+#### `0.2.3-rc.5` 逐字节复核（2026-11-21）
 
-`engines.dsh` 的上界放行 `0.2.2-rc.5`，依据是它在本插件触及的九个宿主包里与 rc.4 逐字节相同。
+`engines.dsh` 的上界放行 `0.2.3-rc.5`，依据是它在本插件触及的九个宿主包里与 rc.4 逐字节相同。
 这条断言可以复跑（需要能访问 registry；无 `DIFF` 输出即九个包的 `lib/` 全部相同）：
 
 ```bash
 export npm_config_cache=/tmp/npmcache   # 本仓库验收环境的缓存位置；普通环境可省略
 pkgs="dsh-agent dsh-app-boot dsh-llm dsh-session dsh-spill dsh-spill-policy dsh-system-prompt dsh-token-meter dsh-tools"
 d=$(mktemp -d)
-for v in 0.2.2-rc.4 0.2.2-rc.5; do for p in $pkgs; do
+for v in 0.2.3-rc.4 0.2.3-rc.5; do for p in $pkgs; do
   npm pack --silent --pack-destination "$d" "@deepseek-ai/$p@$v" >/dev/null
   mkdir -p "$d/$v/$p"; tar -xzf "$d/deepseek-ai-$p-$v.tgz" -C "$d/$v/$p" --strip-components=1
 done; done
-for p in $pkgs; do diff -r "$d/0.2.2-rc.4/$p/lib" "$d/0.2.2-rc.5/$p/lib" >/dev/null || echo "DIFF $p"; done
+for p in $pkgs; do diff -r "$d/0.2.3-rc.4/$p/lib" "$d/0.2.3-rc.5/$p/lib" >/dev/null || echo "DIFF $p"; done
 ```
 
 九个包：`dsh-agent`、`dsh-app-boot`、`dsh-llm`、`dsh-session`、`dsh-spill`、`dsh-spill-policy`、
@@ -404,7 +404,7 @@ for p in $pkgs; do diff -r "$d/0.2.2-rc.4/$p/lib" "$d/0.2.2-rc.5/$p/lib" >/dev/n
 是第三类观察面，不是工具返回值。§2.1、§2.2 是可构造的门的验收细则；本表是操作者看到某个码时的
 速查。收据流里的 `projection-skipped:no-spill` / `projection-skipped:no-footer` 是**输入**，
 分别映射成 `ERR_HOST_NO_SPILL` / `ERR_HOST_NO_SPILL_NOTICE`，本身不是稳定码。本表的代码行号以
-0.2.2 的发布 commit `db3da9b` 为准；源码继续演进时按函数名/命令名定位（行号可能已移动）。
+0.2.3 的发布 commit `32f9f94` 为准；源码继续演进时按函数名/命令名定位（行号可能已移动）。
 
 `ERR_HTTP_*` 是**设置页数据路由**的响应体码，不是 `status.degraded` 的成员：路由的每次失败都以
 JSON 体返回一个码，页面据码决定说什么。`ERR_CLIENT_*` 是页面自己产生的两个码（读不到路由、
@@ -449,7 +449,7 @@ JSON 体返回一个码，页面据码决定说什么。`ERR_CLIENT_*` 是页面
 | `ERR_BOOST_INVALID_ARGS` | `boost` 工具失败 `code` | `baseRevision` 缺失或不是非负整数（`scope-set` / `shadow`） | 从 `status` 取整数 revision 再传 |
 | `ERR_BOOST_INVALID_BODY` | `boost` 工具失败 `code` | `body` 形状/类型不对；`scope-set` 带了保留字段 `version` / `revision`；`shadow` 的 body 不是布尔 | 按工具 schema 重写 body |
 | `ERR_BOOST_INTERNAL` | `boost` 工具失败 `code` | 未预期的内部失败（工具仍以值返回，不抛出） | 记录 `status` 与日志，按 bug 上报 |
-| `ERR_HOST_VERSION_MISMATCH` | 加载日志警告 | 解析到的宿主版本**落在 `engines.dsh` 区间外**（`<0.2.2-rc.4` 或 `>=0.2.3-0`）；插件**仍然加载**，改名 API 仍可能让它失效。区间内的 `rc.5` / `0.2.2` 只记 info，不发码 | 核对 `engines.dsh` 与宿主版本；换回区间内或接受风险 |
+| `ERR_HOST_VERSION_MISMATCH` | 加载日志警告 | 解析到的宿主版本**落在 `engines.dsh` 区间外**（`<0.2.3-rc.4` 或 `>=0.2.3-0`）；插件**仍然加载**，改名 API 仍可能让它失效。区间内的 `rc.5` / `0.2.3` 只记 info，不发码 | 核对 `engines.dsh` 与宿主版本；换回区间内或接受风险 |
 | `ERR_HOST_NO_AGENT_REQUEST` | 加载日志警告（一次） | `llm/stream` 前没观察到 `agent/request`；selector 路由捕获不到，多候选替换会 fail-closed | 宿主事件已废弃/移除；升级宿主，或只用单候选替换 |
 | `ERR_HOST_NO_SYSTEM_PROMPT_ASSEMBLE` | 加载日志警告（一次） | 首个 `agent/pre-step` 到达前从未观察到 `system-prompt/assemble`：协议段无法预热/打补丁（事件可能被改名或移除）。事件名同时进 `missingMounts`，所以 `status.degraded` 里看到的是 `ERR_BOOST_PARTIAL_MOUNT` | 核对宿主提示装配事件；升级宿主，或接受协议段不可用 |
 | `ERR_HOST_NO_AGENT_PRE_STEP` | 加载日志警告（一次） | 首个**主** `llm/stream` 前没有该会话的 `agent/pre-step`：步进时钟无法推进，替换不可能（带 `purpose` 的辅助请求不触发）。同样进 `missingMounts` | 升级宿主；此宿主上替换不可用，投影仍可用 |
@@ -615,7 +615,7 @@ node scripts/shadow-report.mjs --dir "${BOOST_ROOT:-$DSH_HOME}/boost/receipts"  
 
 复算（手工可重复，不碰会话目录；CI 只做发布门 `ci` + `verify:package`，不跑统计复算，见 §6.1）。
 机器可读的管道用下面两种之一：不带 `--silent` 的 `npm run stats` 会把 npm 的
-`> dsh-boost@0.2.2 stats` 横幅打进 **stdout**（stderr 重定向拦不住），直接接 `jq` 之类会破：
+`> dsh-boost@0.2.3 stats` 横幅打进 **stdout**（stderr 重定向拦不住），直接接 `jq` 之类会破：
 
 ```bash
 npm run --silent stats
@@ -683,7 +683,7 @@ DSH 宿主后的行为、§3 的 20 任务回退流程（人工）、§5 的统�
 
 `--ignore-scripts` and `npm publish <tgz>` skip the gate entirely; the only defence is running
 `npm run verify:package` on the commit you tag. 具体地，`npm publish --ignore-scripts` 不跑
-`prepublishOnly`，`npm publish ./dsh-boost-0.2.2.tgz` 对 tarball 发布也不跑包内任何脚本；两者都能
+`prepublishOnly`，`npm publish ./dsh-boost-0.2.3.tgz` 对 tarball 发布也不跑包内任何脚本；两者都能
 把没有 `dist/index.js` 的 8 文件空包推到 registry（本机 npm 11.19.1 实测：无 `dist/` 的干净 clone
 上 `npm publish --dry-run --ignore-scripts` exit 0，8 files / 29,532 字节，约 29.5 kB；该数是按
 0.1.1 的载荷量的，0.1.2 改了两份 README 与版本号，数字会略有出入）。`prepublishOnly` 只保护

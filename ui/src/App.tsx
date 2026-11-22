@@ -9,7 +9,7 @@
  * than showing none.
  */
 import { copyOf, adviceFor, type Copy } from './copy'
-import { payloadOf } from './draft'
+import { envelopeOf, payloadOf } from './draft'
 import { useT } from './i18n'
 import { useCallback, useEffect, useState, type ReactNode } from 'react'
 import { fetchState, type StateResult } from './api'
@@ -125,22 +125,19 @@ export function App() {
 
   // Both are `runBoost` envelopes: `payloadOf` unwraps the success case and
   // leaves the failure case alone so its `code` stays readable.
-  const status = payloadOf(result?.ok === true ? result.data.status : undefined)
   const scope = result?.ok === true ? result.data.scope : undefined
   const config = payloadOf(result?.ok === true ? result.data.config : undefined)
 
-  // A failed status envelope must not read as health: without this the panels
-  // below would say "no degraded items" and "no receipts yet" — a confident
-  // wrong answer, which is worse than showing nothing.
-  // Three ways status can be unusable: the envelope failed (`ok:false` with a
-  // code), the payload is missing altogether, or it is not an object. All three
-  // must stop the health claims — only `ok:true` earns "nothing is degraded".
-  const statusOk = status !== null && typeof status === 'object' && (status as { ok?: unknown }).ok === true
-  const statusCode = statusOk
-    ? undefined
-    : status !== null && typeof status === 'object'
-      ? String((status as { code?: unknown }).code ?? '')
-      : ''
+  // A failed status read must not read as health: without this the panels below
+  // would say "no degraded items" and "no receipts yet" — a confident wrong
+  // answer, which is worse than showing nothing. The question goes to the
+  // envelope, never to the payload: a payload carries no `ok`, so asking it
+  // there answers "no" forever and the whole page becomes unreadable.
+  const statusRead = envelopeOf(result?.ok === true ? result.data.status : undefined)
+  const status = statusRead.data
+  // `undefined` means "status answered"; a string means it did not, and an
+  // empty one means it failed without naming a code.
+  const statusCode = statusRead.ok ? undefined : (statusRead.code ?? '')
 
   const saved = pick(status, 'saved')
   const degraded = pick(status, 'degraded')
