@@ -1714,6 +1714,18 @@ export function apply(ctx: PluginContext, config: unknown): void {
             scope: () => runBoost({ ...boostDeps, args: { cmd: 'scope-get' } }),
             workspaces: () => listWorkspaces(registryBackend()),
             config: () => cfg,
+            write: (body, baseRevision) =>
+              runBoost({
+                ...boostDeps,
+                // The wire is untrusted: a non-number is "no revision given",
+                // which the command already rejects with its own code. Passing
+                // it through as-is would only move the type error here.
+                args: {
+                  cmd: 'scope-set',
+                  body,
+                  ...(typeof baseRevision === 'number' ? { baseRevision } : {}),
+                },
+              }),
           },
           message => ctx.logger?.warn?.(message),
         )

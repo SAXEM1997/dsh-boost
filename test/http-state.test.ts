@@ -8,7 +8,7 @@
  */
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdir, mkdtemp, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, readFile, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import * as plugin from '../src/index.ts'
@@ -48,8 +48,9 @@ function fakeResponse(): { out: { status: number; headers: Any; body: string }; 
 interface Server {
   routes: { kind: string; path: string; handler: Any }[]
   warnings: string[]
-  request(method: string, url: string, headers: Record<string, string>): Promise<{ status: number; body: Any }>
+  request(method: string, url: string, headers: Record<string, string>, body?: string): Promise<{ status: number; body: Any }>
   setRegistry(registry: unknown): void
+  readScope(): Promise<Any>
 }
 
 /**
@@ -105,12 +106,23 @@ async function createServer(
     setRegistry(next: unknown): void {
       registry = next
     },
-    async request(method, url, headers) {
+    async request(method, url, headers, body) {
       const route = routes[0]
       assert.ok(route !== undefined, 'the plugin mounted no route')
       const { out, res } = fakeResponse()
-      await route.handler({ method, url, headers }, res)
+      // A write's request is a stream; a read's is not, and the handler must
+      // tolerate both rather than assume one shape.
+      const request: Any = { method, url, headers }
+      if (body !== undefined) {
+        request[Symbol.asyncIterator] = async function* () {
+          yield Buffer.from(body, 'utf8')
+        }
+      }
+      await route.handler(request, res)
       return { status: out.status, body: out.body === '' ? undefined : JSON.parse(out.body) }
+    },
+    readScope(): Promise<Any> {
+      return readFile(join(root, 'scope.json'), 'utf8').then(text => JSON.parse(text))
     },
   }
 }
@@ -199,9 +211,12 @@ test('没有 Host 头 → 403', async () => {
   assert.equal(status, 403)
 })
 
-test('非 GET/HEAD → 405', async () => {
+test('读路由不接受 POST 以外的方法', async () => {
   const server = await createServer()
-  const { status, body } = await server.request('POST', `${HTTP_API_PREFIX}/state`, { host: LOOPBACK })
+  const { status, body } = await server.request('PUT', `${HTTP_API_PREFIX}/state`, {
+    host: LOOPBACK,
+    origin: `http://${LOOPBACK}`,
+  })
   assert.equal(status, 405)
   assert.equal(body.error, 'ERR_HTTP_METHOD')
 })
@@ -237,4 +252,119 @@ test('没有动态注入能力的宿主：warn 一次、不挂路由', async () 
   const server = await createServer({ inject: false })
   assert.equal(server.routes.length, 0)
   assert.ok(server.warnings.some(message => message.includes('settings page has no data route')))
+})
+
+// --- writes: same CAS as the tool, same fence as reads, stricter on Origin ---
+
+const ORIGIN = `http://${LOOPBACK}`
+
+test('写：同源 POST 改字段，盘上的 scope.json 立刻反映', async () => {
+  const server = await createServer()
+  const { status, body } = await server.request(
+    'POST',
+    `${HTTP_API_PREFIX}/scope`,
+    { host: LOOPBACK, origin: ORIGIN },
+    JSON.stringify({ body: { mode: 'global', shadow: false }, baseRevision: 0 }),
+  )
+  assert.equal(status, 200)
+  assert.equal(body.ok, true)
+  // The file is the source of truth, not the response: a 200 that did not
+  // persist would still look like success to the page.
+  const doc = await server.readScope()
+  assert.equal(doc.mode, 'global')
+  assert.equal(doc.shadow, false)
+  assert.equal(doc.revision, 1)
+})
+
+test('写：没有 Origin 头 → 403（浏览器对 POST 一定带它）', async () => {
+  const server = await createServer()
+  const { status, body } = await server.request(
+    'POST',
+    `${HTTP_API_PREFIX}/scope`,
+    { host: LOOPBACK },
+    JSON.stringify({ body: { mode: 'global' }, baseRevision: 0 }),
+  )
+  assert.equal(status, 403)
+  assert.equal(body.error, 'ERR_HTTP_FORBIDDEN')
+  assert.equal((await server.readScope()).mode, 'selected')
+})
+
+test('写：跨站 Origin → 403', async () => {
+  const server = await createServer()
+  const { status } = await server.request(
+    'POST',
+    `${HTTP_API_PREFIX}/scope`,
+    { host: LOOPBACK, origin: 'http://evil.example' },
+    JSON.stringify({ body: { mode: 'global' }, baseRevision: 0 }),
+  )
+  assert.equal(status, 403)
+})
+
+test('写：过期的 baseRevision → 409 且文件不动', async () => {
+  const server = await createServer()
+  // Someone else writes first — this is the concurrent-writer case.
+  await server.request(
+    'POST',
+    `${HTTP_API_PREFIX}/scope`,
+    { host: LOOPBACK, origin: ORIGIN },
+    JSON.stringify({ body: { mode: 'global' }, baseRevision: 0 }),
+  )
+  const { status, body } = await server.request(
+    'POST',
+    `${HTTP_API_PREFIX}/scope`,
+    { host: LOOPBACK, origin: ORIGIN },
+    JSON.stringify({ body: { mode: 'selected' }, baseRevision: 0 }),
+  )
+  assert.equal(status, 409)
+  assert.equal(body.error, 'ERR_SCOPE_REVISION_CONFLICT')
+  assert.equal((await server.readScope()).mode, 'global')
+})
+
+test('写：字段非法 → 400 且带插件的码', async () => {
+  const server = await createServer()
+  const { status, body } = await server.request(
+    'POST',
+    `${HTTP_API_PREFIX}/scope`,
+    { host: LOOPBACK, origin: ORIGIN },
+    JSON.stringify({ body: { mode: 'everything' }, baseRevision: 0 }),
+  )
+  assert.equal(status, 400)
+  assert.equal(body.error, 'ERR_BOOST_INVALID_BODY')
+})
+
+test('写：body 不是 JSON → 400', async () => {
+  const server = await createServer()
+  const { status, body } = await server.request(
+    'POST',
+    `${HTTP_API_PREFIX}/scope`,
+    { host: LOOPBACK, origin: ORIGIN },
+    'not json at all',
+  )
+  assert.equal(status, 400)
+  assert.equal(body.error, 'ERR_HTTP_BODY')
+})
+
+test('写：超过 64 KiB 的 body 被拒，不是被截断后照写', async () => {
+  const server = await createServer()
+  const huge = JSON.stringify({ body: { workspaceIds: ['x'.repeat(70 * 1024)] }, baseRevision: 0 })
+  const { status, body } = await server.request(
+    'POST',
+    `${HTTP_API_PREFIX}/scope`,
+    { host: LOOPBACK, origin: ORIGIN },
+    huge,
+  )
+  assert.equal(status, 400)
+  assert.equal(body.error, 'ERR_HTTP_BODY')
+  assert.equal((await server.readScope()).revision, 0)
+})
+
+test('写：未知写路径 → 404', async () => {
+  const server = await createServer()
+  const { status } = await server.request(
+    'POST',
+    `${HTTP_API_PREFIX}/shadow`,
+    { host: LOOPBACK, origin: ORIGIN },
+    JSON.stringify({ body: true, baseRevision: 0 }),
+  )
+  assert.equal(status, 404)
 })

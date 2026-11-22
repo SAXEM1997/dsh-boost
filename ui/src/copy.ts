@@ -104,11 +104,45 @@ export function adviceFor(code: string): string {
 }
 
 export const ADVICE_FOR_CODE: Record<string, string> = {
+  ERR_SCOPE_REVISION_CONFLICT:
+    '磁盘上的文档在别处被改过，这次保存被拒绝。点「重新读取」按新文档重来——你现在的改动会丢，所以由你决定。',
+  ERR_SCOPE_LOCKED: '另一个进程正拿着写锁。稍后再存一次。',
+  ERR_SCOPE_READ_FAILED: '读不到磁盘上的作用域文档，所以不知道基线是什么。检查 boost 目录的权限。',
+  ERR_SCOPE_WRITE_FAILED: '写盘失败，磁盘上的文档没有被改动。检查 boost 目录的权限与剩余空间。',
+  ERR_SCOPE_ABORTED: '请求被取消了，磁盘上的文档没有被改动。',
+  ERR_SCOPE_FUTURE_VERSION: '磁盘上的文档是更高版本的插件写的，这个版本不敢改它。升级插件。',
+  ERR_SCOPE_UNKNOWN_VERSION: '磁盘上的文档版本无法识别，这个版本不敢改它。手工检查 boost 目录里的 scope.json。',
+  ERR_SCOPE_PARSE_FAILED: '磁盘上的文档不是合法的 JSON，这个版本不敢改它。手工检查 boost 目录里的 scope.json。',
+  ERR_HTTP_BODY: '请求体不是合法的 JSON，或超过了 64 KiB。',
+  ERR_BOOST_INVALID_BODY: '有字段的取值不合法，所以整次写入被拒绝——磁盘上的文档没有被改动。',
+  ERR_BOOST_INVALID_ARGS: '请求参数不完整。',
+  ERR_BOOST_INTERNAL: '插件内部出错，磁盘上的文档没有被改动。看宿主日志。',
+  ERR_CLIENT_NETWORK: '页面没能连上插件的路由。它可能没有挂上——看宿主日志里有没有 webServer。',
+  ERR_CLIENT_SHAPE: '插件返回的数据形状和这个页面预期的不一样，多半是版本不匹配。',
   ERR_HTTP_METHOD: '这个地址只接受读：写通道在保存那条路上，不在这里。',
   ERR_HTTP_NOT_FOUND: '插件没有这个子路径：页面与服务端的版本可能不一致。',
   ERR_HTTP_INTERNAL: '服务端读状态时抛了：通常是宿主服务在自己内部出错。看宿主日志。',
   ERR_HTTP_FORBIDDEN: '请求被同源栅栏拒绝：Host 不在受信列表里，或 Origin 与 Host 不一致。',
   ERR_HTTP_WORKSPACES_UNAVAILABLE: WORKSPACES_UNAVAILABLE,
-  ERR_CLIENT_NETWORK: '读不到插件的数据路由：它可能没有挂上（看宿主日志里有没有 webServer）。',
-  ERR_CLIENT_SHAPE: '数据路由返回了本页读不懂的形状：版本不匹配。',
 }
+
+/** The writable form's labels. */
+export const LABEL_MODE_SELECTED = MODE_SELECTED
+export const LABEL_MODE_GLOBAL = MODE_GLOBAL
+export const LABEL_WORKSPACES = '工作区'
+export const ACTION_SAVE = '保存'
+export const ACTION_REREAD = '重新读取'
+export const LABEL_SAVE_FAILED = '保存没有生效：'
+export const LABEL_DIRTY = '未保存'
+export const HINT_DIRTY = '改动还没有写下去。'
+export const SAVED = '与磁盘上的文档一致。'
+export const EMPTY_SELECTED = '当前只对选中的工作区生效，但一个都没选——此时插件完全不介入。'
+export const EMPTY_GLOBAL = '所有工作区都会生效，下面这份名单只作为记录保留。'
+export const HINT_NO_WORKSPACES_TO_PICK = '宿主的注册表里没有工作区，没得选。'
+export const LABEL_STALE_IDS = '已保存但注册表里没有'
+export const LABEL_UNMATCHED_IDS = '已勾选但注册表里没有'
+/** The wire values, which are not the labels above. */
+export const MODE_VALUE_SELECTED = 'selected'
+export const MODE_VALUE_GLOBAL = 'global'
+export const PROJECTIONS: readonly string[] = ['off', 'shadow', 'on']
+export const UNAVAILABLE_REGISTRY = '读不到作用域文档，这一块暂时只读。'

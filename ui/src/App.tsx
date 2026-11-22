@@ -23,42 +23,25 @@ import {
   LABEL_CONFIG_VALUE,
   LABEL_DEGRADED,
   LABEL_ESTIMATE,
-  LABEL_MODE,
   LABEL_OVERHEAD,
-  LABEL_PROJECTION,
   LABEL_PROJECTION_GROSS,
   LABEL_PROJECTION_GROSS_REPLAY,
   LABEL_PROJECTION_NET,
   LABEL_RETRIEVALS,
-  LABEL_REVISION,
   LABEL_SAVED_LOWER,
   LABEL_SAVED_UPPER,
-  LABEL_SHADOW,
-  LABEL_WORKSPACE_IDS,
   LOADING,
-  MODE_GLOBAL,
-  MODE_SELECTED,
   NO_DEGRADED,
   NO_RECEIPTS,
-  NO_WORKSPACES_IN_REGISTRY,
-  NO_WORKSPACES_SELECTED,
-  NOT_APPLICABLE,
-  OFF,
-  ON,
-  PROJECTION_OFF,
-  PROJECTION_ON,
-  PROJECTION_SHADOW,
   RETRY,
   SECTION_CONFIG,
   SECTION_COUNTS,
-  SECTION_SCOPE,
   SECTION_STATUS,
-  SECTION_WORKSPACES,
   TITLE,
   UNKNOWN,
-  WORKSPACES_UNAVAILABLE,
 } from './copy'
 import { fetchState, type StateResult } from './api'
+import { ScopeForm } from './ScopeForm'
 
 /** A number, `'unknown'`, or a missing field — three states, never conflated. */
 function tokens(value: unknown): string {
@@ -156,10 +139,8 @@ export function App() {
 
   const status = result?.ok === true ? result.data.status : undefined
   const scope = result?.ok === true ? result.data.scope : undefined
-  const workspaces = result?.ok === true ? result.data.workspaces : undefined
   const config = result?.ok === true ? result.data.config : undefined
 
-  const scopeDoc = pick(scope, 'ok') === true ? pick(scope, 'data') : undefined
   const saved = pick(status, 'saved')
   const degraded = pick(status, 'degraded')
   const codes = Array.isArray(degraded) ? degraded.filter((code): code is string => typeof code === 'string') : []
@@ -171,9 +152,6 @@ export function App() {
           .filter((entry): entry is [string, number] => typeof entry[1] === 'number' && Number.isFinite(entry[1]))
           .sort((left, right) => right[1] - left[1])
   const configRows = flatten(config)
-  const mode = pick(scopeDoc, 'mode')
-  const workspaceIds = pick(scopeDoc, 'workspaceIds')
-  const projection = pick(scopeDoc, 'projection')
 
   return (
     <div className="boost-settings">
@@ -212,34 +190,13 @@ export function App() {
             />
           </Section>
 
-          <Section title={SECTION_SCOPE}>
-            <Row
-              label={LABEL_MODE}
-              value={mode === 'global' ? MODE_GLOBAL : mode === 'selected' ? MODE_SELECTED : NOT_APPLICABLE}
+          {result.ok === true ? (
+            <ScopeForm
+              payload={result.data}
+              scopeCode={pick(scope, 'code') as string | undefined}
+              onSaved={() => load()}
             />
-            <Row label={LABEL_SHADOW} value={pick(scopeDoc, 'shadow') === true ? ON : OFF} />
-            <Row
-              label={LABEL_PROJECTION}
-              value={
-                projection === 'on'
-                  ? PROJECTION_ON
-                  : projection === 'shadow'
-                    ? PROJECTION_SHADOW
-                    : projection === 'off'
-                      ? PROJECTION_OFF
-                      : NOT_APPLICABLE
-              }
-            />
-            <Row
-              label={LABEL_WORKSPACE_IDS}
-              value={
-                Array.isArray(workspaceIds) && workspaceIds.length > 0
-                  ? workspaceIds.map(id => String(id)).join(', ')
-                  : NO_WORKSPACES_SELECTED
-              }
-            />
-            <Row label={LABEL_REVISION} value={tokens(pick(scopeDoc, 'revision'))} />
-          </Section>
+          ) : null}
 
           <Section title={LABEL_DEGRADED} rows={false}>
             <Degraded codes={codes} />
@@ -260,30 +217,6 @@ export function App() {
             )}
           </Section>
 
-          <Section title={SECTION_WORKSPACES} rows={false}>
-            {workspaces === undefined ? null : workspaces.available ? (
-              workspaces.entries.length === 0 ? (
-                <p className="boost-settings__muted">{NO_WORKSPACES_IN_REGISTRY}</p>
-              ) : (
-                <ul className="boost-settings__workspaces">
-                  {workspaces.entries.map(entry => {
-                    const selected = Array.isArray(workspaceIds) && workspaceIds.includes(entry.id)
-                    return (
-                      <li key={entry.id} className={selected ? 'is-selected' : undefined}>
-                        <code>{entry.id}</code>
-                        <span>{entry.path}</span>
-                      </li>
-                    )
-                  })}
-                </ul>
-              )
-            ) : (
-              <div className="boost-settings__error" role="alert">
-                <code>{workspaces.code}</code>
-                <span>{WORKSPACES_UNAVAILABLE}</span>
-              </div>
-            )}
-          </Section>
 
           <Section title={SECTION_CONFIG} rows={false}>
             <p className="boost-settings__hint">{CONFIG_READONLY}</p>

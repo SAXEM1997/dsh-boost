@@ -31,6 +31,7 @@ export const ERR_HTTP_NOT_FOUND = 'ERR_HTTP_NOT_FOUND'
 export const ERR_HTTP_FORBIDDEN = 'ERR_HTTP_FORBIDDEN'
 export const ERR_HTTP_WORKSPACES_UNAVAILABLE = 'ERR_HTTP_WORKSPACES_UNAVAILABLE'
 export const ERR_HTTP_INTERNAL = 'ERR_HTTP_INTERNAL'
+export const ERR_HTTP_BODY = 'ERR_HTTP_BODY'
 
 /** What the state handler reads. Everything is a thunk: state moves. */
 export interface StateDeps {
@@ -42,6 +43,15 @@ export interface StateDeps {
   workspaces(): WorkspaceListing
   /** The effective configuration `resolveConfig` produced at load. */
   config(): unknown
+  /**
+   * `runBoost` with `{ cmd: 'scope-set' }` — the same CAS the tool performs.
+   *
+   * A write goes through the tool's own command rather than a second
+   * implementation of the patch rules: two copies of "which fields may change,
+   * and what a revision means" is exactly how a page and a tool end up
+   * disagreeing about whether a save succeeded.
+   */
+  write(body: unknown, baseRevision: unknown): Promise<{ ok: true; data: unknown } | { ok: false; code: string }>
 }
 
 /**
@@ -88,6 +98,8 @@ export interface HttpRequestLike {
   method?: string
   url?: string
   headers: Record<string, string | string[] | undefined>
+  /** Present on writes: the request stream, as node hands it over. */
+  [Symbol.asyncIterator]?: () => AsyncIterator<unknown>
 }
 
 export interface HttpResponseLike {
@@ -130,6 +142,43 @@ export interface HandlerOptions {
   trustedHosts?: () => readonly string[]
 }
 
+/** The largest write body accepted; a scope document is a few hundred bytes. */
+const MAX_BODY_BYTES = 64 * 1024
+
+/** Reads the request body as UTF-8 text, refusing anything oversized. */
+async function readBody(req: HttpRequestLike): Promise<{ ok: true; text: string } | { ok: false; code: string }> {
+  const iterator = req[Symbol.asyncIterator]
+  if (typeof iterator !== 'function') return { ok: false, code: ERR_HTTP_BODY }
+  const chunks: Buffer[] = []
+  let total = 0
+  for await (const chunk of req as AsyncIterable<unknown>) {
+    const buffer = typeof chunk === 'string' ? Buffer.from(chunk, 'utf8') : Buffer.from(chunk as Uint8Array)
+    total += buffer.byteLength
+    if (total > MAX_BODY_BYTES) return { ok: false, code: ERR_HTTP_BODY }
+    chunks.push(buffer)
+  }
+  return { ok: true, text: Buffer.concat(chunks).toString('utf8') }
+}
+
+/**
+ * Maps a `scope-set` failure onto an HTTP status.
+ *
+ * The body always carries the plugin's own code, so the page never has to
+ * infer anything from the status: a conflict is 409 because the caller can
+ * retry after a re-read, a malformed request is 400 because retrying it
+ * unchanged cannot work, and everything else is a refusal of the current
+ * state (409) or an internal fault (500).
+ */
+function writeStatusFor(code: string): number {
+  if (code === ERR_HTTP_BODY) return 400
+  if (code === 'ERR_BOOST_INVALID_BODY' || code === 'ERR_BOOST_INVALID_ARGS') return 400
+  if (code === 'ERR_BOOST_INTERNAL') return 500
+  // Every remaining scope code means "this write cannot be applied to the
+  // document as it stands": stale revision, held lock, unreadable or
+  // unrecognised file. All of them are resolved by looking at the document.
+  return 409
+}
+
 /**
  * The route handler: fence, dispatch, structured failure.
  *
@@ -137,17 +186,34 @@ export interface HandlerOptions {
  * request instead of a socket.
  */
 export function createStateHandler(deps: StateDeps, options: HandlerOptions = {}) {
+  const trustedHosts = (): readonly string[] => options.trustedHosts?.() ?? []
+
   return async function handle(req: HttpRequestLike, res: HttpResponseLike): Promise<void> {
-    if (!isTrustedWebRequest(req, { trustedHosts: options.trustedHosts?.() ?? [] })) {
+    const method = req.method ?? 'GET'
+    const isWrite = method !== 'GET' && method !== 'HEAD'
+    // Reads admit an absent `Origin` (a same-origin GET never carries one, and
+    // neither does curl); writes demand it, because a browser always attaches
+    // it to a POST and that is what makes a cross-site write detectable.
+    if (!isTrustedWebRequest(req, { trustedHosts: trustedHosts(), requireOrigin: isWrite })) {
       writeJson(res, 403, { error: ERR_HTTP_FORBIDDEN })
       return
     }
-    const method = req.method ?? 'GET'
-    if (method !== 'GET' && method !== 'HEAD') {
-      writeJson(res, 405, { error: ERR_HTTP_METHOD })
+    const path = subPath(req.url)
+
+    if (isWrite) {
+      if (method !== 'POST') {
+        writeJson(res, 405, { error: ERR_HTTP_METHOD })
+        return
+      }
+      if (path !== '/scope') {
+        writeJson(res, 404, { error: ERR_HTTP_NOT_FOUND })
+        return
+      }
+      await handleWrite(deps, req, res)
       return
     }
-    if (subPath(req.url) !== '/state') {
+
+    if (path !== '/state') {
       writeJson(res, 404, { error: ERR_HTTP_NOT_FOUND })
       return
     }
@@ -159,4 +225,37 @@ export function createStateHandler(deps: StateDeps, options: HandlerOptions = {}
       writeJson(res, 500, { error: ERR_HTTP_INTERNAL })
     }
   }
+}
+
+/** The write half: parse, delegate to the tool's own command, map the answer. */
+async function handleWrite(deps: StateDeps, req: HttpRequestLike, res: HttpResponseLike): Promise<void> {
+  const body = await readBody(req)
+  if (!body.ok) {
+    writeJson(res, 400, { error: body.code })
+    return
+  }
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(body.text)
+  } catch {
+    writeJson(res, 400, { error: ERR_HTTP_BODY })
+    return
+  }
+  const envelope = parsed as { body?: unknown; baseRevision?: unknown } | null
+  if (envelope === null || typeof envelope !== 'object') {
+    writeJson(res, 400, { error: ERR_HTTP_BODY })
+    return
+  }
+  let result: { ok: true; data: unknown } | { ok: false; code: string }
+  try {
+    result = await deps.write(envelope.body, envelope.baseRevision)
+  } catch {
+    writeJson(res, 500, { error: ERR_HTTP_INTERNAL })
+    return
+  }
+  if (!result.ok) {
+    writeJson(res, writeStatusFor(result.code), { error: result.code })
+    return
+  }
+  writeJson(res, 200, { ok: true, data: result.data })
 }

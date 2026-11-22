@@ -5,12 +5,15 @@
  * decides what to say — and whether to keep a draft — from the code alone.
  */
 import { HTTP_API_PREFIX } from '../../src/shared/api-prefix'
-import type { StatePayload, WorkspaceListing } from '../../src/shared/api-types'
+import type { StatePayload, WorkspaceListing } from '../../src/shared/api-types.js'
 
 export type { StatePayload, WorkspaceEntry, WorkspaceListing } from '../../src/shared/api-types'
 
 /** Success carries the payload; failure carries a code and nothing else. */
 export type StateResult = { ok: true; data: StatePayload } | { ok: false; code: string }
+
+/** What a save returns: the document it wrote, or the code that stopped it. */
+export type SaveResult = { ok: true; data: unknown } | { ok: false; code: string }
 
 /** Codes this module can produce on its own, before any server answer. */
 export const ERR_CLIENT_NETWORK = 'ERR_CLIENT_NETWORK'
@@ -67,4 +70,36 @@ export async function fetchState(signal?: AbortSignal): Promise<StateResult> {
       config: payload.config,
     },
   }
+}
+
+/**
+ * Writes the four scope fields through the same CAS the `boost` tool uses.
+ *
+ * `baseRevision` is the revision the draft was seeded from, not the newest one:
+ * that is what makes a concurrent write visible as a conflict instead of
+ * silently discarding whichever change landed second.
+ */
+export async function saveScope(patch: unknown, baseRevision: number): Promise<SaveResult> {
+  let response: Response
+  try {
+    response = await fetch(`${HTTP_API_PREFIX}/scope`, {
+      method: 'POST',
+      credentials: 'same-origin',
+      headers: { 'content-type': 'application/json', accept: 'application/json' },
+      body: JSON.stringify({ body: patch, baseRevision }),
+    })
+  } catch {
+    return { ok: false, code: ERR_CLIENT_NETWORK }
+  }
+  let body: unknown
+  try {
+    body = await response.json()
+  } catch {
+    return { ok: false, code: ERR_CLIENT_NETWORK }
+  }
+  if (!response.ok) {
+    const code = (body as { error?: unknown } | null)?.error
+    return { ok: false, code: typeof code === 'string' ? code : ERR_CLIENT_NETWORK }
+  }
+  return { ok: true, data: (body as { data?: unknown } | null)?.data }
 }
