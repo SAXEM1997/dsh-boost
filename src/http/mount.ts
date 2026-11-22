@@ -15,6 +15,7 @@
  * name outside the injection list.
  */
 import { HTTP_API_PREFIX } from '../shared/api-prefix.js'
+import { ERR_BOOST_HTTP_MOUNT_FAILED } from '../tools/boost.js'
 import { createStateHandler, type StateDeps } from './state.js'
 
 /** The one service this plugin needs from the host's web composition. */
@@ -55,7 +56,10 @@ export function registerHttpApi(
   warn: (message: string) => void,
 ): () => void {
   if (typeof ctx.inject !== 'function') {
-    warn('[boost] webServer unavailable (no dynamic injection); settings page has no data route')
+    warn(
+      `${ERR_BOOST_HTTP_MOUNT_FAILED}: no dynamic injection (\`ctx.inject\` is missing); ` +
+        'settings page has no data route',
+    )
     return () => {}
   }
   let dispose: (() => void) | undefined
@@ -63,7 +67,7 @@ export function registerHttpApi(
     ctx.inject(['webServer'], (context) => {
       const webServer = context.webServer
       if (webServer === undefined) {
-        warn('[boost] webServer unavailable; settings page has no data route')
+        warn(`${ERR_BOOST_HTTP_MOUNT_FAILED}: webServer resolved to undefined; settings page has no data route`)
         return
       }
       const handler = createStateHandler(deps, { trustedHosts: () => resolveTrustedHosts(ctx) })
@@ -73,7 +77,7 @@ export function registerHttpApi(
     // The mount must never cost the plugin: a composition without a web server
     // is the normal headless case, not a fault.
     const message = error instanceof Error ? error.message : String(error)
-    warn(`[boost] settings page has no data route: ${message}`)
+    warn(`${ERR_BOOST_HTTP_MOUNT_FAILED}: ${message}`)
   }
   return () => {
     dispose?.()

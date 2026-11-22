@@ -358,7 +358,7 @@ export function assertClientBundleText(text, id) {
       throw new Error(`client bundle does not export \`${exported}\``)
     }
   }
-  if (!/\b\w+\("react(\/[^"]*)?"\)/.test(text)) {
+  if (!/\b\w+\("react(-dom)?(\/[^"]*)?"\)/.test(text)) {
     throw new Error(
       'client bundle never resolves React through the host module resolver: ' +
         'the shell supplies one shared React instance and a second copy breaks hooks',

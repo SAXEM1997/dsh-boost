@@ -211,14 +211,16 @@ test('没有 Host 头 → 403', async () => {
   assert.equal(status, 403)
 })
 
-test('读路由不接受 POST 以外的方法', async () => {
+test('读路由不接受写方法', async () => {
   const server = await createServer()
-  const { status, body } = await server.request('PUT', `${HTTP_API_PREFIX}/state`, {
-    host: LOOPBACK,
-    origin: `http://${LOOPBACK}`,
-  })
-  assert.equal(status, 405)
-  assert.equal(body.error, 'ERR_HTTP_METHOD')
+  for (const method of ['PUT', 'POST']) {
+    const { status, body } = await server.request(method, `${HTTP_API_PREFIX}/state`, {
+      host: LOOPBACK,
+      origin: `http://${LOOPBACK}`,
+    })
+    assert.equal(status, 405, `${method} /state`)
+    assert.equal(body.error, 'ERR_HTTP_METHOD', `${method} /state`)
+  }
 })
 
 test('未知子路径 → 404，且是 JSON', async () => {

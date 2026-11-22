@@ -100,7 +100,7 @@ test('staleWorkspaceIds 只看已保存的文档', () => {
   assert.deepEqual(staleWorkspaceIds(seed, listing('ws-1')), ['ws-gone'])
 })
 
-test('pathUnmatched 只看草稿，两者不互换', () => {
+test('unmatchedDraftIds 只看草稿，两者不互换', () => {
   const seed = seedOf(doc({ workspaceIds: ['ws-1', 'ws-gone'] }))
   assert.ok(seed !== undefined)
   const draft: ScopeDraft = { ...draftOf(seed), workspaceIds: ['ws-1', 'ws-new'] }

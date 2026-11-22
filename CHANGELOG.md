@@ -10,6 +10,24 @@ Design rationale lives in `docs/superpowers/specs/`; the release-acceptance proc
 
 ## [Unreleased]
 
+## [0.2.1] - 2026-11-22
+
+### 修复 Fixed
+
+- **状态面板读高了一层信封**：`/state` 原样返回 `runBoost` 的结果，所以 `status` 是 `{ ok, data }`，而页面在信封上读 `saved`/`degraded`/`counts`——每一行都渲染成「未测量」、降级列表永远为空，页面看起来一切正常其实什么都没看见。新增 `payloadOf` 解开信封（失败时保留，码仍可读），并补上这条接缝的测试：组件按设计不做渲染测试，所以钉的是「路由造出的载荷」与「页面读它用的解包」这两半。
+- **两个危险开关的提示挂错了位置**：`content[].thinking` 的 400 来自合成回合，只有替换（`shadow: false`）才会触发，与投影无关。现在投影切到 `on` 只提示 spill 前置条件，关掉影子模式才提示那个 400；两处都给回滚办法。
+- **回滚命令写错**：原文让人「跑 `boost shadow true` 回滚投影」，但 `shadow` 子命令写的是 `doc.shadow`，不动 `projection`。改成 `scope-set` 带 `body: {"projection": "shadow"}`。
+- **写盘失败被报成读盘失败**：`writeAtomic` 失败原来映射到 `ERR_SCOPE_READ_FAILED`，页面于是建议「重新读取」——那会丢掉一份好草稿，而基线其实还在。新增 `ERR_SCOPE_WRITE_FAILED`（HTTP 500），页面让它原样重试。
+- **写 `/state` 返回 404，文档说 405**：写分支把非 `/scope` 的路径一律当未知路由。现在写只读路径是方法错误（405 `ERR_HTTP_METHOD`），测试同时覆盖 `PUT` 与 `POST`。
+- 安装规格与文档里的版本串还是 `^0.1.3`（`docs/RELEASE.md`、两份 README），`^` 不跨大版本，照着装会装回没有设置页的版本；统一到 `^0.2.0` 并写明从 `0.1.x` 要显式升级。
+- 两份 README 的 `locale` 依赖行说页面「不跟随宿主语言、固定中文」，与实现相反；改为跟随宿主语言、缺服务时回落中文。
+- `ERR_BOOST_HTTP_MOUNT_FAILED` 之前只在 `src/index.ts` 的兜底分支里作为字面量出现，而挂载路径自己吞掉失败，那个分支到不了；改为在挂载路径的三处失败上带码告警，并把它声明成常量。
+- 发布门的 `factory` 子句缺失败例（七个断言只有六个负例）；补一条「工厂没有 `require` 参数」的负例。
+- 客户端的 `external` 只写了 `react-dom` 裸名，`react-dom/client` 会被打进产物而门抓不到；补 `^react-dom\//`，门的 React 断言也一并认 `react-dom`。
+- `CHANGELOG` 的 0.2.0 段把 `ERR_BOOST_PARTIAL_MOUNT` 列为新增（它在 0.1.4 就有），UI 键数写成 91（实为 92）；删除无发射点的 `HINT_PROJECTION_ON_THINKING`，补 `ERR_SCOPE_WRITE_FAILED` 的码表行。
+- 两份 README 补「设置页」一节：页面在哪、能改什么、读不到数据时显示什么码。
+- 死代码与命名：删掉无调用者的 `registryOf`、把测试名里的 `pathUnmatched` 改成 `unmatchedDraftIds`、把客户端日志前缀从 `[boost]` 统一成 `dsh-boost:`，并把槽位 id（契约，仍是 `boost`）与日志前缀分开成两个常量。
+
 ## [0.2.0] - 2026-11-22
 
 新增对外面：`dsh.client`、`./client` 出口、设置页数据路由、客户端产物。`0.1.x` 升到这里要显式改版本号（`^0.1.4` 不会自动跳到大版本）。
@@ -18,10 +36,10 @@ Design rationale lives in `docs/superpowers/specs/`; the release-acceptance proc
 
 - **设置页**（`settings.section`，id `boost`）：在宿主的设置面板里读写 `scope.json` 的四个字段，走与 `boost scope-set` 同一个 CAS；只读列出 `boost status` 的全部面板（降级码与处置、节省区间上下界、收据计数、常驻开销、生效配置）。
 - **数据路由** `/dsh-boost/api`：`GET /state`、`POST /scope`。同源栅栏（`Host` 白名单防 DNS rebinding；写要求 `Origin`，读放行缺失的 `Origin`——同源 `GET` 本来就不带它）。
-- **中英双语**：`locale/{zh,en}.json` 各 91 个 UI 键，跟随宿主 `locale` 服务；宿主没有这个服务时页面仍可用，固定中文并 `console.warn` 一次。
-- 投影切到 `on` 时页面给出两条前置条件（spill 可用、首次真替换盯 `content[].thinking` 的 400）与回滚办法——**只提示，不做硬门**。
+- **中英双语**：`locale/{zh,en}.json` 各 92 个 UI 键，跟随宿主 `locale` 服务；宿主没有这个服务时页面仍可用，固定中文并 `console.warn` 一次。
+- 两个危险开关各有自己的提示，**只提示，不做硬门**：投影切到 `on` 时提示 spill 前置条件；关掉影子模式时提示盯一次含 `content[].thinking` 的 400（那个 400 来自合成回合，只有替换才会触发，与投影无关）。两处都给回滚办法。
 - 发布门新增两条不变式：服务端 `dist/` 零静态宿主 import；客户端产物只经 `require` 解析宿主模块且必须带加载器信封。两者都有能失败的负例。
-- 新码：`ERR_HTTP_{METHOD,NOT_FOUND,FORBIDDEN,INTERNAL,BODY,WORKSPACES_UNAVAILABLE}`、`ERR_CLIENT_{NETWORK,SHAPE}`、`ERR_BOOST_HTTP_MOUNT_FAILED`、`ERR_BOOST_PARTIAL_MOUNT`。
+- 新码：`ERR_HTTP_{METHOD,NOT_FOUND,FORBIDDEN,INTERNAL,BODY,WORKSPACES_UNAVAILABLE}`、`ERR_CLIENT_{NETWORK,SHAPE}`、`ERR_BOOST_HTTP_MOUNT_FAILED`、`ERR_SCOPE_WRITE_FAILED`（写盘失败与读盘失败分开：前者不该建议重读，那会丢掉一份好草稿）。
 
 ## [0.1.4] - 2026-11-21
 

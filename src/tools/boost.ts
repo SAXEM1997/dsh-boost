@@ -96,6 +96,15 @@ export const ERR_BOOST_INVALID_BODY = 'ERR_BOOST_INVALID_BODY'
 /** Stable failure code: an unexpected internal failure, so the tool still answers. */
 export const ERR_BOOST_INTERNAL = 'ERR_BOOST_INTERNAL'
 
+/**
+ * Load-time log code: the settings page's data route could not be mounted.
+ *
+ * Log-only, like `ERR_BOOST_PARTIAL_MOUNT`: the plugin keeps working, the page
+ * just has no data source. Emitted from the mount path itself, so it appears in
+ * the host log rather than in `boost status`.
+ */
+export const ERR_BOOST_HTTP_MOUNT_FAILED = 'ERR_BOOST_HTTP_MOUNT_FAILED'
+
 /** Every scope failure code, for passing the store's codes through unchanged. */
 const SCOPE_CODES: ReadonlySet<string> = new Set([
   ERR_SCOPE_UNKNOWN_VERSION,

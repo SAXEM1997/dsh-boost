@@ -85,32 +85,52 @@ denominator statistic that a later version must add.
 directory:
 
 ```bash
-# install from the registry: npmjs has latest = 0.1.3 (this repository's
+# install from the registry: npmjs has latest = 0.2.0 (this repository's
 # .npmrc and lockfile are pinned to npmjs too — see below)
-dsh plugin --profile <name> add dsh-boost@^0.1.3 --registry=https://registry.npmjs.org/
+dsh plugin --profile <name> add dsh-boost@^0.2.0 --registry=https://registry.npmjs.org/
 
 # or from a local checkout (build first; dist/ is not committed)
 npm run build
 dsh plugin --profile <name> add /absolute/path/to/dsh-boost
 ```
 
-For the web profile: `dsh plugin --profile web add dsh-boost@^0.1.3 --registry=https://registry.npmjs.org/`.
+For the web profile: `dsh plugin --profile web add dsh-boost@^0.2.0 --registry=https://registry.npmjs.org/`.
 `dsh plugin` forwards the operation to pnpm, so pnpm must be on `PATH`.
 
-> **Both registries now carry 0.1.3, so `^0.1.3` is a safe pin.**
-> `registry.npmjs.org` and `registry.npmmirror.com` each have five version records: `0.1.3` (the
-> current `latest` on both), `0.1.2`, `0.1.1`, `0.1.0`, and `0.0.0-stage`, the placeholder npm
+> **`^0.2.0` is the current safe pin.** `registry.npmjs.org` has `latest` at `0.2.0`, with
+> `0.1.4`, `0.1.3`, `0.1.2`, `0.1.1`, `0.1.0` behind it, plus `0.0.0-stage`, the placeholder npm
 > creates on a package's first publish — **do not install `0.0.0-stage`**; it is not a usable
-> build. 0.1.3 stops a substitution from committing on output the model cannot see (an outer
-> shaper rewrote the content) and reports the saving as a range (adding `avoided_total_tokens`),
-> plus three host-capability degradation codes and `status.hasSpill`; 0.1.2 carries the
-> scope-overwrite fix: corrupt JSON (including a non-object or an array) and an unrecognizable
-> version are no longer silently overwritten with the default document. Use `dsh-boost@^0.1.3`
-> (or `@latest`) — `^0.1.3` means "at least 0.1.3's fixes". This repository's `.npmrc` and
-> lockfile are pinned to npmjs, but **your machine's global npm config** may still point at a
-> mirror that has not synced 0.1.3: that is local configuration, not this repository's state.
-> Pass `--registry=https://registry.npmjs.org/` explicitly when the registry matters; against a
-> lagging mirror, `@^0.1.3` fails to resolve until the sync lands.
+> build. `0.2.0` adds the settings page (`dsh.client`, the `./client` export, the
+> `/dsh-boost/api` routes, and a `lib/client.js` shipped in the tarball) and Chinese/English
+> localisation; `0.1.4` and earlier **have no settings page**, and `^0.1.4` does not resolve to
+> `0.2.0` (`^` does not cross a major version), so upgrading from `0.1.x` means writing
+> `@^0.2.0` explicitly. This repository's `.npmrc` and lockfile are pinned to npmjs, but **your
+> machine's global npm config** may still point at a mirror that has not synced `0.2.0`: that is
+> local configuration, not this repository's state. Pass `--registry=https://registry.npmjs.org/`
+> explicitly when the registry matters; against a lagging mirror `@^0.2.0` fails to resolve until
+> it catches up.
+
+## Settings page
+
+Once installed and enabled in a profile, the host's settings panel gains a **"Token efficiency"**
+section (「Token 效率」 in Chinese). It does three things:
+
+- **Shows state**: every degradation code with what to do about it, the substitution saving as a
+  lower and upper bound, projection gross and net, retrieval count, receipt counts, the fixed
+  per-request overhead, and the **effective** configuration (read-only — editing it means editing
+  the profile's `cordis.patch.yml`).
+- **Edits scope**: `mode` (all workspaces or selected ones), `workspaceIds`, `shadow`,
+  `projection`. It writes `<dshHome>/boost/scope.json` through the **same** CAS as the `boost`
+  tool's `scope-set`, so neither overwrites the other; if someone else got there first the page
+  reports `ERR_SCOPE_REVISION_CONFLICT` and keeps your draft, leaving the decision to you.
+- **Warns about the two dangerous switches**: projection going to `on` shows the spill
+  precondition; turning shadow mode off shows the `content[].thinking` 400 to watch for. Both
+  give a rollback and both are **advisory, never gates** — whether this route is an
+  Anthropic-compatible thinking mode cannot be determined on this machine, and a gate would only
+  create the illusion of having checked.
+
+When the page cannot reach its data (no `webServer`, a reverse proxy that drops `Host`) it shows a
+stable code instead of an empty table; `curl <host>/dsh-boost/api/state` returns the same JSON.
 
 The package is ESM (`"type": "module"`) and the `.` entry of `exports` also maps `require` /
 `default`: on Node >= 24.9, `require('dsh-boost')` loads the very same code as `import`. Nothing
@@ -150,7 +170,10 @@ the clean default (`ENOENT` carries no degradation code, `src/scope/store.ts`); 
 with the host capabilities in place, `degraded` is simply an empty array. On the `status` read
 path,
 `ERR_SCOPE_READ_FAILED` means the file **exists but cannot be read** (permissions, I/O, a
-directory in its place, …) — not a normal first run; fix it first. The first successful `scope-set` creates the file.
+directory in its place, …) — not a normal first run; fix it first. A failed *write* is a different
+code, `ERR_SCOPE_WRITE_FAILED` (disk full, directory permissions): the page then asks you to retry
+unchanged rather than re-read, because the baseline is still valid and a re-read would throw away
+your draft. The first successful `scope-set` creates the file.
 
 Then list the workspace to expose:
 
@@ -546,7 +569,7 @@ to load. `llm` is soft (only the selector uses it); when absent the selector fal
 | (spill backend present but failing) | — | Every `saveText` is rejected: the receipt records `projection-skipped:spill-failed` and `status.degraded` reports **`ERR_HOST_SPILL_FAILING`**. This is a **third** state — neither "no backend" nor "no footer renderer" — and telling an operator to restore the spill package would send them after a package that is installed and failing |
 | `@deepseek-ai/dsh-token-meter/estimate` | soft (dynamic import) | Fixed overhead cannot be measured, so `fixedOverheadTokens` is `'unknown'`; `status.degraded` reports `ERR_HOST_NO_ESTIMATOR` |
 | `win32` platform | runtime `isPosixOnly()` check | Substitution is refused, projection still works; `status.degraded` reports `ERR_HOST_PLATFORM_UNSUPPORTED` |
-| `locale` | soft (`ctx.get('locale')`) | The settings page **does not follow the host language** and stays Chinese, with one `console.warn` saying so; projection, substitution and the `boost` tool are unaffected |
+| `locale` | soft (`ctx.get('locale')`) | The settings page **follows the host language** (Chinese and English, the nav label included); without this service it falls back to Chinese with one `console.warn`, and the page still works; projection, substitution and the `boost` tool are unaffected |
 | `webServer` | soft (dynamic `ctx.inject(['webServer'], …)`) | **The settings page has no data**: the route is not mounted and the page shows `ERR_CLIENT_NETWORK` with a pointer to the host log. Projection, substitution and the `boost` tool are **unaffected** — this is the only dependency whose absence costs only the page. Once mounted, the trusted `Host` list comes from `webStartup.trustedHosts` (loopback-only when unreadable), so a reverse proxy that drops `Host` is stopped by `ERR_HTTP_FORBIDDEN` |
 | Host version line | startup check of the `@deepseek-ai/dsh-app-boot` version | A version **outside the `engines.dsh` range** (`>=0.2.2-rc.4 <0.2.3-0`) logs `ERR_HOST_VERSION_MISMATCH` and loads anyway — advisory only, not a `status.degraded` code. A version inside the range but not the verified `0.2.2-rc.4` (such as `rc.5` / `0.2.2`) logs an info line, no code; an undeterminable version or an unparseable range also logs info only |
 | Receipt shard readability | `boost status` full scan (not a dependency) | When at least one receipt shard cannot be read (EACCES, a directory named `x.jsonl`, …), `status.degraded` carries `ERR_RECEIPTS_UNREADABLE`; `status` stays a **total over the healthy shards** — they are still counted — so the figures may be incomplete. Check permissions and stray entries in `<dshHome>/boost/receipts/`, fix, and re-run `status`, comparing counts |

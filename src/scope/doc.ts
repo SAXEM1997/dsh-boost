@@ -51,6 +51,15 @@ export const ERR_SCOPE_PARSE_FAILED = 'ERR_SCOPE_PARSE_FAILED'
 /** Stable rejection code: the file exists but could not be read. */
 export const ERR_SCOPE_READ_FAILED = 'ERR_SCOPE_READ_FAILED'
 
+/**
+ * Stable rejection code: the document could not be written.
+ *
+ * Distinct from `ERR_SCOPE_READ_FAILED` on purpose: the caller still holds a
+ * valid baseline, so "re-read" is the wrong advice and would throw away a
+ * draft that is perfectly good.
+ */
+export const ERR_SCOPE_WRITE_FAILED = 'ERR_SCOPE_WRITE_FAILED'
+
 /** Stable rejection code: the write's base revision is stale. */
 export const ERR_SCOPE_REVISION_CONFLICT = 'ERR_SCOPE_REVISION_CONFLICT'
 
@@ -72,6 +81,7 @@ export type ScopeCode =
   | typeof ERR_SCOPE_FUTURE_VERSION
   | typeof ERR_SCOPE_PARSE_FAILED
   | typeof ERR_SCOPE_READ_FAILED
+  | typeof ERR_SCOPE_WRITE_FAILED
   | typeof ERR_SCOPE_REVISION_CONFLICT
   | typeof ERR_SCOPE_LOCKED
   | typeof ERR_SCOPE_ABORTED

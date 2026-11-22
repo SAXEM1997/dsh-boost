@@ -48,6 +48,14 @@ test('the gate rejects a bundle registered under another id', () => {
   assert.throws(() => assertClientBundleText(text, PACKAGE_NAME), /does not register under id/)
 })
 
+test('the gate rejects a bundle whose factory takes no resolver', () => {
+  // A factory with no parameter cannot reach the host module table at all, so
+  // its React is whatever got bundled — the clause that catches it is the one
+  // that would otherwise never fire.
+  const text = mutated((s) => s.replace('factory: (require) => {', 'factory: () => {'))
+  assert.throws(() => assertClientBundleText(text, PACKAGE_NAME), /factory/)
+})
+
 test('the gate rejects a bundle that does not export apply', () => {
   const text = mutated((s) => s.replace('exports.apply = function apply() {};', ''))
   assert.throws(() => assertClientBundleText(text, PACKAGE_NAME), /does not export `apply`/)

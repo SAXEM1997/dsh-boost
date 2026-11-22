@@ -9,7 +9,7 @@
 ## 它解决什么
 
 DSH 每次模型请求都会回放全部历史。本机 300 个最长会话的实测聚合（`npm run --silent stats`——不带
-`--silent` 时 npm 会把 `> dsh-boost@0.1.3 stats` 横幅打进 stdout，机器解析请用 `--silent` 或直接
+`--silent` 时 npm 会把 `> dsh-boost@0.2.0 stats` 横幅打进 stdout，机器解析请用 `--silent` 或直接
 `node scripts/session-stats.mjs`；快照时刻 `2026-11-19T03:13:21Z`）：54,141 步、54,088 个请求，合计 10,575,904,022 raw token。按步均值
 195,340 token，按请求均值 195,531、中位 187,681；97.01% 的输入是缓存读。工具回执是体积主体
 （bash 61.75%、read 22.13%、ssh 10.01%），而下一步真正会用到的部分通常远小于回执本身。
@@ -64,29 +64,45 @@ v1 的**事前估算**区间是 **3.5%（下界）– 10.0%（理想上界）**�
 `dsh plugin` 要求指定 profile，剩下的参数原样转发给该 profile 目录里的 pnpm：
 
 ```bash
-# 从 registry 安装：npmjs 上的 latest 是 0.1.3（本仓库 .npmrc 与 lockfile
+# 从 registry 安装：npmjs 上的 latest 是 0.2.0（本仓库 .npmrc 与 lockfile
 # 也已钉在 npmjs，见下）
-dsh plugin --profile <name> add dsh-boost@^0.1.3 --registry=https://registry.npmjs.org/
+dsh plugin --profile <name> add dsh-boost@^0.2.0 --registry=https://registry.npmjs.org/
 
 # 或从本地 checkout 安装（先构建；dist/ 不入库）
 npm run build
 dsh plugin --profile <name> add /absolute/path/to/dsh-boost
 ```
 
-例如 web profile：`dsh plugin --profile web add dsh-boost@^0.1.3 --registry=https://registry.npmjs.org/`。
+例如 web profile：`dsh plugin --profile web add dsh-boost@^0.2.0 --registry=https://registry.npmjs.org/`。
 `dsh plugin` 把操作转发给 pnpm，所以 pnpm 必须在 PATH 上。
 
-> **两个 registry 现在都到 0.1.3，`^0.1.3` 是安全的钉法。** `registry.npmjs.org` 与
-> `registry.npmmirror.com` 各有五条版本记录：`0.1.3`（两边都是当前 `latest`）、`0.1.2`、
-> `0.1.1`、`0.1.0`，以及首次发布时 npm 自动创建的占位版本 `0.0.0-stage`——**不要安装
-> `0.0.0-stage`**，它不是可用构建。0.1.3 修掉了「模型看到的正文被外层改写后仍按原始回执
-> 提交替换」的问题，并把节省改报为上下界区间（新增 `avoided_total_tokens`），另加三个宿主
-> 能力降级码与 `status.hasSpill`；0.1.2 修掉了 scope 文件被静默覆盖的问题：坏 JSON（含非对象
-> 或数组）与无法识别的版本不再被默认文档覆盖。请用 `dsh-boost@^0.1.3`（或 `@latest`）——
-> `^0.1.3` 表达的是「至少含 0.1.3 的修复」。本仓库已把 `.npmrc`
-> 与 lockfile 钉在 npmjs，但**你机器上的全局 npm 配置**可能仍指向一个尚未同步 0.1.3 的镜像：
-> 那是本机配置，不是本仓库的状态。在意 registry 时显式传
-> `--registry=https://registry.npmjs.org/`；镜像滞后时，`@^0.1.3` 会在同步前解析失败。
+> **`^0.2.0` 是当前的安全钉法。** `registry.npmjs.org` 上 `latest` 是 `0.2.0`，历史版本依次是
+> `0.1.4`、`0.1.3`、`0.1.2`、`0.1.1`、`0.1.0`，以及首次发布时 npm 自动创建的占位版本
+> `0.0.0-stage`——**不要安装 `0.0.0-stage`**，它不是可用构建。`0.2.0` 新增了设置页
+> （`dsh.client` 与 `./client` 出口、`/dsh-boost/api` 路由、随包发布的 `lib/client.js`）与中英
+> 双语；`0.1.4` 及更早**没有设置页**，`^0.1.4` 也不会解析到 `0.2.0`（`^` 不跨大版本），所以从
+> `0.1.x` 升上来要显式写 `@^0.2.0`。本仓库已把 `.npmrc` 与 lockfile 钉在 npmjs，但**你机器上
+> 的全局 npm 配置**可能仍指向一个尚未同步 `0.2.0` 的镜像：那是本机配置，不是本仓库的状态。
+> 在意 registry 时显式传 `--registry=https://registry.npmjs.org/`；镜像滞后时 `@^0.2.0` 会在
+> 同步前解析失败。
+
+## 设置页
+
+装好并在 profile 里启用之后，宿主设置面板里会多出一节 **「Token 效率」**（英文界面是
+“Token efficiency”）。它做三件事：
+
+- **看状态**：降级码及每个码该怎么办、替换节省的上下界、投影毛额与净额、取回次数、各类收据
+  计数、常驻开销，以及当前**生效**配置（只读——改配置要编辑 profile 的 `cordis.patch.yml`）。
+- **改作用域**：`mode`（全部工作区 / 仅选中的工作区）、`workspaceIds`、`shadow`、`projection`
+  四个字段。写的是 `<dshHome>/boost/scope.json`，与 `boost` 工具的 `scope-set` 走**同一个**
+  CAS，所以两边改都不会互相覆盖；别人先改了，页面会给出 `ERR_SCOPE_REVISION_CONFLICT` 并保留
+  你的草稿，由你决定要不要按磁盘上的文档重来。
+- **提示危险开关**：投影切到 `on` 时提示 spill 前置条件；关掉影子模式时提示盯一次含
+  `content[].thinking` 的 400。两处都给回滚办法，都**只提示不做硬门**——当前路由是不是
+  Anthropic 兼容的 thinking 模式在这台机器上查不出来，硬门只会给出“已检查过”的错觉。
+
+页面读不到数据（宿主没有 `webServer`、反向代理没透传 `Host`）时会显示稳定码而不是空白表格；
+`curl <host>/dsh-boost/api/state` 能看到同一份 JSON。
 
 包是 ESM（`"type": "module"`），`exports` 的 `.` 条目同时映射 `require` / `default`：Node ≥ 24.9
 下 `require('dsh-boost')` 与 `import` 加载同一份代码，装好的包里**不做任何构建**（`files` 只带
@@ -120,7 +136,8 @@ bundle，patch 的 `insert` 行落在 profile root 上。**装完必须重启 DS
 缺失而出现 `ERR_SCOPE_READ_FAILED`：缺失是干净的默认值（`ENOENT` 不带降级码，
 `src/scope/store.ts`）；全新根目录且宿主能力齐全时，`degraded` 就是空数组。在 `status` 的
 读取路径上，`ERR_SCOPE_READ_FAILED` 只表示文件**存在但读不出来**（权限、I/O、路径是目录
-等）——那不是正常的首次状态，要先修掉。
+等）——那不是正常的首次状态，要先修掉。写不进去是另一个码 `ERR_SCOPE_WRITE_FAILED`（磁盘满、
+目录权限），页面拿到它会让你原样重试而不是重读——基线还在，重读会丢掉草稿。
 第一次成功的 `scope-set` 会创建这个文件。
 
 然后列出要暴露的工作区：
@@ -456,7 +473,7 @@ horizon 重放，并计入 `projection_horizon_reestimated`；`projection_horizo
 | `@deepseek-ai/dsh-spill-policy/notice` | 软（动态 import） | spill 后端在，但页脚渲染器 `formatSpillNotice` 加载不到/不存在：apply 模式无法拼页脚，逐条跳过（收据 `projection-skipped:no-footer`；页脚渲染时抛错则记 `projection-skipped:footer-failed`），`status.degraded` 带 `ERR_HOST_NO_SPILL_NOTICE`。这与「没有 spill 后端」的 `ERR_HOST_NO_SPILL` 是两件事 |
 | （spill 后端存在但写失败） | — | 每次 `saveText` 被拒：收据 `projection-skipped:spill-failed`，`status.degraded` 带 **`ERR_HOST_SPILL_FAILING`**。这是**第三种**状态，既不是「没有后端」也不是「没有页脚渲染器」——让操作者去「恢复 spill 包」会把一个已装好却报错的包当成没装 |
 | `@deepseek-ai/dsh-token-meter/estimate` | 软（动态 import） | 固定开销无法测量，`fixedOverheadTokens` 为 `'unknown'`；`status.degraded` 带 `ERR_HOST_NO_ESTIMATOR` |
-| `locale` | 软（`ctx.get('locale')`） | 设置页**不跟随宿主语言**，固定用中文，`console.warn` 说明一次；投影、替换与 `boost` 工具不受影响 |
+| `locale` | 软（`ctx.get('locale')`） | 设置页**跟随宿主语言**（中英双语，导航项标签一起换）；缺这个服务时回落中文并 `console.warn` 说明一次，页面照常可用；投影、替换与 `boost` 工具不受影响 |
 | `webServer` | 软（动态注入 `ctx.inject(['webServer'], …)`） | **设置页读不到数据**：路由没挂上，页面显示 `ERR_CLIENT_NETWORK` 并提示去看宿主日志。投影、替换与 `boost` 工具**完全不受影响**——这是唯一一个缺失只影响页面的依赖。挂上之后 `Host` 的受信名单来自 `webStartup.trustedHosts`（读不到就只信 loopback），所以反向代理没透传 `Host` 时页面会被 `ERR_HTTP_FORBIDDEN` 挡住 |
 | `win32` 平台 | 运行时检查 `isPosixOnly()` | 拒绝替换，投影照常；`status.degraded` 带 `ERR_HOST_PLATFORM_UNSUPPORTED` |
 | 宿主版本线 | 启动时读 `@deepseek-ai/dsh-app-boot` 的版本 | 版本**落在 `engines.dsh` 区间外**（`>=0.2.2-rc.4 <0.2.3-0`）时日志警告 `ERR_HOST_VERSION_MISMATCH`，插件照常加载（advisory，不是 `status.degraded` 码）；区间内但不是验证过的 `0.2.2-rc.4`（如 `rc.5` / `0.2.2`）只记 info、不发码；版本读不到或区间无法解析时也只记 info |

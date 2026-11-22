@@ -15,7 +15,16 @@ import styles from './styles.css?inline'
 export const SETTINGS_SLOT = 'settings.section'
 
 /** This page's namespace: the nav key, and the locale namespace. */
-export const SETTINGS_NAMESPACE = 'boost'
+/** The prefix on every line this bundle logs, greppable with the server's. */
+export const WARN_PREFIX = 'dsh-boost'
+
+/**
+ * The settings section's id, which is contract with the host: it is what
+ * `boost`'s docs and the shell's own seat map name. Distinct from
+ * `WARN_PREFIX` (logging only) and from `LOCALE_NAMESPACE` in `i18n.ts`
+ * (`'dsh-boost'`, the namespace the dictionaries are registered under).
+ */
+export const SETTINGS_ID = 'boost'
 
 /**
  * This bundle's service dependencies, by module short name.
@@ -81,24 +90,24 @@ function installTranslator(ctx: ClientContext): Translate {
   // no page at all.
   const locale = ctx.get?.('locale') as LocaleService | undefined
   if (locale === undefined) {
-    console.warn(`[${SETTINGS_NAMESPACE}] host has no locale service; the page stays readable but will not follow the host language`)
+    console.warn(`[${WARN_PREFIX}] host has no locale service; the page stays readable but will not follow the host language`)
   }
   if (locale !== undefined) {
     try {
-      ctx.effect?.(() => locale.register(LOCALE_NAMESPACE, DICTIONARIES), `${SETTINGS_NAMESPACE}: dictionaries`)
+      ctx.effect?.(() => locale.register(LOCALE_NAMESPACE, DICTIONARIES), `${WARN_PREFIX}: dictionaries`)
       const bound = locale.bind(LOCALE_NAMESPACE)
       setTranslator(bound)
       // The bound function reads the live snapshot, so a subscription only has
       // to bump the page's render version.
       ctx.effect?.(
         () => locale.subscribe?.(() => setTranslator(locale.bind(LOCALE_NAMESPACE))) ?? (() => {}),
-        `${SETTINGS_NAMESPACE}: locale subscription`,
+        `${WARN_PREFIX}: locale subscription`,
       )
       return bound
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error)
       console.warn(
-        `[${SETTINGS_NAMESPACE}] host locale service rejected the dictionaries (${message}); ` +
+        `[${WARN_PREFIX}] host locale service rejected the dictionaries (${message}); ` +
           'registering the section without a locale namespace and using the built-in translator',
       )
     }
@@ -110,7 +119,7 @@ function installTranslator(ctx: ClientContext): Translate {
 }
 
 export function apply(ctx: ClientContext): void {
-  ctx.effect?.(() => installStyles(), `${SETTINGS_NAMESPACE}: settings styles`)
+  ctx.effect?.(() => installStyles(), `${WARN_PREFIX}: settings styles`)
 
   const t = installTranslator(ctx)
 
@@ -118,7 +127,7 @@ export function apply(ctx: ClientContext): void {
     // Reachable only when the host mounts a partial `slots` service: `inject`
     // already makes the fiber wait for a real one. Logged rather than thrown so
     // a misbehaving host costs the page, never the plugin.
-    console.warn(`[${SETTINGS_NAMESPACE}] client slots service unavailable; settings page not registered`)
+    console.warn(`[${WARN_PREFIX}] client slots service unavailable; settings page not registered`)
     return
   }
 
@@ -128,7 +137,7 @@ export function apply(ctx: ClientContext): void {
     slots.register(
       {
         name: SETTINGS_SLOT,
-        id: SETTINGS_NAMESPACE,
+        id: SETTINGS_ID,
         order: 50,
         // A thunk, not a string: the shell re-reads it when the locale changes,
         // so the nav item follows the language without this plugin subscribing.

@@ -19,6 +19,7 @@
 import { HTTP_API_PREFIX } from '../shared/api-prefix.js'
 import type { StatePayload, WorkspaceEntry, WorkspaceListing } from '../shared/api-types.js'
 import { ERR_BOOST_INTERNAL, ERR_BOOST_INVALID_ARGS, ERR_BOOST_INVALID_BODY } from '../tools/boost.js'
+import { ERR_SCOPE_WRITE_FAILED } from '../scope/doc.js'
 import { isTrustedWebRequest } from './fence.js'
 
 export type { StatePayload, WorkspaceEntry, WorkspaceListing } from '../shared/api-types.js'
@@ -174,6 +175,9 @@ function writeStatusFor(code: string): number {
   if (code === ERR_HTTP_BODY) return 400
   if (code === ERR_BOOST_INVALID_BODY || code === ERR_BOOST_INVALID_ARGS) return 400
   if (code === ERR_BOOST_INTERNAL) return 500
+  // A failed write is a storage fault, not a disagreement with the document:
+  // re-reading cannot help, and the draft is still good.
+  if (code === ERR_SCOPE_WRITE_FAILED) return 500
   // Every remaining scope code means "this write cannot be applied to the
   // document as it stands": stale revision, held lock, unreadable or
   // unrecognised file. All of them are resolved by looking at the document.
@@ -202,7 +206,9 @@ export function createStateHandler(deps: StateDeps, options: HandlerOptions = {}
     const path = subPath(req.url)
 
     if (isWrite) {
-      if (method !== 'POST') {
+      // A write aimed at a read-only path is a method error, not a missing
+      // route: the path exists, the verb does not belong there.
+      if (path === '/state' || method !== 'POST') {
         writeJson(res, 405, { error: ERR_HTTP_METHOD })
         return
       }

@@ -5,7 +5,7 @@
  * check against the spec, and a rule buried in JSX cannot be checked without a
  * DOM. Nothing here touches React or the network.
  */
-import type { StatePayload, WorkspaceEntry, WorkspaceListing } from '../../src/shared/api-types.js'
+import type { WorkspaceEntry, WorkspaceListing } from '../../src/shared/api-types.js'
 
 /** The four fields the page may write. */
 export interface ScopeDraft {
@@ -168,7 +168,17 @@ export function toggleTicked(draft: ScopeDraft, entry: WorkspaceEntry): ScopeDra
   }
 }
 
-/** Whether a payload carries a registry the page could read. */
-export function registryOf(payload: StatePayload | undefined): WorkspaceListing | undefined {
-  return payload?.workspaces
+
+/**
+ * The `data` of a `runBoost` envelope, or the envelope itself when it failed.
+ *
+ * `/state` hands back `runBoost`'s return value verbatim, so `status` arrives as
+ * `{ ok, data }` exactly like `scope` does. Reading fields off the envelope
+ * instead of the data renders every row as "unmeasured" and every degradation
+ * list as empty — a page that looks healthy because it cannot see anything.
+ */
+export function payloadOf(value: unknown): unknown {
+  if (value === null || typeof value !== 'object') return value
+  const envelope = value as { ok?: unknown; data?: unknown }
+  return envelope.ok === true ? envelope.data : value
 }

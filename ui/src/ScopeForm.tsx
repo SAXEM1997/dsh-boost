@@ -217,14 +217,22 @@ export function ScopeForm({ payload, scopeCode, onReload }: ScopeFormProps): Rea
           <strong>{c.LABEL_PROJECTION_ON_PRECONDITIONS}</strong>
           <ul>
             <li>{c.HINT_PROJECTION_ON_SPILL}</li>
-            <li>{c.HINT_PROJECTION_ON_THINKING}</li>
           </ul>
           <p>{c.HINT_PROJECTION_ON_ROLLBACK}</p>
         </div>
       ) : null}
-      {draft.projection === 'shadow' ? (
+
+      {draft.shadow ? (
         <p className="boost-settings__muted">{c.HINT_SHADOW_MEANS}</p>
-      ) : null}
+      ) : (
+        <div className="boost-settings__notice" role="note" data-notice="substitute-on">
+          <strong>{c.LABEL_SUBSTITUTE_ON_PRECONDITIONS}</strong>
+          <ul>
+            <li>{c.HINT_SUBSTITUTE_ON_THINKING}</li>
+          </ul>
+          <p>{c.HINT_SUBSTITUTE_ON_ROLLBACK}</p>
+        </div>
+      )}
 
       {stale.length > 0 ? (
         <div className="boost-settings__diagnostic" data-diagnostic="stale">

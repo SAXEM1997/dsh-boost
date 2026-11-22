@@ -66,6 +66,7 @@ import {
   ERR_SCOPE_LOCKED,
   ERR_SCOPE_PARSE_FAILED,
   ERR_SCOPE_READ_FAILED,
+  ERR_SCOPE_WRITE_FAILED,
   ERR_SCOPE_REVISION_CONFLICT,
   ERR_SCOPE_UNKNOWN_VERSION,
   parseScope,
@@ -361,9 +362,10 @@ export class ScopeStore {
       try {
         written = this.writeAtomic(doc)
       } catch (error) {
-        // Serialization and disk failures are storage failures too; rule 8
-        // requires a stable code on every error the write path raises.
-        throw scopeError(ERR_SCOPE_READ_FAILED, `cannot write ${this.file}: ${messageOf(error)}`)
+        // A write failure is not a read failure: the caller still knows its
+        // baseline, and telling it to re-read would discard a draft that is
+        // perfectly good. Rule 8 requires a stable code on every error.
+        throw scopeError(ERR_SCOPE_WRITE_FAILED, `cannot write ${this.file}: ${messageOf(error)}`)
       }
       // Clone before caching: `doc` may still share arrays with an object the
       // caller (or `mutate`) holds, and the cache must never alias those.

@@ -1,6 +1,6 @@
 # dsh-boost 发布验收
 
-本文是 `dsh-boost` 0.1.3 的发布验收手册（版本以 `package.json` 为准）。它覆盖四件事：
+本文是 `dsh-boost` 0.2.0 的发布验收手册（版本以 `package.json` 为准）。它覆盖四件事：
 
 1. `npm run verify:package` 一条命令的打包与产物验收（§1），以及零 peerDependencies 现状下
    两条降级路径的验收方式（§2）；
@@ -26,7 +26,7 @@ npm run verify:package
 `scripts/verify-package.mjs` 把机械验收一次做完。它不依赖 `npm publish` 或 `prepublishOnly`，
 可以单独跑；前置条件只有一次 `npm ci`（脚本会显式跑 `npm run build`，需要仓库自己的 `tsc`）。
 0.1.2 的发布 commit `3ec82f3` 上实测 exit 0：tarball 78 个条目，回执里 10 条 `checks` 记录。
-这两个数字是 0.1.2 的记录；0.1.3 的 `verify-package.mjs` 增加了断言，发布前请在目标 commit
+这两个数字是 0.1.2 的记录；`0.2.0` 的 `verify-package.mjs` 增加了断言，发布前请在目标 commit
 上重跑并以其回执为准。
 两个数字都随树的形状变化（条目数随文件集合，`checks` 数随脚本里的断言组），不是版本常量：
 
@@ -177,7 +177,7 @@ mkdir -p "$DSH_HOME"
 # 在仓库根目录求版本，tarball 文件名随之变化；手工下载的包直接写绝对路径
 TARBALL="/path/to/dsh-boost-$(node -p "require('./package.json').version").tgz"
 dsh plugin --profile accept add "$TARBALL"
-# 或本地 checkout 目录；从 registry 安装时写 dsh-boost@^0.1.3 --registry=https://registry.npmjs.org/
+# 或本地 checkout 目录；从 registry 安装时写 dsh-boost@^0.2.0 --registry=https://registry.npmjs.org/
 # 确认宿主确实把这一行并入了装配计划：
 dsh --profile accept --dump-config | grep -A2 'id: dsh-boost'
 ```
@@ -342,24 +342,27 @@ tarball 会拉进 `dsh-spill-policy@rc.5` 并 `ERESOLVE`（当时实测 exit 1�
   不是 API 已改的证明；改名仍可能让插件失效）。区间内但不是验证过的 `0.2.2-rc.4`（如 `rc.5` /
   `0.2.2`）只记 info、不发码——`0.2.2-rc.5` 与本插件触及的九个包逐字节相同。
 
-安装规格：**`dsh-boost@^0.1.3`**。registry 上有五条版本记录，其中一条是占位版本，不要把它当成
+安装规格：**`dsh-boost@^0.2.0`**。registry 上有七条版本记录，其中一条是占位版本，不要把它当成
 “更早的 API”：
 
-- `0.1.3` — 当前 `latest`，npmjs 与 npmmirror 都是它（`npm view dsh-boost dist-tags
-  --registry=https://registry.npmjs.org/` 实测 `latest: 0.1.3`）；替换不再在模型看不到的输出上
-  提交，节省改报上下界区间（新增 `avoided_total_tokens`），新增三个宿主能力降级码与
-  `status.hasSpill`；
-- `0.1.2` — 上一版；含 scope 文件写入的修复（§2.5）；
+- `0.2.0` — 当前 `latest`；新增设置页（`dsh.client`、`./client` 出口、`/dsh-boost/api` 路由、
+  随包发布的 `lib/client.js`）与中英双语；`0.1.x` 没有设置页；
+- `0.1.4` — 上一版；替换节省下界不再可能高于上界（上下文缩小即丢下界），投影页脚救出被切断
+  中段的 `[exit code: N]` 等信号；
+- `0.1.3` — 替换不再在模型看不到的输出上提交，节省改报上下界区间（`avoided_total_tokens`），
+  新增三个宿主能力降级码与 `status.hasSpill`；
+- `0.1.2` — 含 scope 文件写入的修复（§2.5）；
 - `0.1.1` — 十项修复；
-- `0.1.0` — 首个可用版本，**缺 0.1.1 与 0.1.2 的修复**，其中数项修的是静默失效；
+- `0.1.0` — 首个可用版本，**缺 0.1.1 及以后的全部修复**，其中数项修的是静默失效；
 - `0.0.0-stage` — npm 对**全新包**做 staged publish 时自动创建的公开占位版本（`stub: true`，
   描述是 “Temporary package placeholder for staged publishing”；tarball 只有 `package.json` +
   `README.md`，没有 `dist/`）。它装得上，但 `import 'dsh-boost'` 报 `ERR_MODULE_NOT_FOUND`；
   它低于 `0.1.0`，所以 `^0.1.0` **不会**选中它，`latest` 也不是它。
 
-**写成 `^0.1.3` 而不是 `^0.1.0`**：今天两个源都会把 `^0.1.0` 解析到 0.1.3，但 `^0.1.3` 表达的
-是“至少含 0.1.3 的修复”；镜像在发布后短暂滞后时，`^0.1.3` 会解析失败，而不是悄悄装回旧构建。
-在意 registry 时显式传 `--registry=https://registry.npmjs.org/`。
+**写成 `^0.2.0` 而不是 `^0.1.4`**：`^` 不跨大版本，`^0.1.4` 永远解析不到 `0.2.0`，所以从 `0.1.x`
+升上来必须显式写 `@^0.2.0`；`^0.2.0` 表达的是“至少含 0.2.0 的修复”，镜像在发布后短暂滞后时它会
+解析失败，而不是悄悄装回没有设置页的旧构建。在意 registry 时显式传
+`--registry=https://registry.npmjs.org/`。
 
 本仓库的 `.npmrc` 与 `package-lock.json` 已钉在 `registry.npmjs.org`（与 `publishConfig` 同一个
 源），CI 断言 lockfile 里不残留 `registry.npmmirror.com`。发布者执行 `npm publish` 即可
@@ -436,7 +439,8 @@ JSON 体返回一个码，页面据码决定说什么。`ERR_CLIENT_*` 是页面
 | `ERR_SCOPE_UNKNOWN_VERSION` | `status.degraded` + `scope-get` 失败 `code`；`shadow` 对两种都拒绝 | scope 文件版本不是 2。分两种：**v1**（带可识别的旧字段，读出的 code 是它且带 `upgrade`）与**无法识别**（version 缺失或非数值，没有 `upgrade`）。读都按 fail-closed 默认 | **v1**：`scope-set` 是文档化的升级路径，会保留 `mode`/`global`/`workspaceIds` 并写成 v2（`src/scope/store.ts:323-345`、`src/tools/boost.ts` 的 `scopeSetCommand`，`1dd93c6` 的 `:1139-1149`）；`shadow` **拒绝** v1，不做隐式升级（`src/tools/boost.ts` 的 `shadowCommand`，`1dd93c6` 的 `:1160-1169`）。**无法识别**：`scope-set` 与 `shadow` **都拒绝**（`src/scope/store.ts:336-341`），必须自己修文件（补 `"version": 2`）或把它移走后重设——插件不会替你覆盖 |
 | `ERR_SCOPE_FUTURE_VERSION` | `status.degraded` + `scope-get` 失败 `code` | scope 文件版本比本插件认识的新；只读 | 升级插件；不要用旧版本覆盖 |
 | `ERR_SCOPE_PARSE_FAILED` | `status.degraded` + `scope-get` 失败 `code` | scope 文件不是合法 scope 文档（坏 JSON、非对象、数组）。读按默认；**写一律拒绝**，`scope-set` / `shadow` 不会覆盖它——文件原样留在盘上 | 修文件或删除后重设。**插件不会替你覆盖**，所以「保留现场」是默认结果，不是需要你额外做的事 |
-| `ERR_SCOPE_READ_FAILED` | `status.degraded` + `scope-get` 失败 `code` | scope 文件存在但**读或写**失败：读它、`writeAtomic` 落盘、或 `ensureDirectory` 建目录任一步出错（权限、磁盘满、IO、目录被占）；fail-closed 默认 | 查文件与目录权限、剩余磁盘空间与异常条目；修好后重试 |
+| `ERR_SCOPE_READ_FAILED` | `status.degraded` + `scope-get` 失败 `code` | scope 文件存在但**读不出来**（权限、I/O、路径是目录）；fail-closed 默认 | 查文件与目录权限与异常条目；修好后重试 |
+| `ERR_SCOPE_WRITE_FAILED` | `/scope` 写失败 `code`（HTTP 500） | scope 文件**写不进去**：`writeAtomic` 落盘或 `ensureDirectory` 建目录失败（权限、磁盘满、IO）。与 `ERR_SCOPE_READ_FAILED` 分开，因为基线仍然有效、草稿仍然可用——建议「重新读取」会丢掉一份好草稿 | 查目录权限与剩余空间；改好后原样重试，不需要重读 |
 | `ERR_SCOPE_REVISION_CONFLICT` | `scope-set` / `shadow` 失败 `code`（**不在** `degraded` 里） | 调用方的 `baseRevision` 已过期；CAS 拒绝，未覆盖 | 重读 `status` 取当前 `revision` 后重试 |
 | `ERR_SCOPE_LOCKED` | `scope-set` / `shadow` 失败 `code` | 两种情形共用这个码：**锁被另一个写者持有**（未判定为陈旧，也未到 10 分钟接管阈值），或**锁文件根本创建不出来/写不进去**（目录只读、磁盘满、`.lock` 被一个目录占住）。两种情形本次写入都未发生。插件**不等待**：判定为 `'held'` 时立即抛 | 先排除「锁文件建不出来」——查 `<dshHome>/boost` 的写权限、剩余空间与同名异常条目；确认是并发写者才重试。60 s 陈旧 / 10 min 接管是分类阈值，不是等待时间 |
 | `ERR_SCOPE_ABORTED` | `scope-set` / `shadow` 失败 `code` | 调用方的取消信号打断了 `boost` 写入；锁已释放、`scope.json` 原样未动，无残留 | 重读 `status` 取当前 `revision` 后重试即可 |

@@ -9,6 +9,7 @@
  * than showing none.
  */
 import { copyOf, adviceFor, type Copy } from './copy'
+import { payloadOf } from './draft'
 import { useT } from './i18n'
 import { useCallback, useEffect, useState, type ReactNode } from 'react'
 import { fetchState, type StateResult } from './api'
@@ -113,9 +114,11 @@ export function App() {
 
   useEffect(load, [load])
 
-  const status = result?.ok === true ? result.data.status : undefined
+  // Both are `runBoost` envelopes: `payloadOf` unwraps the success case and
+  // leaves the failure case alone so its `code` stays readable.
+  const status = payloadOf(result?.ok === true ? result.data.status : undefined)
   const scope = result?.ok === true ? result.data.scope : undefined
-  const config = result?.ok === true ? result.data.config : undefined
+  const config = payloadOf(result?.ok === true ? result.data.config : undefined)
 
   const saved = pick(status, 'saved')
   const degraded = pick(status, 'degraded')

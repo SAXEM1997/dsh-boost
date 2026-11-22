@@ -97,7 +97,7 @@ export default defineConfig(({ mode }) => {
             // matches only that exact specifier, so `react/jsx-runtime` (the
             // automatic JSX runtime the transform injects) would be silently
             // bundled.
-            external: [/^react$/, /^react\//, /^react-dom$/],
+            external: [/^react$/, /^react\//, /^react-dom$/, /^react-dom\//],
             output: {
               banner: loaderBanner,
               footer: loaderFooter,

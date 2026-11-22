@@ -29,7 +29,7 @@
 import { readFileSync } from 'node:fs'
 import { createRequire } from 'node:module'
 import type { ToolDefinition } from '@deepseek-ai/dsh-tools'
-import { measureBoostFixedOverhead } from './tools/boost.js'
+import { ERR_BOOST_HTTP_MOUNT_FAILED, measureBoostFixedOverhead } from './tools/boost.js'
 import { RuntimeStepHorizon, StepBudget } from './admission/ledger.js'
 import { RetrievalLedger } from './admission/retrieval.js'
 import { UsageLedger } from './admission/usage.js'
@@ -1731,7 +1731,7 @@ export function apply(ctx: PluginContext, config: unknown): void {
         )
       } catch (error) {
         ctx.logger?.warn?.(
-          `dsh-boost: ERR_BOOST_HTTP_MOUNT_FAILED: settings page has no data route (${messageOf(error)})`,
+          `dsh-boost: ${ERR_BOOST_HTTP_MOUNT_FAILED}: settings page has no data route (${messageOf(error)})`,
         )
       }
     } catch (error) {
