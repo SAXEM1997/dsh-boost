@@ -162,7 +162,7 @@ export function App() {
             <Row label={c.LABEL_OVERHEAD} value={tokens(c, pick(status, 'fixedOverheadTokens'))} hint={c.HINT_OVERHEAD} />
             <Row
               label={c.LABEL_ESTIMATE}
-              value={pick(status, 'estimate_kind') === 'host' ? '宿主计量' : c.UNKNOWN}
+              value={pick(status, 'estimate_kind') === 'host' ? c.ESTIMATE_HOST : c.UNKNOWN}
             />
           </Section>
 

@@ -48,6 +48,8 @@ interface LocaleService {
 interface ClientContext {
   slots?: SlotsService
   locale?: LocaleService
+  /** The optional service read; `ctx.x` throws for services outside `inject`. */
+  get?: (name: string) => unknown
   effect?(callback: () => () => void, label?: string): () => void
 }
 
@@ -73,7 +75,14 @@ function installStyles(): () => void {
  * the only way to know is to try.
  */
 function installTranslator(ctx: ClientContext): Translate {
-  const locale = ctx.locale
+  // `ctx.locale` would THROW on a host that does not provide the service —
+  // cordis proxies unknown services into a hard error, not `undefined`. `get`
+  // is the optional read, and it is the difference between a fallback page and
+  // no page at all.
+  const locale = ctx.get?.('locale') as LocaleService | undefined
+  if (locale === undefined) {
+    console.warn(`[${SETTINGS_NAMESPACE}] host has no locale service; the page stays readable but will not follow the host language`)
+  }
   if (locale !== undefined) {
     try {
       ctx.effect?.(() => locale.register(LOCALE_NAMESPACE, DICTIONARIES), `${SETTINGS_NAMESPACE}: dictionaries`)
@@ -88,9 +97,14 @@ function installTranslator(ctx: ClientContext): Translate {
       return bound
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error)
-      console.warn(`[${SETTINGS_NAMESPACE}] host locale service rejected the dictionaries (${message}); using the built-in translator`)
+      console.warn(
+        `[${SETTINGS_NAMESPACE}] host locale service rejected the dictionaries (${message}); ` +
+          'registering the section without a locale namespace and using the built-in translator',
+      )
     }
   }
+  // No `locale` option goes on the slot registration in this branch, which is
+  // the "re-register without a locale" the spec asks for.
   setTranslator(fallbackT)
   return fallbackT
 }

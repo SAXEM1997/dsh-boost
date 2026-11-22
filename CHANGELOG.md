@@ -10,6 +10,19 @@ Design rationale lives in `docs/superpowers/specs/`; the release-acceptance proc
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-11-22
+
+新增对外面：`dsh.client`、`./client` 出口、设置页数据路由、客户端产物。`0.1.x` 升到这里要显式改版本号（`^0.1.4` 不会自动跳到大版本）。
+
+### 新增
+
+- **设置页**（`settings.section`，id `boost`）：在宿主的设置面板里读写 `scope.json` 的四个字段，走与 `boost scope-set` 同一个 CAS；只读列出 `boost status` 的全部面板（降级码与处置、节省区间上下界、收据计数、常驻开销、生效配置）。
+- **数据路由** `/dsh-boost/api`：`GET /state`、`POST /scope`。同源栅栏（`Host` 白名单防 DNS rebinding；写要求 `Origin`，读放行缺失的 `Origin`——同源 `GET` 本来就不带它）。
+- **中英双语**：`locale/{zh,en}.json` 各 91 个 UI 键，跟随宿主 `locale` 服务；宿主没有这个服务时页面仍可用，固定中文并 `console.warn` 一次。
+- 投影切到 `on` 时页面给出两条前置条件（spill 可用、首次真替换盯 `content[].thinking` 的 400）与回滚办法——**只提示，不做硬门**。
+- 发布门新增两条不变式：服务端 `dist/` 零静态宿主 import；客户端产物只经 `require` 解析宿主模块且必须带加载器信封。两者都有能失败的负例。
+- 新码：`ERR_HTTP_{METHOD,NOT_FOUND,FORBIDDEN,INTERNAL,BODY,WORKSPACES_UNAVAILABLE}`、`ERR_CLIENT_{NETWORK,SHAPE}`、`ERR_BOOST_HTTP_MOUNT_FAILED`、`ERR_BOOST_PARTIAL_MOUNT`。
+
 ## [0.1.4] - 2026-11-21
 
 ### 修复 Fixed

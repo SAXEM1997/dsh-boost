@@ -10,7 +10,7 @@
  * separate "re-read" button, because re-seeding from a newer document discards
  * whatever the user has not saved yet, and only they can decide that.
  */
-import { copyOf, adviceFor, MODE_VALUE_SELECTED, MODE_VALUE_GLOBAL } from './copy'
+import { copyOf, adviceFor, PROJECTION_LABEL, MODE_VALUE_SELECTED, MODE_VALUE_GLOBAL } from './copy'
 import { useT } from './i18n'
 import { useCallback, useEffect, useMemo, useState, type ReactNode } from 'react'
 import { saveScope } from './api'
@@ -39,12 +39,12 @@ import type { DisableReason } from './draft'
  * user can simply retry.
  */
 const REREAD_CODES = new Set([
-  'c.ERR_SCOPE_REVISION_CONFLICT',
-  'c.ERR_SCOPE_LOCKED',
-  'c.ERR_SCOPE_READ_FAILED',
-  'c.ERR_SCOPE_UNKNOWN_VERSION',
-  'c.ERR_SCOPE_FUTURE_VERSION',
-  'c.ERR_SCOPE_PARSE_FAILED',
+  'ERR_SCOPE_REVISION_CONFLICT',
+  'ERR_SCOPE_LOCKED',
+  'ERR_SCOPE_READ_FAILED',
+  'ERR_SCOPE_UNKNOWN_VERSION',
+  'ERR_SCOPE_FUTURE_VERSION',
+  'ERR_SCOPE_PARSE_FAILED',
 ])
 
 interface ScopeFormProps {
@@ -207,10 +207,24 @@ export function ScopeForm({ payload, scopeCode, onReload }: ScopeFormProps): Rea
               checked={draft.projection === option}
               onChange={() => update({ projection: option })}
             />
-            {option}
+            {c[PROJECTION_LABEL[option] ?? 'PROJECTION_OFF']}
           </label>
         ))}
       </fieldset>
+
+      {draft.projection === 'on' ? (
+        <div className="boost-settings__notice" role="note" data-notice="projection-on">
+          <strong>{c.LABEL_PROJECTION_ON_PRECONDITIONS}</strong>
+          <ul>
+            <li>{c.HINT_PROJECTION_ON_SPILL}</li>
+            <li>{c.HINT_PROJECTION_ON_THINKING}</li>
+          </ul>
+          <p>{c.HINT_PROJECTION_ON_ROLLBACK}</p>
+        </div>
+      ) : null}
+      {draft.projection === 'shadow' ? (
+        <p className="boost-settings__muted">{c.HINT_SHADOW_MEANS}</p>
+      ) : null}
 
       {stale.length > 0 ? (
         <div className="boost-settings__diagnostic" data-diagnostic="stale">

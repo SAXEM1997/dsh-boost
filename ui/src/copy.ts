@@ -44,3 +44,10 @@ export function adviceFor(t: Translate, code: string): string {
 /** The wire values, which are not the labels the dictionary carries. */
 export const MODE_VALUE_SELECTED = 'selected'
 export const MODE_VALUE_GLOBAL = 'global'
+
+/** Which dictionary key labels each wire value of `projection`. */
+export const PROJECTION_LABEL: Readonly<Record<string, CopyKey>> = {
+  off: 'PROJECTION_OFF',
+  shadow: 'PROJECTION_SHADOW',
+  on: 'PROJECTION_ON',
+}

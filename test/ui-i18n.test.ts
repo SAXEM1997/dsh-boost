@@ -7,6 +7,8 @@
  * kind of bug a test has to catch for you.
  */
 import test from 'node:test'
+import { readFileSync } from 'node:fs'
+import { join } from 'node:path'
 import assert from 'node:assert/strict'
 import en from '../locale/en.json' with { type: 'json' }
 import zh from '../locale/zh.json' with { type: 'json' }
@@ -32,6 +34,23 @@ test('没有 locale 服务时用兜底语言，且不是裸键', () => {
     assert.notEqual(c[key as keyof typeof c], key, `${key} rendered as its own key`)
   }
   assert.equal(fallbackT('TITLE'), zh.TITLE as string)
+})
+
+test('页面引用的每个键都在字典里', () => {
+  // Discovered from the components rather than restated: a key the page reads
+  // but the dictionary lacks renders as the key itself, which is the bug this
+  // pins. Both files, because App and ScopeForm each read their own keys.
+  const sources = ['ui/src/App.tsx', 'ui/src/ScopeForm.tsx'].map(file =>
+    readFileSync(join(import.meta.dirname, '..', file), 'utf8'),
+  )
+  const referenced = new Set<string>()
+  for (const source of sources) {
+    for (const match of source.matchAll(/\bc\.([A-Z][A-Z0-9_]*)/g)) referenced.add(match[1] as string)
+    for (const match of source.matchAll(/\bt\(['"]([A-Za-z0-9_.]+)['"]\)/g)) referenced.add(match[1] as string)
+  }
+  assert.ok(referenced.size > 20, `discovered only ${referenced.size} keys; the scan is broken`)
+  const missing = [...referenced].filter(key => !(key in zh))
+  assert.deepEqual(missing, [], `the page reads keys the dictionary lacks: ${missing.join(', ')}`)
 })
 
 test('换翻译器后同一份 copy 的取值跟着变', () => {

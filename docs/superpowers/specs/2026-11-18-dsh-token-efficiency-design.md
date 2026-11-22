@@ -603,17 +603,24 @@ dsh-boost/
 
 `boost` 是 scope 的**唯一豁免**（§5.5）：只读写本地配置文件、无外部副作用；否则 `selected+[]` 下用户没有启用入口。`boost scope-set` 复用 §5.5 的同一条写路径——**`scope.lock`（`open(..., 'wx')`）包住 read-verify-write**，带 base revision 校验，冲突或锁占用分别返回 `ERR_SCOPE_REVISION_CONFLICT` / `ERR_SCOPE_LOCKED`。
 
-不做客户端设置页（二期）。理由：设置页要 `dsh.client`、UI 构建和 HMR 验证，成本远高于收益；工具 + 文件已经够用，且更容易测。
+~~不做客户端设置页（二期）。~~ **这条非目标已被推翻（`0.2.0`）。** 原理由——「设置页要 `dsh.client`、UI 构建和 HMR 验证，成本远高于收益；工具 + 文件已经够用，且更容易测」——在实现之后不成立：客户端半的成本集中在一次性搭建（加载器信封、React 外置、发布门结构断言），而那部分做完之后，页面本身只是一个 `settings.section` 加一个 prefix 路由。
+
+`0.2.0` 起提供设置页，边界如下：
+
+- **写**：`scope.json` 的四个字段（`mode` / `workspaceIds` / `shadow` / `projection`），走与 `boost scope-set` **同一个** CAS，`baseRevision` 是草稿播种时的修订号。
+- **读**：`boost status` 与 `scope-get` 的同一份计算，外加宿主工作区列表与生效配置（只读）。
+- **不做**：不声明 `Config`。声明严格 schema 会把「clamp + 警告」变成加载期硬失败，而生效配置本来就要改 `cordis.patch.yml` 并重启——页面把它列出来就够了。
+- **代价**：多一个自建 HTTP 面（在宿主鉴权之外，靠同源栅栏 + `Host` 白名单）、多一条软依赖（`webServer`，缺了只是页面没数据）、多一个发布门不变式（客户端产物必须带加载器信封且只经 `require` 解析宿主模块）。
 
 ### 11.2 双语
 
 - `README.md` 中文为主，`README.en.md` 英文；两份内容对应，不互相引用。
-- `locale/zh.json` / `locale/en.json` 只提供包级元数据 `meta.title` / `meta.description`；**不承载配置项标签**（v1 没有设置页，配置走 `cordis.patch.yml`，没有 locale 驱动的配置标题）。
+- `locale/zh.json` / `locale/en.json` 同时承载包级元数据 `meta.title` / `meta.description`（宿主插件列表读它）与设置页的 UI 字典（`0.2.0` 起）。**配置项标签仍然不在这里**：设置页把生效配置原样列出，不声明 `Config`，所以宿主不会为它生成配置表单（见 §11 PKG9）。
 - 代码注释与提交信息用英文；面向用户的错误提示走 locale。
 
 ## 12. v1 已知限制（已声明）
 
-- **启用路径有摩擦**：控制面只有模型可调的 `boost` 工具（没有 CLI、没有设置页）；`scope-set` 需要先拿到宿主的 workspace UUID（不是路径）；安装/升级插件后必须重启 DSH，已在运行的会话看不到 `boost` 工具。这些是**已声明的限制**，不是缺陷；v1 接受它们。
+- **启用路径有摩擦**：`0.1.x` 的控制面只有模型可调的 `boost` 工具（没有 CLI、没有设置页），`scope-set` 需要先拿到宿主的 workspace UUID（不是路径）；安装/升级插件后必须重启 DSH，已在运行的会话看不到 `boost` 工具。**`0.2.0` 起多了一条人可点的路径**：设置页能读写 `scope.json` 的四个字段（`PKG9` 因此被推翻，见该条），但**生效配置仍然只能改 `cordis.patch.yml` 并重启**——页面把它只读列出来。
 - **没有费用口径**：没有 per-route 费率、没有费用护栏；只按 raw token 记账（§5.3 / D1）。
 - **没有首 token 延迟口径**：没有代码、没有收据字段（§6）。
 - **A4 不可判**：`shadow-report.mjs` 没有总 token 分母，也不分桶；固定开销可测，净节省率产不出来（§6.1）。

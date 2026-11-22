@@ -228,6 +228,19 @@ for (const [id, w] of Object.entries(s.tables.workspaces)) console.log(id, w.pat
 没有该字段的旧回执按当前 horizon 计并计入 `projection_horizon_reestimated`，当前生效的 horizon 报在
 `projection_horizon_steps`。插件本身不说话，**不要**用"我记得开了"代替 status。
 
+### 2.0.1 人可点的路径：设置页
+
+`0.2.0` 起除了 `boost` 工具，还有一条不用模型介入的路径：宿主设置面板里的 **Token 效率**（`settings.section`，id `boost`）。它读写的是**同一份** `scope.json`、走**同一个** CAS，所以两条路径可以混用——页面上改的东西 `boost status` 立刻看得见，反过来也一样。
+
+验证顺序（在 §2.0 之后跑）：
+
+1. 打开宿主设置面板，确认「Token 效率」一节在。不在的话先看 `status.degraded` 里有没有 `ERR_BOOST_PARTIAL_MOUNT`（提示段或钩子没挂上），再看宿主日志里有没有 `webServer`。
+2. `curl -s http://127.0.0.1:<port>/dsh-boost/api/state | head -c 200` 应当返回 `{"status":…,"scope":…,"workspaces":…,"config":…}` 四块。返回 `{"error":"ERR_HTTP_FORBIDDEN"}` 说明 `Host` 不在受信名单里（反向代理没透传 `Host`，或用了非 loopback 的地址而宿主没 `--trusted-host`）。
+3. 在页面上把「作用范围」改成「所有工作区」并保存，然后 `boost status` 的 `scope.mode` 应当立刻是 `global`。
+4. 制造一次冲突：页面不重读，另外用工具跑一次 `scope-set`，再在页面上保存——应当拿到 `ERR_SCOPE_REVISION_CONFLICT` 与一个显式的「重新读取」按钮，**草稿不被覆盖**。
+
+**`^0.1.4` 的用户要显式升到 `0.2.0`**：`^0.1.4` 不会跨大版本，`npm install dsh-boost` 拿到的仍是 `0.1.4`。设置页是新增对外面（`dsh.client`、`./client`、HTTP 路由、客户端产物），按 SemVer 走次版本。
+
 ### 2.1 降级门：宿主缺 `tokenMeter`（先验健康，再验降级）
 
 **门的构造方式变了。** `tokenMeter` 从来是宿主服务（`ctx.get('tokenMeter')`），不是本包安装的
