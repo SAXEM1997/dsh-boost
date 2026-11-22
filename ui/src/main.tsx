@@ -4,8 +4,9 @@
  * Registration goes through the `slots` service — the host owns where a
  * settings section appears, so a plugin must never append its own container to
  * `document.body`. `slots.inject` waits for the slot to exist before
- * `slots.register` claims a seat, and the returned disposer is handed back so
- * cordis can tie it to the plugin's lifecycle.
+ * `slots.register` claims a seat; both disposers are tied to the plugin's
+ * fiber, so an unload or an HMR remount removes the seat instead of stacking a
+ * second one.
  */
 import { App } from './App'
 import { DICTIONARIES, LOCALE_NAMESPACE, fallbackT, setTranslator, type Translate } from './i18n'
@@ -133,7 +134,9 @@ export function apply(ctx: ClientContext): void {
 
   // Narrowed once, so the closure below carries no non-null assertion.
   const slots = ctx.slots
-  slots.inject(SETTINGS_SLOT, () =>
+  // `inject` returns its own disposer; hand both to the fiber so an HMR remount
+  // or an unload takes the seat back out instead of stacking a second one.
+  const disposeInjection = slots.inject(SETTINGS_SLOT, () =>
     slots.register(
       {
         name: SETTINGS_SLOT,
@@ -147,4 +150,5 @@ export function apply(ctx: ClientContext): void {
       App,
     ),
   )
+  ctx.effect?.(() => disposeInjection, `${WARN_PREFIX}: settings section`)
 }

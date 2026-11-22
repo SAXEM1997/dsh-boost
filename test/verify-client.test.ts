@@ -3,7 +3,7 @@
  * half, driven with constructed artifacts.
  *
  * The gate itself is exercised end to end by `npm run verify:package`, but that
- * path installs the tarball twice and is far too slow to prove six separate
+ * path installs the tarball twice and is far too slow to prove eight separate
  * negative cases. What matters for each negative is that a SPECIFIC mutation
  * makes the gate fail, so the assertion is imported and mutated here; the
  * end-to-end failure is reproduced in `docs/RELEASE.md` §1.0.
@@ -69,6 +69,18 @@ test('the gate rejects a bundle that does not export inject', () => {
 test('the gate rejects a bundle that never resolves React through the host', () => {
   const text = mutated((s) => s.replace('require("react/jsx-runtime")', 'jsxRuntime'))
   assert.throws(() => assertClientBundleText(text, PACKAGE_NAME), /never resolves React/)
+})
+
+test('the gate rejects a bundle that pulls in a host package', () => {
+  // Host packages are supplied by the shell; importing one here inlines a
+  // second copy, and the gate's "resolves host modules through require" claim
+  // would otherwise be unenforced for everything except React.
+  // React still resolves through the host — this bundle additionally pulls a
+  // host package, which is the case the React clause alone cannot see.
+  const text = mutated((s) =>
+    s.replace('exports.apply =', 'const tools = require("@deepseek-ai/dsh-tools");\n    exports.apply ='),
+  )
+  assert.throws(() => assertClientBundleText(text, PACKAGE_NAME), /@deepseek-ai/)
 })
 
 test('the gate rejects a bundle with React inlined', () => {

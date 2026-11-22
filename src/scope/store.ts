@@ -437,7 +437,9 @@ export class ScopeStore {
     try {
       await mkdir(this.dir, { recursive: true })
     } catch (error) {
-      throw scopeError(ERR_SCOPE_READ_FAILED, `cannot create ${this.dir}: ${messageOf(error)}`)
+      // Creating the directory is part of the write path: a failure here is a
+      // write failure, and telling the caller to re-read would be wrong.
+      throw scopeError(ERR_SCOPE_WRITE_FAILED, `cannot create ${this.dir}: ${messageOf(error)}`)
     }
   }
 

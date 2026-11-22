@@ -68,7 +68,7 @@
   "LABEL_PROJECTION_GROSS": "Projection gross (one-time)",
   "LABEL_PROJECTION_GROSS_REPLAY": "Projection gross (replayed per horizon)",
   "LABEL_PROJECTION_NET": "Projection net",
-  "LABEL_PROJECTION_ON_PRECONDITIONS": "Two things to check before switching projection on",
+  "LABEL_PROJECTION_ON_PRECONDITIONS": "One thing to check before switching projection on",
   "LABEL_RETRIEVALS": "Retrievals",
   "LABEL_SAVED_LOWER": "Substitution saving (lower)",
   "LABEL_SAVED_UPPER": "Substitution saving (upper)",
@@ -85,16 +85,17 @@
   "PROJECTION_ON": "On (real substitution)",
   "PROJECTION_SHADOW": "Shadow (record only)",
   "RETRY": "Retry",
-  "SAVED": "Matches the document on disk.",
+  "SAVED": "Matches the document as this page last read or saved it. The page does not poll: if something else changes the scope (say, the model runs boost), reload to see it.",
   "SECTION_CONFIG": "Effective config",
   "SECTION_COUNTS": "Receipt counts",
   "SECTION_SCOPE": "Scope",
   "SECTION_STATUS": "Status",
   "TITLE": "Token efficiency",
   "UNAVAILABLE_REGISTRY": "The scope document could not be read, so this section is read-only for now.",
-  "UNKNOWN": "unmeasured",
+  "UNKNOWN": "unknown error",
   "meta": {
     "description": "Cut DeepSeek Harness token usage by projecting tool receipts and substituting deterministic read-only calls.",
     "title": "dsh-boost"
-  }
+  },
+  "STATUS_UNAVAILABLE": "Status could not be read: the figures below are unread, not empty"
 }

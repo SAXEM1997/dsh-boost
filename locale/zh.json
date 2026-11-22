@@ -68,7 +68,7 @@
   "LABEL_PROJECTION_GROSS": "投影毛额（一次性）",
   "LABEL_PROJECTION_GROSS_REPLAY": "投影毛额（按各自 horizon 重放）",
   "LABEL_PROJECTION_NET": "投影净额",
-  "LABEL_PROJECTION_ON_PRECONDITIONS": "开启投影前确认两件事",
+  "LABEL_PROJECTION_ON_PRECONDITIONS": "开启投影前确认一件事",
   "LABEL_RETRIEVALS": "取回次数",
   "LABEL_SAVED_LOWER": "替换节省（下界）",
   "LABEL_SAVED_UPPER": "替换节省（上界）",
@@ -85,16 +85,17 @@
   "PROJECTION_ON": "开启（真替换）",
   "PROJECTION_SHADOW": "影子（只记账）",
   "RETRY": "重试",
-  "SAVED": "与磁盘上的文档一致。",
+  "SAVED": "与页面上次读到或保存时的文档一致。页面不会轮询：别处（例如让模型调用 boost）改了 scope，这里要重新读取才看得到。",
   "SECTION_CONFIG": "生效配置",
   "SECTION_COUNTS": "收据计数",
   "SECTION_SCOPE": "作用域",
   "SECTION_STATUS": "运行状态",
   "TITLE": "Token 效率",
   "UNAVAILABLE_REGISTRY": "读不到作用域文档，这一块暂时只读。",
-  "UNKNOWN": "未测量",
+  "UNKNOWN": "未知错误",
   "meta": {
     "description": "通过工具回执投影与确定性只读替换降低 DeepSeek Harness 的 token 消耗。",
     "title": "dsh-boost"
-  }
+  },
+  "STATUS_UNAVAILABLE": "状态读取失败，下面的数字不是「没有」，而是没读到"
 }

@@ -10,6 +10,19 @@ Design rationale lives in `docs/superpowers/specs/`; the release-acceptance proc
 
 ## [Unreleased]
 
+## [0.2.2] - 2026-11-22
+
+### 修复 Fixed
+
+- **`ERR_SCOPE_WRITE_FAILED` 到不了调用方**：上一版加了码，但 `SCOPE_CODES` 没把它列进去，`runBoost` 于是把它压成 `ERR_BOOST_INTERNAL`；建目录失败也仍抛读失败码。两处都修好，并补一条钉住「原样返回」的测试。
+- **git 安装装出一个没有设置页的包**：`prepare` 只构建服务端，`lib/client.js` 缺失，而宿主遇到缺 `./client` 是直接抛错。现在两半都按需构建，第二次运行两半都跳过。
+- **状态读取失败被渲染成「一切正常」**：`/state` 失败时页面显示「宿主提供了全部服务」「还没有任何收据」——一个自信的错答案。现在读不到状态就直说读不到，数字不再冒充「没有」。
+- **`SAVED` 声称与磁盘一致**：页面不轮询，别处（例如让模型调用 `boost`）改了 scope 之后它不会知道。改为「与页面上次读到或保存时一致」，并写明要重新读取。
+- **投影提示标题说「两件事」但只渲染一条**：`shadow` 与 `content[].thinking` 的那条 400 提示已经移到影子模式开关上，标题跟着改成「一件事」。
+- **客户端不变式只对 React 成立**：发布门原来只查 React 是否经 `require` 解析，`@deepseek-ai/*` 被内联也能过。现在门会拒绝任何提及宿主包的产物，并补一条负例。
+- **槽位 disposer 被丢弃**：`slots.inject` 的返回值没接，HMR 重挂会叠出第二个设置分区。现在交给 `ctx.effect` 管生命周期。
+- 版本与文档：`README` 的 `latest`、安装规格、RELEASE 的版本列表与发布 commit、`CHANGELOG` 的键数（92→94）、README.en 被表格切断的段落、「六种坏法」实为八条。
+
 ## [0.2.1] - 2026-11-22
 
 ### 修复 Fixed
@@ -36,7 +49,7 @@ Design rationale lives in `docs/superpowers/specs/`; the release-acceptance proc
 
 - **设置页**（`settings.section`，id `boost`）：在宿主的设置面板里读写 `scope.json` 的四个字段，走与 `boost scope-set` 同一个 CAS；只读列出 `boost status` 的全部面板（降级码与处置、节省区间上下界、收据计数、常驻开销、生效配置）。
 - **数据路由** `/dsh-boost/api`：`GET /state`、`POST /scope`。同源栅栏（`Host` 白名单防 DNS rebinding；写要求 `Origin`，读放行缺失的 `Origin`——同源 `GET` 本来就不带它）。
-- **中英双语**：`locale/{zh,en}.json` 各 92 个 UI 键，跟随宿主 `locale` 服务；宿主没有这个服务时页面仍可用，固定中文并 `console.warn` 一次。
+- **中英双语**：`locale/{zh,en}.json` 各 94 个 UI 键，跟随宿主 `locale` 服务；宿主没有这个服务时页面仍可用，固定中文并 `console.warn` 一次。
 - 两个危险开关各有自己的提示，**只提示，不做硬门**：投影切到 `on` 时提示 spill 前置条件；关掉影子模式时提示盯一次含 `content[].thinking` 的 400（那个 400 来自合成回合，只有替换才会触发，与投影无关）。两处都给回滚办法。
 - 发布门新增两条不变式：服务端 `dist/` 零静态宿主 import；客户端产物只经 `require` 解析宿主模块且必须带加载器信封。两者都有能失败的负例。
 - 新码：`ERR_HTTP_{METHOD,NOT_FOUND,FORBIDDEN,INTERNAL,BODY,WORKSPACES_UNAVAILABLE}`、`ERR_CLIENT_{NETWORK,SHAPE}`、`ERR_BOOST_HTTP_MOUNT_FAILED`、`ERR_SCOPE_WRITE_FAILED`（写盘失败与读盘失败分开：前者不该建议重读，那会丢掉一份好草稿）。

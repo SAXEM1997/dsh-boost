@@ -72,9 +72,18 @@ function Section({ title, children, rows = true }: { title: string; children: Re
   )
 }
 
-function Degraded({ codes }: { codes: readonly string[] }) {
+function Degraded({ codes, unavailable }: { codes: readonly string[]; unavailable?: string }) {
   const t = useT()
   const c = copyOf(t)
+  // "Nothing is degraded" is only true when status answered. A failed envelope
+  // gets its own line so the page never claims health it did not observe.
+  if (unavailable !== undefined) {
+    return (
+      <p className="boost-settings__warn">
+        {c.STATUS_UNAVAILABLE} <code>{unavailable === '' ? c.UNKNOWN : unavailable}</code>
+      </p>
+    )
+  }
   if (codes.length === 0) {
     return <p className="boost-settings__ok">{c.NO_DEGRADED}</p>
   }
@@ -119,6 +128,14 @@ export function App() {
   const status = payloadOf(result?.ok === true ? result.data.status : undefined)
   const scope = result?.ok === true ? result.data.scope : undefined
   const config = payloadOf(result?.ok === true ? result.data.config : undefined)
+
+  // A failed status envelope must not read as health: without this the panels
+  // below would say "no degraded items" and "no receipts yet" — a confident
+  // wrong answer, which is worse than showing nothing.
+  const statusCode =
+    status !== null && typeof status === 'object' && (status as { ok?: unknown }).ok === false
+      ? String((status as { code?: unknown }).code ?? '')
+      : undefined
 
   const saved = pick(status, 'saved')
   const degraded = pick(status, 'degraded')
@@ -178,12 +195,14 @@ export function App() {
           ) : null}
 
           <Section title={c.LABEL_DEGRADED} rows={false}>
-            <Degraded codes={codes} />
+            <Degraded codes={codes} unavailable={statusCode} />
           </Section>
 
           <Section title={c.SECTION_COUNTS} rows={false}>
             {countRows.length === 0 ? (
-              <p className="boost-settings__muted">{c.NO_RECEIPTS}</p>
+              <p className="boost-settings__muted">
+                {statusCode === undefined ? c.NO_RECEIPTS : c.STATUS_UNAVAILABLE}
+              </p>
             ) : (
               <ul className="boost-settings__codes">
                 {countRows.map(([code, count]) => (

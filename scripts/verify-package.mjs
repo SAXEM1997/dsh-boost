@@ -364,6 +364,13 @@ export function assertClientBundleText(text, id) {
         'the shell supplies one shared React instance and a second copy breaks hooks',
     )
   }
+  if (/@deepseek-ai\//.test(text)) {
+    throw new Error(
+      'client bundle mentions an @deepseek-ai/* package: the shell already provides the host ' +
+        'packages, so importing one inlines a second copy. Declare it in `dsh.client.external` ' +
+        'and resolve it through `require` instead',
+    )
+  }
   if (/Symbol\.for\(\s*["'`]react\./.test(text)) {
     throw new Error(
       'client bundle inlines React source (found `Symbol.for("react.…")`): ' +

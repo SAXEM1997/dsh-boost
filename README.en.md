@@ -12,7 +12,7 @@ read-only substitution**.
 ## What it does
 
 DSH replays the whole history on every model request. Across the 300 longest sessions measured
-locally (`npm run --silent stats` — without `--silent`, npm prints its `> dsh-boost@0.1.3 stats`
+locally (`npm run --silent stats` — without `--silent`, npm prints its `> dsh-boost@0.2.1 stats`
 banner to stdout, so use `--silent` or `node scripts/session-stats.mjs` for machine-readable
 output; snapshot at `2026-11-19T03:13:21Z`): 54,141 steps and 54,088 requests,
 10,575,904,022 raw tokens in total. The mean is 195,340 tokens per step and 195,531 per request
@@ -577,6 +577,9 @@ to load. `llm` is soft (only the selector uses it); when absent the selector fal
 | Prompt assembly waterfall | outgoing-request probe (not a dependency) | When the host's `complete: true` prompt section replaces the assembled system prompt after the waterfall and the protocol section never reaches the request, `status.degraded` carries `ERR_HOST_COMPLETE_SECTION`; substitution and projection fail closed for the affected requests (the plugin stays inert although the workspace is visible). Find the complete section overriding the waterfall (usually another plugin's) and remove it, or accept the inaction on those requests |
 
 `ERR_HOST_NO_STEP_WHEN` no longer exists: step-level `when` has been part of
+`ToolRegistrationOptions` since the oldest host line this package declares, so the plugin no
+longer probes it and registers unconditionally.
+
 The settings page's data route has codes of its own, and they are **not** members of
 `status.degraded` — every failure returns one in a JSON body, and the page decides what to say from it:
 
@@ -593,9 +596,6 @@ The settings page's data route has codes of its own, and they are **not** member
 
 `ERR_BOOST_HTTP_MOUNT_FAILED` goes to the log only: mounting the route threw (`ctx.inject` missing or
 refused), so the page has no data source. It is not `ERR_BOOST_PARTIAL_MOUNT` — that one is about hooks.
-
-`ToolRegistrationOptions` since the oldest host line this package declares, so the plugin no
-longer probes it and registers unconditionally.
 
 Registration codes come in two kinds. A non-duplicate throw while registering the protocol
 section logs `ERR_BOOST_SECTION_REGISTER_FAILED` (log only). The three event hooks
