@@ -10,6 +10,20 @@ Design rationale lives in `docs/superpowers/specs/`; the release-acceptance proc
 
 ## [Unreleased]
 
+## [0.2.5] - 2026-11-23
+
+### 变更 Changed
+
+- **信封成了类型**：`StatePayload` 的 `status`/`scope`/`config` 从 `unknown` 改成判别式信封 + 真实载荷类型（`BoostStatus` / `ScopeDoc` / `BoostConfig`），`runBoost` 补了逐命令重载。两次已发布回归（0.2.1 从信封上读载荷字段、0.2.3 在载荷上问信封）现在都是编译错误，`test/ui-payload.test.ts` 用 `@ts-expect-error` 把两条钉住。
+- **`/state` 的 `config` 改为信封**（`{ok,data}`），与 status/scope 一致；这是线上形状的变化，页面与测试同步更新。
+- **失效工作区可以移除**：注册表里已经没有、但下次保存仍会保留的 id 现在带一个移除按钮（`data-action="remove-stale-workspace"`），`staleWorkspaceIds` 改读草稿，所以移除在保存前就可见。`unmatchedDraftIds` 与 `LABEL_UNMATCHED_IDS` 删除——它在任何可达状态下都是同一个集合。
+
+### 修复 Fixed
+
+- `LABEL_STALE_IDS` 与新行为不符（列表已跟随草稿）→ 改为「注册表里没有、但下次保存会留下的工作区」。
+- `NO_DEGRADED` 把「这次读到的降级码为空」说成「宿主提供了全部服务」——后者是清单声明，前者观测不到。文案改为只陈述观测。
+- `projection_horizon_reestimated` 在 status 里但页面从不渲染，而设计 §5.3 存在的意义正是让重算过的数字不被当成实测。现在显示。
+
 ## [0.2.4] - 2026-11-23
 
 ### 修复 Fixed

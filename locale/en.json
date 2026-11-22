@@ -75,11 +75,11 @@
   "LABEL_SAVED_UPPER": "Substitution saving (upper)",
   "LABEL_SAVE_FAILED": "The save did not take effect:",
   "LABEL_SHADOW": "Shadow mode",
-  "LABEL_STALE_IDS": "Saved, but not in the registry",
+  "LABEL_STALE_IDS": "Workspaces the next save would keep, but the registry does not have",
   "LABEL_SUBSTITUTE_ON_PRECONDITIONS": "One thing to check before switching shadow mode off",
   "LABEL_WORKSPACES": "Workspaces",
   "LOADING": "Loading…",
-  "NO_DEGRADED": "Nothing degraded: the host provides every service this plugin needs.",
+  "NO_DEGRADED": "Nothing degraded: the degraded list read empty this time (which is not the same as the host providing every service — some absences only reach the log).",
   "NO_RECEIPTS": "No receipts yet: the plugin has not made a single decision on this host.",
   "PROJECTION_OFF": "Off (no projection)",
   "PROJECTION_ON": "On (real substitution)",
@@ -101,5 +101,6 @@
   "ADVICE_FOR_CODE.ERR_RECEIPTS_UNREADABLE": "Some receipt shards could not be read, so the totals are low. Shards are never pruned automatically, so this is usually permissions or disk: check the boost directory, or move the whole receipts directory aside and start over.",
   "ADVICE_FOR_CODE.ERR_HOST_NO_SPILL": "The host has no usable spill backend, so projection keeps only the truncated text and does not save the original. Install a spill backend (`dsh-spill-local` or your own) and restart.",
   "HINT_PROJECTION_ON_SPILL_OK": "The host resolved a spill backend (`status.hasSpill` is true), so the original will land there. That proves the backend is present, not that it can write — `boost status` reports `ERR_HOST_SPILL_UNUSABLE` when it cannot.",
-  "HINT_PROJECTION_ON_SPILL_UNKNOWN": "Projection needs a spill backend: the original has to land somewhere, or the truncated text is the only copy. `status.hasSpill` cannot be read right now, so there is no telling whether the host has one — fix the status read first, or install one (`dsh-spill-local` or your own)."
+  "HINT_PROJECTION_ON_SPILL_UNKNOWN": "Projection needs a spill backend: the original has to land somewhere, or the truncated text is the only copy. `status.hasSpill` cannot be read right now, so there is no telling whether the host has one — fix the status read first, or install one (`dsh-spill-local` or your own).",
+  "LABEL_HORIZON_REESTIMATED": "Receipts re-estimated at the current horizon"
 }

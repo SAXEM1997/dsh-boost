@@ -75,11 +75,11 @@
   "LABEL_SAVED_UPPER": "替换节省（上界）",
   "LABEL_SAVE_FAILED": "保存没有生效：",
   "LABEL_SHADOW": "影子模式",
-  "LABEL_STALE_IDS": "已保存但注册表里没有",
+  "LABEL_STALE_IDS": "注册表里没有、但下次保存会留下的工作区",
   "LABEL_SUBSTITUTE_ON_PRECONDITIONS": "关掉影子模式前确认一件事",
   "LABEL_WORKSPACES": "工作区",
   "LOADING": "读取中…",
-  "NO_DEGRADED": "没有降级项：宿主提供了这个插件需要的全部服务。",
+  "NO_DEGRADED": "没有降级项：这次读到的降级码列表是空的（这不等于宿主提供了全部服务——有些能力缺失只进日志）。",
   "NO_RECEIPTS": "还没有任何收据：插件在这个宿主上还没有产生过一次决策。",
   "PROJECTION_OFF": "关闭（不投影）",
   "PROJECTION_ON": "开启（真替换）",
@@ -101,5 +101,6 @@
   "ADVICE_FOR_CODE.ERR_RECEIPTS_UNREADABLE": "有些收据分片读不出来，总数会偏低。分片不会被自动清理，所以这通常是权限或磁盘问题——检查 boost 目录，或把整个 receipts 目录移走后重新开始。",
   "ADVICE_FOR_CODE.ERR_HOST_NO_SPILL": "宿主没有可用的 spill 后端，投影因此只保留截断后的文本、不保存原文。装一个 spill 后端（`dsh-spill-local` 或你们自己的实现）后重启。",
   "HINT_PROJECTION_ON_SPILL_OK": "宿主解析出了 spill 后端（`status.hasSpill` 为 true），原文会落到那里。注意这只证明后端在，不证明它写得进去——真写不进去时 `boost status` 会报 `ERR_HOST_SPILL_UNUSABLE`。",
-  "HINT_PROJECTION_ON_SPILL_UNKNOWN": "投影需要 spill 后端：原文要落盘，否则截断后的文本就是唯一副本。现在读不到 `status.hasSpill`，无法确认宿主有没有——先修好状态读取，或装一个（`dsh-spill-local` 或你们自己的实现）。"
+  "HINT_PROJECTION_ON_SPILL_UNKNOWN": "投影需要 spill 后端：原文要落盘，否则截断后的文本就是唯一副本。现在读不到 `status.hasSpill`，无法确认宿主有没有——先修好状态读取，或装一个（`dsh-spill-local` 或你们自己的实现）。",
+  "LABEL_HORIZON_REESTIMATED": "按当前视界重算的回执"
 }

@@ -188,6 +188,14 @@ export function App() {
             <Degraded codes={codes} unavailable={statusCode} />
           </Section>
 
+          {status !== undefined && status.projection_horizon_reestimated > 0 ? (
+            <Section title={c.SECTION_COUNTS} rows={false}>
+              <p className="boost-settings__muted">
+                {c.LABEL_HORIZON_REESTIMATED}: <code>{String(status.projection_horizon_reestimated)}</code>
+              </p>
+            </Section>
+          ) : null}
+
           <Section title={c.SECTION_COUNTS} rows={false}>
             {countRows.length === 0 ? (
               <p className="boost-settings__muted">
