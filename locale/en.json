@@ -22,7 +22,7 @@
   "ADVICE_FOR_CODE.ERR_SCOPE_UNKNOWN_VERSION": "The document version on disk is unrecognised. This version will not touch it. Inspect scope.json in the boost directory by hand.",
   "ADVICE_FOR_CODE.ERR_SCOPE_WRITE_FAILED": "Writing to disk failed. Nothing on disk changed. Check permissions and free space on the boost directory.",
   "CONFIG_READONLY": "This section is read-only. It shows what resolveConfig decided at load (clamps and fallbacks included); to change it, edit the profile's cordis.patch.yml and restart the host.",
-  "CONFIG_UNAVAILABLE": "The effective config could not be read: the route's config was not an object. The page will not render it as an empty table.",
+  "CONFIG_UNAVAILABLE": "Could not read the effective config: `/state` did not return one this time.",
   "DEGRADED_ADVICE.ERR_BOOST_PARTIAL_MOUNT": "A hook did not mount: the plugin is only partly wired. Check the host log for the missing item.",
   "DEGRADED_ADVICE.ERR_BOOST_SECTION_REGISTER_FAILED": "Registering the prompt section failed: the protocol section is not injected.",
   "DEGRADED_ADVICE.ERR_HOST_COMPLETE_SECTION": "The host swallowed the prompt section: the protocol text may never reach the model.",

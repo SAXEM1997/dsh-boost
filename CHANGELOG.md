@@ -10,6 +10,14 @@ Design rationale lives in `docs/superpowers/specs/`; the release-acceptance proc
 
 ## [Unreleased]
 
+## [0.2.6] - 2026-11-23
+
+### 修复 Fixed
+
+- **`degraded` 不是数组时整页崩**（0.2.5 引入）：类型化信封把 `status.degraded` 标成 `string[]`，页面于是直接 `codes.map`；宿主发来一个对象就 TypeError、整页空白。类型只描述我们期望的形状，线上的东西仍然不可信——守卫放回去，并用一个「`degraded` 是对象」的载荷钉住。
+- 视界重算那段和收据计数用了同一个标题，连续两节重名；重算那节改用状态标题。
+- `CONFIG_UNAVAILABLE` 还写着「config 不是对象」，而现在判断的是 `config.ok`。
+
 ## [0.2.5] - 2026-11-23
 
 ### 变更 Changed

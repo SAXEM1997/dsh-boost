@@ -131,7 +131,12 @@ export function App() {
   const statusCode = statusRead.ok ? undefined : (statusRead.code ?? '')
 
   const saved = status?.saved
-  const codes = status?.degraded ?? []
+  // The type says `degraded` is a string list, but the wire is untrusted: a
+  // host that sends an object here would reach `codes.map` and take the whole
+  // page down with a TypeError. Guard the shape, not just the absence.
+  const codes = Array.isArray(status?.degraded)
+    ? status.degraded.filter((code): code is string => typeof code === 'string')
+    : []
   const counts = status?.counts ?? {}
   const countRows: [string, number][] = Object.entries(counts)
     .filter(([, count]) => typeof count === 'number' && Number.isFinite(count))
@@ -189,7 +194,7 @@ export function App() {
           </Section>
 
           {status !== undefined && status.projection_horizon_reestimated > 0 ? (
-            <Section title={c.SECTION_COUNTS} rows={false}>
+            <Section title={c.SECTION_STATUS} rows={false}>
               <p className="boost-settings__muted">
                 {c.LABEL_HORIZON_REESTIMATED}: <code>{String(status.projection_horizon_reestimated)}</code>
               </p>

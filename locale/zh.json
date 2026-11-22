@@ -22,7 +22,7 @@
   "ADVICE_FOR_CODE.ERR_SCOPE_UNKNOWN_VERSION": "磁盘上的文档版本无法识别，这个版本不敢改它。手工检查 boost 目录里的 scope.json。",
   "ADVICE_FOR_CODE.ERR_SCOPE_WRITE_FAILED": "写盘失败，磁盘上的文档没有被改动。检查 boost 目录的权限与剩余空间。",
   "CONFIG_READONLY": "这一栏是只读的。它显示的是启动时 resolveConfig 算出来的值（含 clamp 与回落），改它要编辑 profile 的 cordis.patch.yml 并重启宿主。",
-  "CONFIG_UNAVAILABLE": "读不到生效配置：路由返回的 config 不是对象。页面不会把它显示成一张空表。",
+  "CONFIG_UNAVAILABLE": "读不到生效配置：`/state` 的 config 这次没有返回。",
   "DEGRADED_ADVICE.ERR_BOOST_PARTIAL_MOUNT": "有钩子没挂上：插件是部分装配的。看宿主日志里的缺失项。",
   "DEGRADED_ADVICE.ERR_BOOST_SECTION_REGISTER_FAILED": "提示段注册失败：协议段没有注入。",
   "DEGRADED_ADVICE.ERR_HOST_COMPLETE_SECTION": "提示段被宿主吞掉了：协议段可能没有到达模型。",

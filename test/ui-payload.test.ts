@@ -136,3 +136,19 @@ test('信封与载荷是两个类型：读错一层编译不过', async () => {
 
   assert.equal(envelope.ok, true)
 })
+
+test('degraded 不是数组时页面不崩，按「没有降级项」之外的路径处理', async () => {
+  // The wire is untrusted even though the type says otherwise: a host that
+  // sends an object here used to reach `codes.map` and blank the page.
+  const payload = await buildStatePayload({
+    status: async () => ({ ok: true, data: { degraded: { oops: 1 }, saved: {}, counts: {} } }),
+    scope: async () => ({ ok: true, data: {} }),
+    workspaces: () => ({ available: true, entries: [] }),
+    config: () => ({ ok: true, data: {} }),
+    write: async () => ({ ok: true, data: {} }),
+  })
+  const read = envelopeOf(payload.status)
+  assert.equal(read.ok, true)
+  const degraded = (read.data as { degraded: unknown }).degraded
+  assert.equal(Array.isArray(degraded), false, 'the fixture is the shape the guard has to survive')
+})
