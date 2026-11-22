@@ -139,13 +139,19 @@ test('信封与载荷是两个类型：读错一层编译不过', async () => {
 
 test('degraded 不是数组时页面不崩，按「没有降级项」之外的路径处理', async () => {
   // The wire is untrusted even though the type says otherwise: a host that
-  // sends an object here used to reach `codes.map` and blank the page.
+  // sends an object here used to reach `codes.map` and blank the page. The
+  // fixture is deliberately the shape the type forbids, so the cast is the
+  // point of the test.
+  const malformed = {
+    ok: true as const,
+    data: { degraded: { oops: 1 }, saved: {}, counts: {} },
+  }
   const payload = await buildStatePayload({
-    status: async () => ({ ok: true, data: { degraded: { oops: 1 }, saved: {}, counts: {} } }),
-    scope: async () => ({ ok: true, data: {} }),
+    status: async () => malformed as unknown as Envelope<BoostStatus>,
+    scope: async () => ({ ok: true, data: {} }) as unknown as Envelope<ScopeDoc>,
     workspaces: () => ({ available: true, entries: [] }),
-    config: () => ({ ok: true, data: {} }),
-    write: async () => ({ ok: true, data: {} }),
+    config: () => DEFAULT_CONFIG,
+    write: async () => ({ ok: true, data: {} }) as unknown as Envelope<ScopeDoc>,
   })
   const read = envelopeOf(payload.status)
   assert.equal(read.ok, true)
