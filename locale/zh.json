@@ -1,4 +1,5 @@
 {
+  "ACTION_REMOVE_STALE": "移除",
   "ACTION_REREAD": "重新读取",
   "ACTION_SAVE": "保存",
   "ADVICE_FOR_CODE.ERR_BOOST_INTERNAL": "插件内部出错，磁盘上的文档没有被改动。看宿主日志。",
@@ -76,7 +77,6 @@
   "LABEL_SHADOW": "影子模式",
   "LABEL_STALE_IDS": "已保存但注册表里没有",
   "LABEL_SUBSTITUTE_ON_PRECONDITIONS": "关掉影子模式前确认一件事",
-  "LABEL_UNMATCHED_IDS": "已勾选但注册表里没有",
   "LABEL_WORKSPACES": "工作区",
   "LOADING": "读取中…",
   "NO_DEGRADED": "没有降级项：宿主提供了这个插件需要的全部服务。",

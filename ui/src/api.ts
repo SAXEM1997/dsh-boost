@@ -55,21 +55,17 @@ export async function fetchState(signal?: AbortSignal): Promise<StateResult> {
     const code = (body as { error?: unknown } | null)?.error
     return { ok: false, code: typeof code === 'string' ? code : ERR_CLIENT_NETWORK }
   }
-  const payload = body as Partial<StatePayload> | null
+  const payload = body as StatePayload | null
   if (payload === null || typeof payload !== 'object' || !isWorkspaceListing(payload.workspaces)) {
     // A body this page cannot read is not an empty state: saying "no
     // workspaces" here would be a different, false statement.
     return { ok: false, code: ERR_CLIENT_SHAPE }
   }
-  return {
-    ok: true,
-    data: {
-      status: payload.status,
-      scope: payload.scope,
-      workspaces: payload.workspaces,
-      config: payload.config,
-    },
-  }
+  // The body is asserted to the wire contract at the one boundary where JSON
+  // becomes a `StatePayload`. `workspaces` is checked because saving depends
+  // on it; an envelope's `ok` is checked where it is read, so a missing block
+  // still degrades to "did not answer" instead of being invented here.
+  return { ok: true, data: payload }
 }
 
 /**

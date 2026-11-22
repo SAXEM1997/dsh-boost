@@ -17,9 +17,12 @@
  * underlying read threw.
  */
 import { HTTP_API_PREFIX } from '../shared/api-prefix.js'
-import type { StatePayload, WorkspaceEntry, WorkspaceListing } from '../shared/api-types.js'
+import type { Envelope, StatePayload, WorkspaceEntry, WorkspaceListing } from '../shared/api-types.js'
 import { ERR_BOOST_INTERNAL, ERR_BOOST_INVALID_ARGS, ERR_BOOST_INVALID_BODY } from '../tools/boost.js'
+import type { BoostStatus } from '../tools/boost.js'
+import type { ScopeDoc } from '../scope/doc.js'
 import { ERR_SCOPE_WRITE_FAILED } from '../scope/doc.js'
+import type { BoostConfig } from '../types.js'
 import { isTrustedWebRequest } from './fence.js'
 
 export type { StatePayload, WorkspaceEntry, WorkspaceListing } from '../shared/api-types.js'
@@ -37,14 +40,20 @@ export const ERR_HTTP_BODY = 'ERR_HTTP_BODY'
 
 /** What the state handler reads. Everything is a thunk: state moves. */
 export interface StateDeps {
-  /** `runBoost` with `{ cmd: 'status' }` — the same computation as the tool. */
-  status(): Promise<{ ok: true; data: unknown } | { ok: false; code: string }>
+  /**
+   * `runBoost` with `{ cmd: 'status' }` — the same computation as the tool.
+   *
+   * Typed by command, not `unknown`: the page reads this envelope's `data` as
+   * a `BoostStatus`, so the provider and the consumer are checked against one
+   * shape instead of agreeing by convention.
+   */
+  status(): Promise<Envelope<BoostStatus>>
   /** `runBoost` with `{ cmd: 'scope-get' }`. */
-  scope(): Promise<{ ok: true; data: unknown } | { ok: false; code: string }>
+  scope(): Promise<Envelope<ScopeDoc>>
   /** The host's workspace registry, resolved lazily. */
   workspaces(): WorkspaceListing
   /** The effective configuration `resolveConfig` produced at load. */
-  config(): unknown
+  config(): BoostConfig
   /**
    * `runBoost` with `{ cmd: 'scope-set' }` — the same CAS the tool performs.
    *
@@ -53,7 +62,7 @@ export interface StateDeps {
    * and what a revision means" is exactly how a page and a tool end up
    * disagreeing about whether a save succeeded.
    */
-  write(body: unknown, baseRevision: unknown): Promise<{ ok: true; data: unknown } | { ok: false; code: string }>
+  write(body: unknown, baseRevision: unknown): Promise<Envelope<ScopeDoc>>
 }
 
 /**
@@ -93,7 +102,10 @@ export function listWorkspaces(registry: unknown): WorkspaceListing {
 /** Builds the payload; every branch is already a code, never a thrown error. */
 export async function buildStatePayload(deps: StateDeps): Promise<StatePayload> {
   const [status, scope] = await Promise.all([deps.status(), deps.scope()])
-  return { status, scope, workspaces: deps.workspaces(), config: deps.config() }
+  // The config is resolved synchronously at load and cannot fail, but it
+  // travels in the same envelope as the command results so the page has one
+  // shape to read rather than a per-field convention.
+  return { status, scope, workspaces: deps.workspaces(), config: { ok: true, data: deps.config() } }
 }
 
 /** The two request/response shapes the handler touches, narrowed to what it uses. */

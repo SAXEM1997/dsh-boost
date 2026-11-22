@@ -13,11 +13,10 @@ import {
   isDirty,
   isTicked,
   patchOf,
-  unmatchedDraftIds,
+  removeWorkspaceId,
   seedOf,
   staleWorkspaceIds,
   toggleTicked,
-  type ScopeDraft,
 } from '../ui/src/draft.ts'
 
 const doc = (over: Record<string, unknown> = {}) => ({
@@ -95,26 +94,56 @@ test('健康的文档与可读的注册表：一个理由都没有', () => {
   assert.deepEqual(disableReasons(doc(), listing('ws-1')), [])
 })
 
-test('staleWorkspaceIds 只看已保存的文档', () => {
-  const seed = seedOf(doc({ workspaceIds: ['ws-1', 'ws-gone'] }))
-  assert.deepEqual(staleWorkspaceIds(seed, listing('ws-1')), ['ws-gone'])
-})
-
-test('unmatchedDraftIds 只看草稿，两者不互换', () => {
+test('staleWorkspaceIds 只看草稿，不重复报告已移除的 id', () => {
   const seed = seedOf(doc({ workspaceIds: ['ws-1', 'ws-gone'] }))
   assert.ok(seed !== undefined)
-  const draft: ScopeDraft = { ...draftOf(seed), workspaceIds: ['ws-1', 'ws-new'] }
-  // The saved-but-unknown id stays in the first list even after it is unticked.
-  assert.deepEqual(staleWorkspaceIds(seed, listing('ws-1')), ['ws-gone'])
-  assert.deepEqual(unmatchedDraftIds(draft, listing('ws-1')), ['ws-new'])
+  assert.deepEqual(staleWorkspaceIds(draftOf(seed), listing('ws-1')), ['ws-gone'])
 })
 
-test('注册表不可用时两个诊断都空，不假装"没有不匹配"', () => {
+test('移除 stale id：草稿丢掉它，下一次保存就带上缩短后的列表', () => {
+  const seed = seedOf(doc({ workspaceIds: ['ws-1', 'ws-gone'] }))
+  assert.ok(seed !== undefined)
+  const workspaces = listing('ws-1')
+  const draft = draftOf(seed)
+  assert.equal(isDirty(draft, seed), false)
+
+  const removed = removeWorkspaceId(draft, 'ws-gone')
+  assert.deepEqual(removed.workspaceIds, ['ws-1'])
+  assert.deepEqual(staleWorkspaceIds(removed, workspaces), [], 'the diagnostic follows the draft')
+  assert.equal(isDirty(removed, seed), true, 'the removal is a change the save button must see')
+  assert.deepEqual(patchOf(removed).workspaceIds, ['ws-1'])
+})
+
+test('勾选、取消勾选与移除组合起来，诊断不漂移', () => {
+  // The state is produced through the form's own operations, not by
+  // hand-building a draft the UI cannot reach.
+  const seed = seedOf(doc({ workspaceIds: ['ws-1', 'ws-gone'] }))
+  assert.ok(seed !== undefined)
+  const workspaces = listing('ws-1', 'ws-2')
+  const entry = { id: 'ws-2', path: '/w/ws-2' }
+  let draft = draftOf(seed)
+
+  draft = toggleTicked(draft, entry)
+  assert.deepEqual(staleWorkspaceIds(draft, workspaces), ['ws-gone'])
+  draft = toggleTicked(draft, entry)
+  assert.deepEqual(staleWorkspaceIds(draft, workspaces), ['ws-gone'])
+  draft = removeWorkspaceId(draft, 'ws-gone')
+  assert.deepEqual(staleWorkspaceIds(draft, workspaces), [])
+  assert.deepEqual(draft.workspaceIds, ['ws-1'])
+})
+
+test('移除一个草稿里没有的 id 是幂等的', () => {
+  const seed = seedOf(doc())
+  assert.ok(seed !== undefined)
+  const draft = draftOf(seed)
+  assert.deepEqual(removeWorkspaceId(draft, 'ws-never').workspaceIds, draft.workspaceIds)
+})
+
+test('注册表不可用时诊断为空，不假装"没有不匹配"', () => {
   const seed = seedOf(doc({ workspaceIds: ['ws-gone'] }))
   assert.ok(seed !== undefined)
   const unavailable = { available: false as const, code: 'ERR_HTTP_WORKSPACES_UNAVAILABLE' }
-  assert.deepEqual(staleWorkspaceIds(seed, unavailable), [])
-  assert.deepEqual(unmatchedDraftIds(draftOf(seed), unavailable), [])
+  assert.deepEqual(staleWorkspaceIds(draftOf(seed), unavailable), [])
 })
 
 test('patchOf 只带四个可写字段', () => {

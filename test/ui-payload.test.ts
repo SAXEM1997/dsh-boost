@@ -2,89 +2,137 @@
  * The seam between the route's payload and the page's field reads.
  *
  * `/state` hands back `runBoost`'s envelopes verbatim, so `status` arrives as
- * `{ ok, data }`. Reading `saved` off the envelope instead of its `data` finds
- * nothing, renders every row as "unmeasured" and every degradation list as
- * empty — a page that looks healthy because it cannot see anything. The
- * component cannot be rendered here (no jsdom, by design), so this pins the two
- * halves that meet: the payload the route builds, and the unwrap the page uses.
+ * `{ ok, data }`. Both released regressions were a read at the wrong level —
+ * `saved` off the envelope instead of its `data`, and `.ok` off the payload —
+ * and both were invisible because `StatePayload.status` was `unknown`. The
+ * payload is typed now; the `@ts-expect-error` lines at the bottom are the
+ * pins, and they are checked because the suite is compiled by `tsc`.
  */
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { buildStatePayload } from '../src/http/state.ts'
-import { envelopeOf, payloadOf } from '../ui/src/draft.ts'
+import { DEFAULT_CONFIG } from '../src/config.ts'
+import { buildStatePayload, type StateDeps } from '../src/http/state.ts'
+import type { ScopeDoc } from '../src/scope/doc.ts'
+import type { Envelope } from '../src/shared/api-types.ts'
+import type { BoostStatus } from '../src/tools/boost.ts'
+import { envelopeOf } from '../ui/src/draft.ts'
 
-/** A `status` result shaped the way `runBoost` returns it. */
-const STATUS = {
-  ok: true as const,
-  data: {
-    saved: { substitution: 12, projectionGross: 40, projectionNet: 7 },
-    degraded: ['ERR_HOST_NO_SPILL'],
+/** A complete `BoostStatus`: the route's deps are typed against the real shape. */
+function statusData(over: Partial<BoostStatus> = {}): BoostStatus {
+  return {
+    scope: { mode: 'selected', workspaceIds: [], revision: 0 },
+    shadow: true,
+    projection: 'shadow',
+    saved: { substitution: 12, projectionGross: 40, projectionNet: 7, retrievals: 0 },
     counts: { projection: 3 },
+    degraded: ['ERR_HOST_NO_SPILL'],
     fixedOverheadTokens: 778,
+    fixedOverhead: { protocolTokens: 700, toolSchemaTokens: 78, totalTokens: 778 },
     estimate_kind: 'host',
-  },
+    projection_horizon_steps: 20,
+    projection_horizon_reestimated: 0,
+    projection_gross_tokens: 40,
+    projection_gross_replay_tokens: 40,
+    projection_retrieval_tokens: 0,
+    projection_retrieval_content_tokens: 0,
+    projection_retrieval_call_tokens: 0,
+    projection_unpriced_projections: 0,
+    projection_unpriced_retrievals: 0,
+    projection_legacy_retrievals: 0,
+    projection_retrievals: 0,
+    projection_net_tokens: 7,
+    projection_locator_evictions: 0,
+    projection_unknown_families: 0,
+    projection_unknown_tools: {},
+    protocol_suppressed: 0,
+    receipts_stopped: false,
+    ...over,
+  }
+}
+
+const STATUS_DATA = statusData()
+const STATUS: Envelope<BoostStatus> = { ok: true, data: STATUS_DATA }
+
+const SCOPE: ScopeDoc = {
+  version: 2,
+  revision: 0,
+  mode: 'selected',
+  workspaceIds: [],
+  shadow: true,
+  projection: 'shadow',
+}
+
+/** The route's deps with read-side fixtures; `write` is never called here. */
+function deps(over: Partial<StateDeps> = {}): StateDeps {
+  const base: StateDeps = {
+    status: async () => STATUS,
+    scope: async () => ({ ok: true, data: SCOPE }),
+    workspaces: () => ({ available: true, entries: [] }),
+    config: () => DEFAULT_CONFIG,
+    write: async () => ({ ok: false, code: 'ERR_BOOST_INTERNAL' }),
+  }
+  return { ...base, ...over }
 }
 
 test('页面从 status 的信封里读到真实字段', async () => {
-  const payload = await buildStatePayload({
-    status: async () => STATUS,
-    scope: async () => ({ ok: true, data: { version: 2, revision: 0, mode: 'selected', workspaceIds: [], shadow: true, projection: 'shadow' } }),
-    workspaces: () => ({ available: true, entries: [] }),
-    config: () => ({ projection: { read: { triggerChars: 3000 } } }),
-    write: async () => ({ ok: true, data: {} }),
-  })
+  const payload = await buildStatePayload(deps())
 
-  const status = payloadOf(payload.status) as Record<string, unknown>
-  assert.deepEqual(status['degraded'], ['ERR_HOST_NO_SPILL'], 'degraded is a list on the unwrapped data')
-  assert.equal(status['fixedOverheadTokens'], 778)
-  assert.equal(status['estimate_kind'], 'host')
-  assert.deepEqual(status['saved'], STATUS.data.saved)
-  assert.deepEqual(status['counts'], STATUS.data.counts)
+  assert.deepEqual(payload.status, STATUS, 'the envelope is forwarded unchanged')
+  assert.equal(payload.status.ok, true)
+  if (!payload.status.ok) return
+  assert.deepEqual(payload.status.data.degraded, ['ERR_HOST_NO_SPILL'], 'degraded is a list on the data')
+  assert.equal(payload.status.data.fixedOverheadTokens, 778)
+  assert.equal(payload.status.data.estimate_kind, 'host')
+  assert.deepEqual(payload.status.data.saved, STATUS_DATA.saved)
+  assert.deepEqual(payload.status.data.counts, STATUS_DATA.counts)
 })
 
-test('status 失败时保留信封，码仍然可读', () => {
-  const failed = { ok: false as const, code: 'ERR_BOOST_INTERNAL' }
-  const unwrapped = payloadOf(failed) as Record<string, unknown>
-  assert.equal(unwrapped['code'], 'ERR_BOOST_INTERNAL')
-  assert.equal(unwrapped['ok'], false)
+test('config 也走同一个信封，data 是 resolveConfig 的结果', async () => {
+  const payload = await buildStatePayload(deps())
+  assert.deepEqual(payload.config, { ok: true, data: DEFAULT_CONFIG })
+  assert.equal(payload.config.ok, true)
+  if (!payload.config.ok) return
+  assert.equal(payload.config.data.horizonSteps, DEFAULT_CONFIG.horizonSteps)
 })
 
-test('不是对象的载荷原样返回', () => {
-  assert.equal(payloadOf(undefined), undefined)
-  assert.equal(payloadOf('x'), 'x')
+test('status 失败时保留信封，码仍然可读', async () => {
+  const payload = await buildStatePayload(
+    deps({ status: async () => ({ ok: false, code: 'ERR_BOOST_INTERNAL' }) }),
+  )
+  const read = envelopeOf(payload.status)
+  assert.equal(read.ok, false)
+  assert.equal(read.ok ? undefined : read.code, 'ERR_BOOST_INTERNAL')
 })
 
 test('健康读：信封说 ok，载荷没有 ok 字段也不影响', async () => {
   // The regression this pins: asking the *payload* whether the read succeeded.
   // A payload is a BoostStatus and carries no `ok`, so that question answers
   // "no" forever and every panel renders as unreadable.
-  const payload = await buildStatePayload({
-    status: async () => STATUS,
-    scope: async () => ({ ok: true, data: {} }),
-    workspaces: () => ({ available: true, entries: [] }),
-    config: () => ({}),
-    write: async () => ({ ok: true, data: {} }),
-  })
-
+  const payload = await buildStatePayload(deps())
   const read = envelopeOf(payload.status)
   assert.equal(read.ok, true, 'the envelope answered, so the page may report health')
-  assert.equal((read.data as Record<string, unknown>)['ok'], undefined, 'the payload itself has no ok field')
-  assert.deepEqual((read.data as Record<string, unknown>)['degraded'], ['ERR_HOST_NO_SPILL'])
+  if (!read.ok) return
+  assert.deepEqual(read.data.degraded, ['ERR_HOST_NO_SPILL'])
 })
 
-test('失败读：信封失败时页面拿到码，而不是健康的假象', async () => {
-  const read = envelopeOf({ ok: false, code: 'ERR_BOOST_INTERNAL' })
+test('缺失读：没有结果也当成没读到，页面不说健康', () => {
+  const read = envelopeOf(undefined)
   assert.equal(read.ok, false)
-  assert.equal(read.code, 'ERR_BOOST_INTERNAL')
-  assert.equal(read.data, undefined)
-
-  const bare = envelopeOf({ ok: false })
-  assert.equal(bare.ok, false)
-  assert.equal(bare.code, undefined, 'a failure with no code stays codless, so the page shows the generic line')
+  assert.equal(read.ok ? undefined : read.code, undefined, 'no envelope means no code to show')
 })
 
-test('缺失读：没有结果也当成没读到', () => {
-  for (const value of [undefined, null, 0, 'x', []]) {
-    assert.equal(envelopeOf(value).ok, false, `${String(value)} must not read as success`)
+test('信封与载荷是两个类型：读错一层编译不过', async () => {
+  const payload = await buildStatePayload(deps())
+  const envelope = payload.status
+
+  if (envelope.ok) {
+    // @ts-expect-error — `ok` belongs to the envelope; `BoostStatus` has none,
+    // so "did the read succeed" cannot be asked of the payload again.
+    void envelope.data.ok
   }
+  // @ts-expect-error — `saved` lives on the envelope's `data`; the envelope
+  // itself has no payload fields, so reading it at this level cannot compile.
+  void envelope.saved
+
+  assert.equal(envelope.ok, true)
 })

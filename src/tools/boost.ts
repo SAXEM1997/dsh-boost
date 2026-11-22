@@ -84,6 +84,7 @@ import {
 import type { ScopeCode, ScopeDoc } from '../scope/doc.js'
 import type { ScopeStore } from '../scope/store.js'
 import type { Receipt, ReceiptStore } from '../receipts/store.js'
+import type { Envelope } from '../shared/api-types.js'
 
 /** Stable failure code: `cmd` names no subcommand this tool implements. */
 const ERR_BOOST_UNKNOWN_CMD = 'ERR_BOOST_UNKNOWN_CMD'
@@ -401,8 +402,14 @@ type BoostCmd = 'status' | 'scope-get' | 'scope-set' | 'shadow'
 /** Raw tool arguments, after the model (or a test) produced them. */
 type BoostArgs = { cmd: BoostCmd; body?: unknown; baseRevision?: number }
 
-/** Successful report or a stable failure code — never a thrown error. */
-type BoostResult = { ok: true; data: unknown } | { ok: false; code: string }
+/**
+ * Successful report or a stable failure code — never a thrown error.
+ *
+ * The shape is the shared {@link Envelope}, parameterised by the command's
+ * payload: the page reads the same type off the wire, so a result read at the
+ * wrong level is a compile error on both sides.
+ */
+type BoostResult<T = unknown> = Envelope<T>
 
 /** What `status` reports. Both switches are top-level on purpose: they differ. */
 export interface BoostStatus {
@@ -952,7 +959,7 @@ function degradationCodes(
 }
 
 /** `status`: the scope document plus the receipt ledgers, never a failure. */
-async function statusCommand(deps: BoostDeps): Promise<BoostResult> {
+async function statusCommand(deps: BoostDeps): Promise<BoostResult<BoostStatus>> {
   const read = await deps.scope.read()
   const horizon = horizonOf(deps)
   // Each receipt replays at its own horizon; `horizon` is only the fallback for
@@ -1057,7 +1064,7 @@ async function statusCommand(deps: BoostDeps): Promise<BoostResult> {
 }
 
 /** `scope-get`: a faithful read; a degraded read is a stable tool failure. */
-async function scopeGetCommand(deps: BoostDeps): Promise<BoostResult> {
+async function scopeGetCommand(deps: BoostDeps): Promise<BoostResult<ScopeDoc>> {
   const read = await deps.scope.read()
   if (read.degraded !== undefined) return { ok: false, code: read.code ?? ERR_SCOPE_READ_FAILED }
   return { ok: true, data: read.doc }
@@ -1135,7 +1142,7 @@ async function writeScope(
   mutate: (doc: ScopeDoc) => ScopeDoc,
   baseRevision: number,
   signal?: AbortSignal,
-): Promise<BoostResult> {
+): Promise<BoostResult<ScopeDoc>> {
   try {
     const doc = await scope.write(mutate, baseRevision, { signal })
     return { ok: true, data: doc }
@@ -1147,7 +1154,7 @@ async function writeScope(
 }
 
 /** `scope-set`: validate, prune, then write with compare-and-swap. */
-async function scopeSetCommand(deps: BoostDeps, args: BoostArgs): Promise<BoostResult> {
+async function scopeSetCommand(deps: BoostDeps, args: BoostArgs): Promise<BoostResult<ScopeDoc>> {
   const parsed = scopePatchOf(args.body)
   if (!parsed.ok) return parsed
   if (!isRevision(args.baseRevision)) return { ok: false, code: ERR_BOOST_INVALID_ARGS }
@@ -1168,7 +1175,7 @@ async function scopeSetCommand(deps: BoostDeps, args: BoostArgs): Promise<BoostR
  * upgrade path: the other write refuses with the degraded read's stable code so
  * the operator performs the documented upgrade instead of a blind rewrite.
  */
-async function shadowCommand(deps: BoostDeps, args: BoostArgs): Promise<BoostResult> {
+async function shadowCommand(deps: BoostDeps, args: BoostArgs): Promise<BoostResult<ScopeDoc>> {
   if (typeof args.body !== 'boolean') return { ok: false, code: ERR_BOOST_INVALID_BODY }
   if (!isRevision(args.baseRevision)) return { ok: false, code: ERR_BOOST_INVALID_ARGS }
   const current = await deps.scope.read()
@@ -1196,12 +1203,29 @@ const COMMANDS: Record<BoostCmd, (deps: BoostDeps, args: BoostArgs) => Promise<B
  * getter answers a stable code instead of throwing. The catch exists only so
  * an unexpected store failure cannot turn the user's only control surface into
  * a thrown tool error; it is not an expected path.
+ *
+ * The overloads name each command's payload, so a caller (the settings route)
+ * can hand `status` straight to a `BoostStatus`-typed field without an
+ * assertion. The implementation stays `unknown`: one dispatch table serves all
+ * four commands, and the payload is decided by the `cmd` the caller named.
  */
+export async function runBoost(
+  input: BoostDeps & { args: { cmd: 'status' } },
+): Promise<Envelope<BoostStatus>>
+export async function runBoost(
+  input: BoostDeps & { args: { cmd: 'scope-get' } },
+): Promise<Envelope<ScopeDoc>>
+export async function runBoost(
+  input: BoostDeps & { args: { cmd: 'scope-set' | 'shadow'; body?: unknown; baseRevision?: number } },
+): Promise<Envelope<ScopeDoc>>
+export async function runBoost(
+  input: BoostDeps & { args: BoostArgs },
+): Promise<Envelope<unknown>>
 export async function runBoost(
   input: BoostDeps & {
     args: { cmd: BoostCmd; body?: unknown; baseRevision?: number }
   },
-): Promise<{ ok: true; data: unknown } | { ok: false; code: string }> {
+): Promise<Envelope<unknown>> {
   try {
     const signal = (input as { signal?: AbortSignal } | null | undefined)?.signal
     if (signal?.aborted === true) return { ok: false, code: ERR_SCOPE_ABORTED }

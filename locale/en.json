@@ -1,4 +1,5 @@
 {
+  "ACTION_REMOVE_STALE": "Remove",
   "ACTION_REREAD": "Re-read",
   "ACTION_SAVE": "Save",
   "ADVICE_FOR_CODE.ERR_BOOST_INTERNAL": "The plugin failed internally. Nothing on disk changed. Check the host log.",
@@ -76,7 +77,6 @@
   "LABEL_SHADOW": "Shadow mode",
   "LABEL_STALE_IDS": "Saved, but not in the registry",
   "LABEL_SUBSTITUTE_ON_PRECONDITIONS": "One thing to check before switching shadow mode off",
-  "LABEL_UNMATCHED_IDS": "Ticked, but not in the registry",
   "LABEL_WORKSPACES": "Workspaces",
   "LOADING": "Loading…",
   "NO_DEGRADED": "Nothing degraded: the host provides every service this plugin needs.",

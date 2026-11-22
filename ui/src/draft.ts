@@ -5,7 +5,8 @@
  * check against the spec, and a rule buried in JSX cannot be checked without a
  * DOM. Nothing here touches React or the network.
  */
-import type { WorkspaceEntry, WorkspaceListing } from '../../src/shared/api-types.js'
+import type { Envelope, WorkspaceEntry, WorkspaceListing } from '../../src/shared/api-types.js'
+import type { BoostStatus } from '../../src/tools/boost.js'
 
 /** The four fields the page may write. */
 export interface ScopeDraft {
@@ -115,21 +116,19 @@ export function disableReasons(scope: unknown, workspaces: WorkspaceListing | un
   return reasons
 }
 
-/** Ids the saved document names that the registry does not have. */
-export function staleWorkspaceIds(seed: ScopeDocument | undefined, workspaces: WorkspaceListing | undefined): string[] {
-  if (seed === undefined || workspaces === undefined || workspaces.available !== true) return []
-  const known = new Set(workspaces.entries.map(entry => entry.id))
-  return seed.workspaceIds.filter(id => !known.has(id))
-}
-
 /**
- * Ids ticked in the draft that the registry does not have.
+ * Ids the draft would save that the registry does not have.
  *
- * Separate from {@link staleWorkspaceIds}: those are inert ids already saved,
- * these are ids the operator is about to save and whose path cannot be shown.
+ * Reads the draft, not the seed: the removal control stages a drop in the
+ * draft, and a diagnostic that kept listing the removed id would describe the
+ * document on disk while the form edits the next one. `ScopeDocument` extends
+ * `ScopeDraft`, so a seed is still accepted where only the saved ids matter.
  */
-export function unmatchedDraftIds(draft: ScopeDraft, workspaces: WorkspaceListing | undefined): string[] {
-  if (workspaces === undefined || workspaces.available !== true) return []
+export function staleWorkspaceIds(
+  draft: ScopeDraft | undefined,
+  workspaces: WorkspaceListing | undefined,
+): string[] {
+  if (draft === undefined || workspaces === undefined || workspaces.available !== true) return []
   const known = new Set(workspaces.entries.map(entry => entry.id))
   return draft.workspaceIds.filter(id => !known.has(id))
 }
@@ -168,42 +167,35 @@ export function toggleTicked(draft: ScopeDraft, entry: WorkspaceEntry): ScopeDra
   }
 }
 
-
 /**
- * The `data` of a `runBoost` envelope, or the envelope itself when it failed.
+ * The draft with `id` dropped, so the next save removes it.
  *
- * `/state` hands back `runBoost`'s return value verbatim, so `status` arrives as
- * `{ ok, data }` exactly like `scope` does. Reading fields off the envelope
- * instead of the data renders every row as "unmeasured" and every degradation
- * list as empty — a page that looks healthy because it cannot see anything.
+ * This is the control a stale id never had: it is not in the registry, so it
+ * has no checkbox, and without this the saved id could never leave the
+ * document. Filtering makes a repeated removal a no-op.
  */
-export function payloadOf(value: unknown): unknown {
-  if (value === null || typeof value !== 'object') return value
-  const envelope = value as { ok?: unknown; data?: unknown }
-  return envelope.ok === true ? envelope.data : value
+export function removeWorkspaceId(draft: ScopeDraft, id: string): ScopeDraft {
+  return {
+    ...draft,
+    workspaceIds: draft.workspaceIds.filter(current => current !== id),
+  }
 }
 
-/** What a `/state` sub-result turned out to be. */
-export interface Envelope {
-  /** True only when the route returned `{ ok: true, data }`. */
-  ok: boolean
-  /** The failure code when `ok` is false and the envelope carried one. */
-  code?: string
-  /** The unwrapped payload when `ok` is true. */
-  data?: unknown
-}
+/** What the page can say about the status read. */
+export type StatusRead =
+  | { ok: true; data: BoostStatus }
+  | { ok: false; code?: string }
 
 /**
- * Reads a `/state` sub-result as an envelope.
+ * Reads the status envelope, keeping "no answer at all" distinct.
  *
- * The page must ask *the envelope* whether the read succeeded. Asking the
- * unwrapped payload is the bug this function exists to prevent: a payload is a
- * `BoostStatus` and carries no `ok`, so the question answers "no" forever and
- * every panel renders as unreadable.
+ * The payload is typed now, so the unwrap is a property read rather than a
+ * string path. `undefined` still means "status did not answer" — the fetch
+ * failed, or the route omitted the block — and both arms must stop the page
+ * from claiming health it did not observe. The failure arm's code is optional
+ * only for that absent case; a real `runBoost` failure always names one.
  */
-export function envelopeOf(value: unknown): Envelope {
-  if (value === null || typeof value !== 'object') return { ok: false }
-  const envelope = value as { ok?: unknown; code?: unknown; data?: unknown }
-  if (envelope.ok === true) return { ok: true, data: envelope.data }
-  return typeof envelope.code === 'string' ? { ok: false, code: envelope.code } : { ok: false }
+export function envelopeOf(value: Envelope<BoostStatus> | undefined): StatusRead {
+  if (value === undefined) return { ok: false }
+  return value.ok ? { ok: true, data: value.data } : { ok: false, code: value.code }
 }

@@ -278,6 +278,33 @@ test('写：同源 POST 改字段，盘上的 scope.json 立刻反映', async ()
   assert.equal(doc.revision, 1)
 })
 
+test('写：保存移除 stale id 后的 workspaceIds → 读回也只剩注册表里的', async () => {
+  const server = await createServer()
+  // Plant the document a stale row comes from: the registry has ws-1, the
+  // saved document still names ws-gone. Removing ws-gone is the page's draft
+  // change, and this is the round trip that proves the route persists it.
+  const planted = await server.request(
+    'POST',
+    `${HTTP_API_PREFIX}/scope`,
+    { host: LOOPBACK, origin: ORIGIN },
+    JSON.stringify({ body: { workspaceIds: ['ws-1', 'ws-gone'] }, baseRevision: 0 }),
+  )
+  assert.equal(planted.status, 200)
+
+  const saved = await server.request(
+    'POST',
+    `${HTTP_API_PREFIX}/scope`,
+    { host: LOOPBACK, origin: ORIGIN },
+    JSON.stringify({ body: { workspaceIds: ['ws-1'] }, baseRevision: 1 }),
+  )
+  assert.equal(saved.status, 200)
+  assert.deepEqual((await server.readScope()).workspaceIds, ['ws-1'])
+
+  const { body } = await server.request('GET', `${HTTP_API_PREFIX}/state`, { host: LOOPBACK })
+  assert.equal(body.scope.ok, true)
+  assert.deepEqual(body.scope.data.workspaceIds, ['ws-1'])
+})
+
 test('写：没有 Origin 头 → 403（浏览器对 POST 一定带它）', async () => {
   const server = await createServer()
   const { status, body } = await server.request(

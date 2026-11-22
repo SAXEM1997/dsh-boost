@@ -9,7 +9,7 @@
  * than showing none.
  */
 import { copyOf, adviceFor, type Copy } from './copy'
-import { envelopeOf, payloadOf } from './draft'
+import { envelopeOf } from './draft'
 import { useT } from './i18n'
 import { useCallback, useEffect, useState, type ReactNode } from 'react'
 import { fetchState, type StateResult } from './api'
@@ -20,16 +20,6 @@ function tokens(c: Copy, value: unknown): string {
   if (value === 'unknown' || value === undefined || value === null) return c.UNKNOWN
   if (typeof value !== 'number' || !Number.isFinite(value)) return c.UNKNOWN
   return value.toLocaleString()
-}
-
-/** Reads a nested field without trusting any of the levels. */
-function pick(source: unknown, ...path: string[]): unknown {
-  let cursor: unknown = source
-  for (const key of path) {
-    if (cursor === null || typeof cursor !== 'object') return undefined
-    cursor = (cursor as Record<string, unknown>)[key]
-  }
-  return cursor
 }
 
 /**
@@ -123,10 +113,11 @@ export function App() {
 
   useEffect(load, [load])
 
-  // Both are `runBoost` envelopes: `payloadOf` unwraps the success case and
-  // leaves the failure case alone so its `code` stays readable.
+  // Both are `runBoost` envelopes: the payload is read from `data`, and the
+  // failure branch keeps its `code` readable for the panels below.
   const scope = result?.ok === true ? result.data.scope : undefined
-  const config = payloadOf(result?.ok === true ? result.data.config : undefined)
+  const configRead = result?.ok === true ? result.data.config : undefined
+  const config = configRead?.ok === true ? configRead.data : undefined
 
   // A failed status read must not read as health: without this the panels below
   // would say "no degraded items" and "no receipts yet" — a confident wrong
@@ -134,21 +125,17 @@ export function App() {
   // envelope, never to the payload: a payload carries no `ok`, so asking it
   // there answers "no" forever and the whole page becomes unreadable.
   const statusRead = envelopeOf(result?.ok === true ? result.data.status : undefined)
-  const status = statusRead.data
+  const status = statusRead.ok ? statusRead.data : undefined
   // `undefined` means "status answered"; a string means it did not, and an
   // empty one means it failed without naming a code.
   const statusCode = statusRead.ok ? undefined : (statusRead.code ?? '')
 
-  const saved = pick(status, 'saved')
-  const degraded = pick(status, 'degraded')
-  const codes = Array.isArray(degraded) ? degraded.filter((code): code is string => typeof code === 'string') : []
-  const counts = pick(status, 'counts')
-  const countRows: [string, number][] =
-    counts === null || typeof counts !== 'object'
-      ? []
-      : Object.entries(counts as Record<string, unknown>)
-          .filter((entry): entry is [string, number] => typeof entry[1] === 'number' && Number.isFinite(entry[1]))
-          .sort((left, right) => right[1] - left[1])
+  const saved = status?.saved
+  const codes = status?.degraded ?? []
+  const counts = status?.counts ?? {}
+  const countRows: [string, number][] = Object.entries(counts)
+    .filter(([, count]) => typeof count === 'number' && Number.isFinite(count))
+    .sort(([, left], [, right]) => right - left)
   const configRows = flatten(config)
 
   return (
@@ -171,28 +158,28 @@ export function App() {
       {result !== undefined && result.ok ? (
         <>
           <Section title={c.SECTION_STATUS}>
-            <Row label={c.LABEL_SAVED_LOWER} value={tokens(c, pick(saved, 'substitution_avoided'))} hint={c.HINT_SAVED_LOWER} />
-            <Row label={c.LABEL_SAVED_UPPER} value={tokens(c, pick(saved, 'substitution'))} hint={c.HINT_SAVED_UPPER} />
-            <Row label={c.LABEL_PROJECTION_GROSS} value={tokens(c, pick(status, 'projection_gross_tokens'))} />
+            <Row label={c.LABEL_SAVED_LOWER} value={tokens(c, saved?.substitution_avoided)} hint={c.HINT_SAVED_LOWER} />
+            <Row label={c.LABEL_SAVED_UPPER} value={tokens(c, saved?.substitution)} hint={c.HINT_SAVED_UPPER} />
+            <Row label={c.LABEL_PROJECTION_GROSS} value={tokens(c, status?.projection_gross_tokens)} />
             <Row
               label={c.LABEL_PROJECTION_GROSS_REPLAY}
-              value={tokens(c, pick(saved, 'projectionGross'))}
+              value={tokens(c, saved?.projectionGross)}
               hint={c.HINT_PROJECTION_GROSS_REPLAY}
             />
-            <Row label={c.LABEL_PROJECTION_NET} value={tokens(c, pick(saved, 'projectionNet'))} hint={c.HINT_PROJECTION_NET} />
-            <Row label={c.LABEL_RETRIEVALS} value={tokens(c, pick(saved, 'retrievals'))} />
-            <Row label={c.LABEL_OVERHEAD} value={tokens(c, pick(status, 'fixedOverheadTokens'))} hint={c.HINT_OVERHEAD} />
+            <Row label={c.LABEL_PROJECTION_NET} value={tokens(c, saved?.projectionNet)} hint={c.HINT_PROJECTION_NET} />
+            <Row label={c.LABEL_RETRIEVALS} value={tokens(c, saved?.retrievals)} />
+            <Row label={c.LABEL_OVERHEAD} value={tokens(c, status?.fixedOverheadTokens)} hint={c.HINT_OVERHEAD} />
             <Row
               label={c.LABEL_ESTIMATE}
-              value={pick(status, 'estimate_kind') === 'host' ? c.ESTIMATE_HOST : c.UNKNOWN}
+              value={status?.estimate_kind === 'host' ? c.ESTIMATE_HOST : c.UNKNOWN}
             />
           </Section>
 
           {result.ok === true ? (
             <ScopeForm
               payload={result.data}
-              scopeCode={pick(scope, 'code') as string | undefined}
-              hasSpill={typeof pick(status, 'hasSpill') === 'boolean' ? (pick(status, 'hasSpill') as boolean) : undefined}
+              scopeCode={scope === undefined || scope.ok ? undefined : scope.code}
+              hasSpill={status?.hasSpill}
               onReload={() => load()}
             />
           ) : null}

@@ -21,7 +21,7 @@ import {
   isDirty,
   isTicked,
   patchOf,
-  unmatchedDraftIds,
+  removeWorkspaceId,
   seedOf,
   staleWorkspaceIds,
   toggleTicked,
@@ -98,8 +98,9 @@ export function ScopeForm({ payload, scopeCode, hasSpill, onReload }: ScopeFormP
 
   const reasons = useMemo(() => disableReasons(payload.scope, workspaces), [payload.scope, workspaces])
   const dirty = draft !== undefined && seed !== undefined && isDirty(draft, seed)
-  const stale = staleWorkspaceIds(seed, workspaces)
-  const unmatched = draft === undefined ? [] : unmatchedDraftIds(draft, workspaces)
+  // The diagnostic reads the draft: a stale id that has been staged for
+  // removal must leave this list, or the control would have no visible effect.
+  const stale = staleWorkspaceIds(draft, workspaces)
   const entries = workspaces?.available === true ? workspaces.entries : []
 
   const update = useCallback((patch: Partial<ScopeDraft>) => {
@@ -108,6 +109,10 @@ export function ScopeForm({ payload, scopeCode, hasSpill, onReload }: ScopeFormP
 
   const toggleWorkspace = useCallback((entry: WorkspaceEntry) => {
     setDraft(current => (current === undefined ? current : toggleTicked(current, entry)))
+  }, [])
+
+  const removeStale = useCallback((id: string) => {
+    setDraft(current => (current === undefined ? current : removeWorkspaceId(current, id)))
   }, [])
 
   const save = useCallback(async () => {
@@ -251,18 +256,19 @@ export function ScopeForm({ payload, scopeCode, hasSpill, onReload }: ScopeFormP
           <h4>{c.LABEL_STALE_IDS}</h4>
           <ul>
             {stale.map(id => (
-              <li key={id}>{id}</li>
-            ))}
-          </ul>
-        </div>
-      ) : null}
-
-      {unmatched.length > 0 ? (
-        <div className="boost-settings__diagnostic" data-diagnostic="unmatched">
-          <h4>{c.LABEL_UNMATCHED_IDS}</h4>
-          <ul>
-            {unmatched.map(id => (
-              <li key={id}>{id}</li>
+              <li key={id}>
+                <code>{id}</code>
+                {/* A native button is keyboard-reachable by default; the
+                    data-* hooks give the control a stable identity. */}
+                <button
+                  type="button"
+                  data-action="remove-stale-workspace"
+                  data-workspace-id={id}
+                  onClick={() => removeStale(id)}
+                >
+                  {c.ACTION_REMOVE_STALE}
+                </button>
+              </li>
             ))}
           </ul>
         </div>
