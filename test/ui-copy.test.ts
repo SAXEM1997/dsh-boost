@@ -8,7 +8,8 @@
  */
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import * as copy from '../ui/src/copy.ts'
+import { adviceFor, copyOf } from '../ui/src/copy.ts'
+import { KEYS, fallbackT, type Translate } from '../ui/src/i18n.ts'
 import * as state from '../src/http/state.ts'
 
 /** Every `ERR_HTTP_*` the route can return, discovered rather than restated. */
@@ -18,25 +19,34 @@ function routeCodes(): string[] {
     .map(([, value]) => value as string)
 }
 
+/** A translator that answers from the dictionary and returns the key on a miss. */
+const dictionaryT: Translate = key => fallbackT(key)
+
 test('路由能返回的每个码，页面都有一句话', () => {
-  const missing = routeCodes().filter(code => copy.ADVICE_FOR_CODE[code] === undefined)
+  const missing = routeCodes().filter(code => adviceFor(dictionaryT, code) === dictionaryT('DEGRADED_FALLBACK'))
   assert.deepEqual(missing, [], `the page has no sentence for: ${missing.join(', ')}`)
 })
 
 test('页面自己产生的两个码也有句子', () => {
   for (const code of ['ERR_CLIENT_NETWORK', 'ERR_CLIENT_SHAPE']) {
-    assert.ok(copy.ADVICE_FOR_CODE[code] !== undefined, `${code} has no sentence`)
+    assert.notEqual(adviceFor(dictionaryT, code), dictionaryT('DEGRADED_FALLBACK'), `${code} has no sentence`)
   }
 })
 
 test('降级建议表只放错误码，不放散文键', () => {
-  for (const key of Object.keys(copy.DEGRADED_ADVICE)) {
-    assert.match(key, /^ERR_[A-Z0-9_]+$/, `${key} is not shaped like a stable code`)
+  for (const key of KEYS) {
+    if (!key.startsWith('DEGRADED_ADVICE.')) continue
+    const code = key.slice('DEGRADED_ADVICE.'.length)
+    assert.match(code, /^ERR_[A-Z0-9_]+$/, `${key} is not keyed by a stable code`)
   }
 })
 
 test('每个降级建议都不是空串', () => {
-  for (const [key, value] of Object.entries(copy.DEGRADED_ADVICE)) {
-    assert.ok(value.trim().length > 0, `${key} has an empty sentence`)
-  }
+  const c = copyOf(dictionaryT)
+  for (const key of KEYS) assert.ok(c[key as keyof typeof c].length > 0, `${key} is empty`)
+})
+
+test('未知码回落到通用句子，而不是裸标识符', () => {
+  const sentence = adviceFor(dictionaryT, 'ERR_NOT_A_REAL_CODE')
+  assert.equal(sentence, dictionaryT('DEGRADED_FALLBACK'))
 })

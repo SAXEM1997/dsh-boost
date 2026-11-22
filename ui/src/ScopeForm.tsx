@@ -10,6 +10,8 @@
  * separate "re-read" button, because re-seeding from a newer document discards
  * whatever the user has not saved yet, and only they can decide that.
  */
+import { copyOf, adviceFor, MODE_VALUE_SELECTED, MODE_VALUE_GLOBAL } from './copy'
+import { useT } from './i18n'
 import { useCallback, useEffect, useMemo, useState, type ReactNode } from 'react'
 import { saveScope } from './api'
 import {
@@ -28,30 +30,6 @@ import {
 } from './draft'
 import type { StatePayload, WorkspaceEntry, WorkspaceListing } from './api'
 import type { DisableReason } from './draft'
-import {
-  ACTION_REREAD,
-  ACTION_SAVE,
-  EMPTY_GLOBAL,
-  EMPTY_SELECTED,
-  HINT_DIRTY,
-  HINT_NO_WORKSPACES_TO_PICK,
-  LABEL_DIRTY,
-  LABEL_MODE,
-  LABEL_MODE_GLOBAL,
-  LABEL_MODE_SELECTED,
-  LABEL_PROJECTION,
-  LABEL_SAVE_FAILED,
-  LABEL_SHADOW,
-  LABEL_STALE_IDS,
-  LABEL_UNMATCHED_IDS,
-  LABEL_WORKSPACES,
-  MODE_VALUE_GLOBAL,
-  MODE_VALUE_SELECTED,
-  SAVED,
-  SECTION_SCOPE,
-  UNAVAILABLE_REGISTRY,
-  adviceFor,
-} from './copy'
 
 /**
  * Failures a re-read can actually fix.
@@ -61,12 +39,12 @@ import {
  * user can simply retry.
  */
 const REREAD_CODES = new Set([
-  'ERR_SCOPE_REVISION_CONFLICT',
-  'ERR_SCOPE_LOCKED',
-  'ERR_SCOPE_READ_FAILED',
-  'ERR_SCOPE_UNKNOWN_VERSION',
-  'ERR_SCOPE_FUTURE_VERSION',
-  'ERR_SCOPE_PARSE_FAILED',
+  'c.ERR_SCOPE_REVISION_CONFLICT',
+  'c.ERR_SCOPE_LOCKED',
+  'c.ERR_SCOPE_READ_FAILED',
+  'c.ERR_SCOPE_UNKNOWN_VERSION',
+  'c.ERR_SCOPE_FUTURE_VERSION',
+  'c.ERR_SCOPE_PARSE_FAILED',
 ])
 
 interface ScopeFormProps {
@@ -77,12 +55,13 @@ interface ScopeFormProps {
 
 /** Renders one reason a save is blocked. Every one of them is independent. */
 function BlockedBy({ reasons }: { reasons: DisableReason[] }): ReactNode {
+  const t = useT()
   if (reasons.length === 0) return null
   return (
     <ul className="boost-settings__blockers">
       {reasons.map(reason => (
         <li key={reason.id} data-reason={reason.id}>
-          <code>{reason.code}</code> {adviceFor(reason.code)}
+          <code>{reason.code}</code> {adviceFor(t, reason.code)}
         </li>
       ))}
     </ul>
@@ -90,6 +69,8 @@ function BlockedBy({ reasons }: { reasons: DisableReason[] }): ReactNode {
 }
 
 export function ScopeForm({ payload, scopeCode, onReload }: ScopeFormProps): ReactNode {
+  const t = useT()
+  const c = copyOf(t)
   const workspaces: WorkspaceListing | undefined = payload.workspaces
   const [seed, setSeed] = useState<ScopeDocument | undefined>(() => seedOf(payload.scope))
   const [draft, setDraft] = useState<ScopeDraft | undefined>(() => {
@@ -142,9 +123,9 @@ export function ScopeForm({ payload, scopeCode, onReload }: ScopeFormProps): Rea
   if (draft === undefined || seed === undefined) {
     return (
       <section className="boost-settings__section">
-        <h3>{SECTION_SCOPE}</h3>
+        <h3>{c.SECTION_SCOPE}</h3>
         <p className="boost-settings__muted" data-code={scopeCode ?? ''}>
-          {scopeCode === undefined ? UNAVAILABLE_REGISTRY : adviceFor(scopeCode)}
+          {scopeCode === undefined ? c.UNAVAILABLE_REGISTRY : adviceFor(t, scopeCode)}
         </p>
         <BlockedBy reasons={reasons} />
       </section>
@@ -153,10 +134,10 @@ export function ScopeForm({ payload, scopeCode, onReload }: ScopeFormProps): Rea
 
   return (
     <section className="boost-settings__section">
-      <h3>{SECTION_SCOPE}</h3>
+      <h3>{c.SECTION_SCOPE}</h3>
 
       <fieldset className="boost-settings__field">
-        <legend>{LABEL_MODE}</legend>
+        <legend>{c.LABEL_MODE}</legend>
         <label>
           <input
             type="radio"
@@ -164,7 +145,7 @@ export function ScopeForm({ payload, scopeCode, onReload }: ScopeFormProps): Rea
             checked={draft.mode === MODE_VALUE_SELECTED}
             onChange={() => update({ mode: MODE_VALUE_SELECTED })}
           />
-          {LABEL_MODE_SELECTED}
+          {c.LABEL_MODE_SELECTED}
         </label>
         <label>
           <input
@@ -173,23 +154,23 @@ export function ScopeForm({ payload, scopeCode, onReload }: ScopeFormProps): Rea
             checked={draft.mode === MODE_VALUE_GLOBAL}
             onChange={() => update({ mode: MODE_VALUE_GLOBAL })}
           />
-          {LABEL_MODE_GLOBAL}
+          {c.LABEL_MODE_GLOBAL}
         </label>
         {draft.mode === MODE_VALUE_GLOBAL ? (
-          <p className="boost-settings__muted">{EMPTY_GLOBAL}</p>
+          <p className="boost-settings__muted">{c.EMPTY_GLOBAL}</p>
         ) : draft.workspaceIds.length === 0 ? (
-          <p className="boost-settings__muted">{EMPTY_SELECTED}</p>
+          <p className="boost-settings__muted">{c.EMPTY_SELECTED}</p>
         ) : null}
       </fieldset>
 
       <fieldset className="boost-settings__field" disabled={draft.mode === MODE_VALUE_GLOBAL}>
-        <legend>{LABEL_WORKSPACES}</legend>
+        <legend>{c.LABEL_WORKSPACES}</legend>
         {workspaces?.available === false ? (
           <p className="boost-settings__muted" data-code={workspaces.code}>
-            {adviceFor(workspaces.code)}
+            {adviceFor(t, workspaces.code)}
           </p>
         ) : entries.length === 0 ? (
-          <p className="boost-settings__muted">{HINT_NO_WORKSPACES_TO_PICK}</p>
+          <p className="boost-settings__muted">{c.HINT_NO_WORKSPACES_TO_PICK}</p>
         ) : (
           entries.map(entry => (
             <label key={entry.id} className="boost-settings__workspace">
@@ -205,19 +186,19 @@ export function ScopeForm({ payload, scopeCode, onReload }: ScopeFormProps): Rea
       </fieldset>
 
       <fieldset className="boost-settings__field">
-        <legend>{LABEL_SHADOW}</legend>
+        <legend>{c.LABEL_SHADOW}</legend>
         <label>
           <input
             type="checkbox"
             checked={draft.shadow}
             onChange={() => update({ shadow: !draft.shadow })}
           />
-          {LABEL_SHADOW}
+          {c.LABEL_SHADOW}
         </label>
       </fieldset>
 
       <fieldset className="boost-settings__field">
-        <legend>{LABEL_PROJECTION}</legend>
+        <legend>{c.LABEL_PROJECTION}</legend>
         {PROJECTIONS.map(option => (
           <label key={option}>
             <input
@@ -233,7 +214,7 @@ export function ScopeForm({ payload, scopeCode, onReload }: ScopeFormProps): Rea
 
       {stale.length > 0 ? (
         <div className="boost-settings__diagnostic" data-diagnostic="stale">
-          <h4>{LABEL_STALE_IDS}</h4>
+          <h4>{c.LABEL_STALE_IDS}</h4>
           <ul>
             {stale.map(id => (
               <li key={id}>{id}</li>
@@ -244,7 +225,7 @@ export function ScopeForm({ payload, scopeCode, onReload }: ScopeFormProps): Rea
 
       {unmatched.length > 0 ? (
         <div className="boost-settings__diagnostic" data-diagnostic="unmatched">
-          <h4>{LABEL_UNMATCHED_IDS}</h4>
+          <h4>{c.LABEL_UNMATCHED_IDS}</h4>
           <ul>
             {unmatched.map(id => (
               <li key={id}>{id}</li>
@@ -258,12 +239,12 @@ export function ScopeForm({ payload, scopeCode, onReload }: ScopeFormProps): Rea
       {failure !== undefined ? (
         <div className="boost-settings__failure" role="alert" data-code={failure}>
           <p>
-            {LABEL_SAVE_FAILED} <code>{failure}</code>
+            {c.LABEL_SAVE_FAILED} <code>{failure}</code>
           </p>
-          <p className="boost-settings__muted">{adviceFor(failure)}</p>
+          <p className="boost-settings__muted">{adviceFor(t, failure)}</p>
           {REREAD_CODES.has(failure) ? (
             <button type="button" onClick={() => onReload()}>
-              {ACTION_REREAD}
+              {c.ACTION_REREAD}
             </button>
           ) : null}
         </div>
@@ -275,12 +256,12 @@ export function ScopeForm({ payload, scopeCode, onReload }: ScopeFormProps): Rea
           disabled={reasons.length > 0 || !dirty || saving}
           onClick={() => void save()}
         >
-          {ACTION_SAVE}
+          {c.ACTION_SAVE}
         </button>
         <span className="boost-settings__muted" data-dirty={dirty ? 'true' : 'false'}>
-          {dirty ? HINT_DIRTY : SAVED}
+          {dirty ? c.HINT_DIRTY : c.SAVED}
         </span>
-        {dirty ? <span className="boost-settings__badge">{LABEL_DIRTY}</span> : null}
+        {dirty ? <span className="boost-settings__badge">{c.LABEL_DIRTY}</span> : null}
       </div>
     </section>
   )

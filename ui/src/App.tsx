@@ -8,45 +8,16 @@
  * unmeasured field says so, and a missing workspace list disables saving rather
  * than showing none.
  */
+import { copyOf, adviceFor, type Copy } from './copy'
+import { useT } from './i18n'
 import { useCallback, useEffect, useState, type ReactNode } from 'react'
-import {
-  adviceFor,
-  CONFIG_READONLY,
-  CONFIG_UNAVAILABLE,
-  HINT_OVERHEAD,
-  HINT_PROJECTION_GROSS_REPLAY,
-  HINT_PROJECTION_NET,
-  HINT_SAVED_LOWER,
-  HINT_SAVED_UPPER,
-  INTRO,
-  LABEL_CONFIG_KEY,
-  LABEL_CONFIG_VALUE,
-  LABEL_DEGRADED,
-  LABEL_ESTIMATE,
-  LABEL_OVERHEAD,
-  LABEL_PROJECTION_GROSS,
-  LABEL_PROJECTION_GROSS_REPLAY,
-  LABEL_PROJECTION_NET,
-  LABEL_RETRIEVALS,
-  LABEL_SAVED_LOWER,
-  LABEL_SAVED_UPPER,
-  LOADING,
-  NO_DEGRADED,
-  NO_RECEIPTS,
-  RETRY,
-  SECTION_CONFIG,
-  SECTION_COUNTS,
-  SECTION_STATUS,
-  TITLE,
-  UNKNOWN,
-} from './copy'
 import { fetchState, type StateResult } from './api'
 import { ScopeForm } from './ScopeForm'
 
 /** A number, `'unknown'`, or a missing field — three states, never conflated. */
-function tokens(value: unknown): string {
-  if (value === 'unknown' || value === undefined || value === null) return UNKNOWN
-  if (typeof value !== 'number' || !Number.isFinite(value)) return UNKNOWN
+function tokens(c: Copy, value: unknown): string {
+  if (value === 'unknown' || value === undefined || value === null) return c.UNKNOWN
+  if (typeof value !== 'number' || !Number.isFinite(value)) return c.UNKNOWN
   return value.toLocaleString()
 }
 
@@ -101,15 +72,17 @@ function Section({ title, children, rows = true }: { title: string; children: Re
 }
 
 function Degraded({ codes }: { codes: readonly string[] }) {
+  const t = useT()
+  const c = copyOf(t)
   if (codes.length === 0) {
-    return <p className="boost-settings__ok">{NO_DEGRADED}</p>
+    return <p className="boost-settings__ok">{c.NO_DEGRADED}</p>
   }
   return (
     <ul className="boost-settings__codes">
       {codes.map(code => (
         <li key={code}>
           <code>{code}</code>
-          <span>{adviceFor(code)}</span>
+          <span>{adviceFor(t, code)}</span>
         </li>
       ))}
     </ul>
@@ -119,6 +92,9 @@ function Degraded({ codes }: { codes: readonly string[] }) {
 export function App() {
   const [result, setResult] = useState<StateResult | undefined>(undefined)
   const [pending, setPending] = useState(true)
+
+  const t = useT()
+  const c = copyOf(t)
 
   const load = useCallback(() => {
     const controller = new AbortController()
@@ -155,38 +131,38 @@ export function App() {
 
   return (
     <div className="boost-settings">
-      <h2>{TITLE}</h2>
-      <p className="boost-settings__intro">{INTRO}</p>
+      <h2>{c.TITLE}</h2>
+      <p className="boost-settings__intro">{c.INTRO}</p>
 
-      {pending && result === undefined ? <p className="boost-settings__muted">{LOADING}</p> : null}
+      {pending && result === undefined ? <p className="boost-settings__muted">{c.LOADING}</p> : null}
 
       {result !== undefined && !result.ok ? (
         <div className="boost-settings__error" role="alert">
           <code>{result.code}</code>
-          <span>{adviceFor(result.code)}</span>
+          <span>{adviceFor(t, result.code)}</span>
           <button type="button" onClick={() => load()}>
-            {RETRY}
+            {c.RETRY}
           </button>
         </div>
       ) : null}
 
       {result !== undefined && result.ok ? (
         <>
-          <Section title={SECTION_STATUS}>
-            <Row label={LABEL_SAVED_LOWER} value={tokens(pick(saved, 'substitution_avoided'))} hint={HINT_SAVED_LOWER} />
-            <Row label={LABEL_SAVED_UPPER} value={tokens(pick(saved, 'substitution'))} hint={HINT_SAVED_UPPER} />
-            <Row label={LABEL_PROJECTION_GROSS} value={tokens(pick(status, 'projection_gross_tokens'))} />
+          <Section title={c.SECTION_STATUS}>
+            <Row label={c.LABEL_SAVED_LOWER} value={tokens(c, pick(saved, 'substitution_avoided'))} hint={c.HINT_SAVED_LOWER} />
+            <Row label={c.LABEL_SAVED_UPPER} value={tokens(c, pick(saved, 'substitution'))} hint={c.HINT_SAVED_UPPER} />
+            <Row label={c.LABEL_PROJECTION_GROSS} value={tokens(c, pick(status, 'projection_gross_tokens'))} />
             <Row
-              label={LABEL_PROJECTION_GROSS_REPLAY}
-              value={tokens(pick(saved, 'projectionGross'))}
-              hint={HINT_PROJECTION_GROSS_REPLAY}
+              label={c.LABEL_PROJECTION_GROSS_REPLAY}
+              value={tokens(c, pick(saved, 'projectionGross'))}
+              hint={c.HINT_PROJECTION_GROSS_REPLAY}
             />
-            <Row label={LABEL_PROJECTION_NET} value={tokens(pick(saved, 'projectionNet'))} hint={HINT_PROJECTION_NET} />
-            <Row label={LABEL_RETRIEVALS} value={tokens(pick(saved, 'retrievals'))} />
-            <Row label={LABEL_OVERHEAD} value={tokens(pick(status, 'fixedOverheadTokens'))} hint={HINT_OVERHEAD} />
+            <Row label={c.LABEL_PROJECTION_NET} value={tokens(c, pick(saved, 'projectionNet'))} hint={c.HINT_PROJECTION_NET} />
+            <Row label={c.LABEL_RETRIEVALS} value={tokens(c, pick(saved, 'retrievals'))} />
+            <Row label={c.LABEL_OVERHEAD} value={tokens(c, pick(status, 'fixedOverheadTokens'))} hint={c.HINT_OVERHEAD} />
             <Row
-              label={LABEL_ESTIMATE}
-              value={pick(status, 'estimate_kind') === 'host' ? '宿主计量' : UNKNOWN}
+              label={c.LABEL_ESTIMATE}
+              value={pick(status, 'estimate_kind') === 'host' ? '宿主计量' : c.UNKNOWN}
             />
           </Section>
 
@@ -198,13 +174,13 @@ export function App() {
             />
           ) : null}
 
-          <Section title={LABEL_DEGRADED} rows={false}>
+          <Section title={c.LABEL_DEGRADED} rows={false}>
             <Degraded codes={codes} />
           </Section>
 
-          <Section title={SECTION_COUNTS} rows={false}>
+          <Section title={c.SECTION_COUNTS} rows={false}>
             {countRows.length === 0 ? (
-              <p className="boost-settings__muted">{NO_RECEIPTS}</p>
+              <p className="boost-settings__muted">{c.NO_RECEIPTS}</p>
             ) : (
               <ul className="boost-settings__codes">
                 {countRows.map(([code, count]) => (
@@ -218,16 +194,16 @@ export function App() {
           </Section>
 
 
-          <Section title={SECTION_CONFIG} rows={false}>
-            <p className="boost-settings__hint">{CONFIG_READONLY}</p>
+          <Section title={c.SECTION_CONFIG} rows={false}>
+            <p className="boost-settings__hint">{c.CONFIG_READONLY}</p>
             {configRows.length === 0 ? (
-              <p className="boost-settings__muted">{CONFIG_UNAVAILABLE}</p>
+              <p className="boost-settings__muted">{c.CONFIG_UNAVAILABLE}</p>
             ) : (
             <table className="boost-settings__config">
               <thead>
                 <tr>
-                  <th scope="col">{LABEL_CONFIG_KEY}</th>
-                  <th scope="col">{LABEL_CONFIG_VALUE}</th>
+                  <th scope="col">{c.LABEL_CONFIG_KEY}</th>
+                  <th scope="col">{c.LABEL_CONFIG_VALUE}</th>
                 </tr>
               </thead>
               <tbody>

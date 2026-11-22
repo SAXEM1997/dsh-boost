@@ -8,16 +8,23 @@
  * cordis can tie it to the plugin's lifecycle.
  */
 import { App } from './App'
-import { TITLE } from './copy'
+import { DICTIONARIES, LOCALE_NAMESPACE, fallbackT, setTranslator, type Translate } from './i18n'
 import styles from './styles.css?inline'
 
 /** The slot a settings page registers into, per the shell's settings contract. */
 export const SETTINGS_SLOT = 'settings.section'
 
-/** This page's namespace: the nav key, and (from T5) the locale namespace. */
+/** This page's namespace: the nav key, and the locale namespace. */
 export const SETTINGS_NAMESPACE = 'boost'
 
-/** This bundle's service dependencies, by module short name. */
+/**
+ * This bundle's service dependencies, by module short name.
+ *
+ * `locale` is optional in practice: cordis' `inject` is an AND gate, so listing
+ * it would keep the page off a host without a locale service. The page is
+ * readable without one, so the service is read from the context and its absence
+ * costs only the language switch.
+ */
 export const inject = ['slots']
 
 /** Minimal structural type: the host's own declarations are not shipped here. */
@@ -26,8 +33,21 @@ interface SlotsService {
   register(options: Record<string, unknown>, component: unknown): () => void
 }
 
+/**
+ * The slice of the host's locale service this bundle uses.
+ *
+ * Structural, like `SlotsService`: the host's declarations are not shipped, and
+ * a missing method must degrade rather than crash the page.
+ */
+interface LocaleService {
+  register(namespace: string, dictionaries: Record<string, Record<string, string>>): () => void
+  bind(namespace: string): Translate
+  subscribe?(listener: () => void): () => void
+}
+
 interface ClientContext {
   slots?: SlotsService
+  locale?: LocaleService
   effect?(callback: () => () => void, label?: string): () => void
 }
 
@@ -45,8 +65,40 @@ function installStyles(): () => void {
   return () => node.remove()
 }
 
+/**
+ * Wires the translator, preferring the host's.
+ *
+ * `register` throws when the host's locale service exists but has no locale
+ * face behind it, so the fallback is a caught error rather than a null check:
+ * the only way to know is to try.
+ */
+function installTranslator(ctx: ClientContext): Translate {
+  const locale = ctx.locale
+  if (locale !== undefined) {
+    try {
+      ctx.effect?.(() => locale.register(LOCALE_NAMESPACE, DICTIONARIES), `${SETTINGS_NAMESPACE}: dictionaries`)
+      const bound = locale.bind(LOCALE_NAMESPACE)
+      setTranslator(bound)
+      // The bound function reads the live snapshot, so a subscription only has
+      // to bump the page's render version.
+      ctx.effect?.(
+        () => locale.subscribe?.(() => setTranslator(locale.bind(LOCALE_NAMESPACE))) ?? (() => {}),
+        `${SETTINGS_NAMESPACE}: locale subscription`,
+      )
+      return bound
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error)
+      console.warn(`[${SETTINGS_NAMESPACE}] host locale service rejected the dictionaries (${message}); using the built-in translator`)
+    }
+  }
+  setTranslator(fallbackT)
+  return fallbackT
+}
+
 export function apply(ctx: ClientContext): void {
   ctx.effect?.(() => installStyles(), `${SETTINGS_NAMESPACE}: settings styles`)
+
+  const t = installTranslator(ctx)
 
   if (ctx.slots === undefined) {
     // Reachable only when the host mounts a partial `slots` service: `inject`
@@ -66,7 +118,7 @@ export function apply(ctx: ClientContext): void {
         order: 50,
         // A thunk, not a string: the shell re-reads it when the locale changes,
         // so the nav item follows the language without this plugin subscribing.
-        label: () => TITLE,
+        label: () => t('TITLE'),
         inject: () => ({}),
       },
       App,
