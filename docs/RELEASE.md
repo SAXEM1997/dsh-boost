@@ -37,8 +37,9 @@ npm run verify:package
    将来若有人把 `prepare` 改成无条件重建，这条也不会让它在断言之前悄悄重建（并“修复”）工作树。
    显式构建后打包，包内容就是这次构建的产物；干净 clone 上即使 `dist/` 不存在也能跑，因为构建
    发生在打包之前。
-2. **exact allowlist**：每一个 tar 条目都必须由五类来源之一解释——固定根文件（`package.json`、
+2. **exact allowlist**：每一个 tar 条目都必须由六类来源之一解释——固定根文件（`package.json`、
    `LICENSE`、`NOTICE`、两份 README）、`dsh.bundle.patch` 指向的 patch 文件、`locale/*.json`、
+   `static/*`（README 里引用的图片）、
    `exports["./client"]` 指向的客户端产物（仅当 `dsh.client` 声明时；两者必须同时存在或同时缺席，
    缺一半会在 allowlist 之前点名），或 `src/**/*.ts` 对应的一个 `dist/**.js` + `.js.map`
    （声明文件只发 `dist/index.d.ts` 与 `dist/types.d.ts` 两个；其余内部 `.d.ts` 被 `files` 的
@@ -152,7 +153,8 @@ git checkout lib/client.js             # 或 npm run build:client 重建
   不存在的包则加载**响亮失败**。四名一致是为了保住管理面的可寻址性。
 - `version` 必须存在，否则 `npm pack` 在第一步就报 `Invalid package, must have name and version`。
 - `files` 与实际布局一致：`scripts/`、`test/`、`src/` 是 dev-only，**不**进包（`files` 只带
-  `dist`、`locale`、`cordis.patch.yml`、两份 README、`LICENSE`、`NOTICE`）；`dist/` 由
+  `dist`、`locale`、`static`、`cordis.patch.yml`、两份 README、`LICENSE`、`NOTICE`）；`static/`
+  只放 README 引用的图片——npm 页面渲染 README 时用的是包里的相对路径，图片不进包就是坏图；`dist/` 由
   `npm run build`（clean + `tsc` + 客户端）构建；`prepare`（`scripts/prepare-build.mjs`）按缺失的那一半分别构建（git 安装用）——`dist/index.js` 与 `lib/client.js` 都在时是 no-op，所以 `npm publish` 的
   pack 步骤不会重建已构建的树；sourcemap 以 `inlineSources` 内联源码，装好的包没有 `src/`
   也能对上源码。

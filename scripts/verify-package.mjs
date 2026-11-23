@@ -415,6 +415,11 @@ function expectedTarballEntries() {
   for (const file of readdirSync(join(root, 'locale')).sort()) {
     if (file.endsWith('.json')) expected.add(`package/locale/${file}`)
   }
+  // README images are served from the repository on GitHub and from the
+  // tarball on the npm page; a missing one is a broken image, not a warning.
+  for (const file of readdirSync(join(root, 'static')).sort()) {
+    expected.add(`package/static/${file}`)
+  }
   return expected
 }
 
@@ -447,7 +452,7 @@ function assertTarballAllowlist(listed) {
       throw new Error(
         `tarball entry is not in the allowlist: ${entry}\n` +
           'expected only the fixed root files, the manifest-declared bundle patch, locale JSON, ' +
-          'one .js/.js.map per src/*.ts, and the public .d.ts files',
+          'static readme assets, one .js/.js.map per src/*.ts, and the public .d.ts files',
       )
     }
   }

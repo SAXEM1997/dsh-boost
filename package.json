@@ -87,6 +87,7 @@
     "dist/index.d.ts",
     "dist/types.d.ts",
     "locale",
+    "static",
     "cordis.patch.yml",
     "README.md",
     "README.en.md",

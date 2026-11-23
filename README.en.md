@@ -4,6 +4,12 @@
 
 </div>
 
+<div align="center">
+
+<img src="static/banner.svg" alt="dsh-boost: a long tool receipt becomes a shorter projected receipt, and the omitted middle lands in the spill store and stays re-readable" width="880">
+
+</div>
+
 # dsh-boost
 
 **Cut DeepSeek Harness token usage** — a DSH plugin
@@ -118,7 +124,7 @@ your draft. Per-field and per-code detail is in the
 ## Go deeper
 
 These documents live in the **repository**, not in the npm tarball (`files` ships only `dist`,
-`locale`, `cordis.patch.yml`, both READMEs, `LICENSE`, and `NOTICE`; `src/` is not shipped
+`locale`, `static`, `cordis.patch.yml`, both READMEs, `LICENSE`, and `NOTICE`; `src/` is not shipped
 either, and the `dist` source maps inline the sources). If you are reading on the npm page, open
 them from the repository. The **how-it-works** and **operations** guides are Chinese-only, as
 are `docs/RELEASE.md` and the design documents; this English README is the English entry point.

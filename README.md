@@ -4,6 +4,12 @@
 
 </div>
 
+<div align="center">
+
+<img src="static/banner.svg" alt="dsh-boost：一条长工具回执变成更短的投影回执，被省略的中段落进 spill、仍可回读" width="880">
+
+</div>
+
 # dsh-boost
 
 **降低 DeepSeek Harness 的 token 消耗** — DSH 插件
@@ -100,7 +106,7 @@ workspace UUID，不是路径；找不到时单用户机器可以用 `"mode": "g
 
 ## 深入
 
-这些文档在仓库里，不在 npm tarball 里（`files` 只带 `dist`、`locale`、`cordis.patch.yml`、两份
+这些文档在仓库里，不在 npm tarball 里（`files` 只带 `dist`、`locale`、`static`、`cordis.patch.yml`、两份
 README、`LICENSE`、`NOTICE`；`src/` 也不进包，`dist` 的 sourcemap 内联了源码）。在 npm 页面上
 请从仓库读取。
 

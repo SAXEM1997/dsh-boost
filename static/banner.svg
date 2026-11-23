@@ -1,0 +1,80 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="880" height="220" viewBox="0 0 880 220" role="img" aria-label="dsh-boost: a long tool receipt becomes a shorter projected receipt, and the omitted middle is kept in a spill store that stays re-readable">
+  <defs>
+    <linearGradient id="panel" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#0a1120"/>
+      <stop offset="0.55" stop-color="#0d1628"/>
+      <stop offset="1" stop-color="#101b31"/>
+    </linearGradient>
+    <linearGradient id="accent" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#2dd4bf"/>
+      <stop offset="1" stop-color="#38bdf8"/>
+    </linearGradient>
+    <linearGradient id="cardFill" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#f8fafc" stop-opacity="0.09"/>
+      <stop offset="1" stop-color="#f8fafc" stop-opacity="0.03"/>
+    </linearGradient>
+    <linearGradient id="spillFill" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#fbbf24" stop-opacity="0.18"/>
+      <stop offset="1" stop-color="#fbbf24" stop-opacity="0.04"/>
+    </linearGradient>
+    <radialGradient id="glow" cx="0.12" cy="0.1" r="0.85">
+      <stop offset="0" stop-color="#2dd4bf" stop-opacity="0.14"/>
+      <stop offset="1" stop-color="#2dd4bf" stop-opacity="0"/>
+    </radialGradient>
+  </defs>
+
+  <rect x="0" y="0" width="880" height="220" rx="18" fill="url(#panel)"/>
+  <rect x="0" y="0" width="880" height="220" rx="18" fill="url(#glow)"/>
+  <rect x="0.5" y="0.5" width="879" height="219" rx="18" fill="none" stroke="#f8fafc" stroke-opacity="0.10"/>
+
+  <!-- wordmark -->
+  <g font-family="ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif">
+    <text x="52" y="92" font-size="41" font-weight="700" letter-spacing="-1.4" fill="#f8fafc">dsh-boost</text>
+    <text x="54" y="118" font-size="14.5" font-weight="500" fill="#93a3bb">DeepSeek Harness plugin</text>
+  </g>
+  <g font-family="ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif" font-size="13" font-weight="600">
+    <rect x="52" y="138" width="144" height="28" rx="14" fill="#2dd4bf" fill-opacity="0.10" stroke="#2dd4bf" stroke-opacity="0.40"/>
+    <text x="124" y="156.5" text-anchor="middle" fill="#5eead4">projection</text>
+    <rect x="206" y="138" width="144" height="28" rx="14" fill="#38bdf8" fill-opacity="0.10" stroke="#38bdf8" stroke-opacity="0.40"/>
+    <text x="278" y="156.5" text-anchor="middle" fill="#7dd3fc">substitution</text>
+  </g>
+
+  <path d="M392 46v124" stroke="#f8fafc" stroke-opacity="0.07"/>
+
+  <g transform="translate(30 0)">
+  <!-- stage labels -->
+  <g font-family="ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif" font-size="10" font-weight="700" letter-spacing="1.4" fill="#6f8099">
+    <text x="490" y="40" text-anchor="middle">RECEIPT</text>
+    <text x="616" y="40" text-anchor="middle">PROJECTED</text>
+    <text x="727" y="40" text-anchor="middle">SPILL</text>
+  </g>
+
+  <!-- stage 1: the full receipt -->
+  <g>
+    <rect x="448" y="52" width="84" height="118" rx="10" fill="url(#cardFill)" stroke="#f8fafc" stroke-opacity="0.14"/>
+    <path d="M464 72h52 M464 84h44 M464 96h52 M464 108h36 M464 120h52 M464 132h42 M464 144h30 M464 156h48"
+          stroke="#c6d2e1" stroke-width="3" stroke-linecap="round" stroke-opacity="0.50"/>
+  </g>
+
+  <!-- flow -->
+  <path d="M544 -5.5H554V-12L568 0L554 12V5.5H544Z" transform="translate(0 111)" fill="url(#accent)" fill-opacity="0.45"/>
+
+  <!-- stage 2: head and tail kept, middle replaced by a locator -->
+  <g>
+    <rect x="574" y="80" width="84" height="90" rx="10" fill="url(#cardFill)" stroke="#2dd4bf" stroke-opacity="0.50"/>
+    <path d="M590 96h52 M590 108h44 M590 120h50" stroke="#5eead4" stroke-width="3" stroke-linecap="round" stroke-opacity="0.85"/>
+    <circle cx="600" cy="134" r="2.6" fill="#fbbf24" fill-opacity="0.85"/>
+    <circle cx="616" cy="134" r="2.6" fill="#fbbf24" fill-opacity="0.85"/>
+    <circle cx="632" cy="134" r="2.6" fill="#fbbf24" fill-opacity="0.85"/>
+    <path d="M590 148h46 M590 160h34" stroke="#5eead4" stroke-width="3" stroke-linecap="round" stroke-opacity="0.85"/>
+  </g>
+
+  <!-- the omitted middle is kept, not lost -->
+  <circle cx="658" cy="134" r="3" fill="#fbbf24" fill-opacity="0.9"/>
+  <path d="M658 134C686 134 682 151 700 151" fill="none" stroke="#fbbf24" stroke-opacity="0.55" stroke-width="2" stroke-dasharray="5 5"/>
+  <g>
+    <rect x="692" y="128" width="70" height="46" rx="9" fill="url(#spillFill)" stroke="#fbbf24" stroke-opacity="0.45"/>
+    <path d="M706 142h42 M706 153h30 M706 164h38" stroke="#fbbf24" stroke-width="2.5" stroke-linecap="round" stroke-opacity="0.75"/>
+  </g>
+  </g>
+</svg>
