@@ -127,6 +127,21 @@ export class DistillAttempts {
     return options !== undefined && this.entries.has(options)
   }
 
+  /**
+   * Whether this request is one whose caller has **already given up**.
+   *
+   * `owns` is true from the moment the call is registered, which is before the
+   * model is even asked. Only a parked entry — one whose timeout has fired —
+   * has no consumer left, so only then may the hook drain the stream instead of
+   * passing it through. Draining a registered-but-live call would hand the
+   * caller an empty iterable and turn every distillation into a paid no-op.
+   */
+  parked(options: object | undefined): boolean {
+    if (options === undefined) return false
+    const entry = this.entries.get(options) as { settled?: unknown } | undefined
+    return entry !== undefined && entry.settled !== undefined
+  }
+
   /** Forget everything (session teardown or plugin disposal). */
   clear(): void {
     this.entries.clear()

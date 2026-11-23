@@ -216,3 +216,40 @@ test('迟到答案落盘后写一条 mode=late 的收据：只有 token，没有
   assert.equal(product.sessionId, SESSION)
   assert.equal(product.inputChars, Array.from('line1\nnpm ERR! boom\nline3').length)
 })
+
+test('只有已放弃的调用才被 drain：活着的蒸馏请求原样收到自己的 chunk', async () => {
+  // The regression this pins: `owns()` is true from `register()` onward, so
+  // gating the drain on it swallowed the very first answer — every distillation
+  // became a paid no-op that reported `distill-failed`. Only `park()` (the
+  // timeout) means nobody is reading any more.
+  const env = await setup()
+  const options = { purpose: DISTILL_PURPOSE }
+  env.attempts.register(options, {
+    model: 'deepseek-flash',
+    text: 'x',
+    question: questionOf('bash')!,
+    sessionId: SESSION,
+    turn: 1,
+  })
+  assert.equal(env.attempts.parked(options), false, 'registration alone is not a give-up')
+
+  const chunks = (): AsyncIterable<StreamChunk> =>
+    (async function* () {
+      yield { type: 'text-delta', index: 0, text: 'ANSWER' } as StreamChunk
+      yield { type: 'finish', reason: { kind: 'stop' } } as StreamChunk
+    })()
+
+  const live = env.host.runStream('llm/stream', [options], chunks) as AsyncIterable<StreamChunk>
+  const seen: string[] = []
+  for await (const chunk of live) seen.push(chunk.type)
+  assert.deepEqual(seen, ['text-delta', 'finish'], 'a live call keeps its own stream')
+
+  let settle: (answer: unknown) => void = () => {}
+  env.attempts.park(options, new Promise((resolve) => { settle = resolve }) as never)
+  assert.equal(env.attempts.parked(options), true)
+  const late = env.host.runStream('llm/stream', [options], chunks) as AsyncIterable<StreamChunk>
+  const drained: string[] = []
+  for await (const chunk of late) drained.push(chunk.type)
+  assert.deepEqual(drained, [], 'a parked call is drained, not forwarded')
+  settle({ text: 'x', quotes: ['x'], model: 'deepseek-flash', tokens: 1 })
+})

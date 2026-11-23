@@ -123,6 +123,10 @@ export function distillRequestOptions(request: RequestType): GenerateOptions {
     model: request.model,
     maxTokens: request.maxOutputTokens,
     purpose: DISTILL_PURPOSE,
+    // The host's other auxiliary calls (`session-title`, `compaction`) carry
+    // the session id; the branded type is host-internal and the value is the
+    // same string the post-execute hook already has.
+    sessionId: request.sessionId as never,
     system: DISTILL_SYSTEM_PROMPT,
     messages: [
       {

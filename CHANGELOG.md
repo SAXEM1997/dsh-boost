@@ -8,6 +8,15 @@ This file records user-visible changes. Format follows Keep a Changelog; version
 Design rationale lives in `docs/superpowers/specs/`; the release-acceptance procedure is in
 `docs/RELEASE.md`.
 
+## [0.3.2] - 2026-11-23
+
+### 修复
+
+- **蒸馏自 0.3.0 起从未生效**：`llm/stream` 用「请求已注册」判断是否该把流抽干，而注册发生在
+  调用模型之前，于是每一次蒸馏（包括调用方还在等的那一次）都被当成迟到答案抽走，调用方拿到
+  空串、恒报 `distill-failed`，产物从不落盘——每次启用只是白付一次模型调用与延迟。判据改为
+  「已放弃」（超时后 `park()`），活着的调用原样收到自己的流。
+
 ## [0.3.1] - 2026-11-23
 
 修复 0.3.0 里蒸馏路径的五处缺陷。前四条在默认配置下不显形（`distillation.enabled` 默认 `false`），但一旦打开就会让投影**变差**。

@@ -1628,7 +1628,12 @@ export function streamHook(
       // again. Nothing else here changes: no usage, no settlement, no plan.
       // `next()` was still called exactly once, so a host whose terminal throws
       // on this request keeps throwing it.
-      if (options.purpose === DISTILL_PURPOSE && deps.distillAttempts?.owns(options) === true) {
+      // Only a call whose caller has already timed out is drained: at that
+      // point nobody is reading the stream, so consuming it here is what
+      // observes the answer. A registered-but-live call must pass through —
+      // `owns` is true from registration onward, and draining it would hand
+      // the distiller an empty iterable (every distillation a paid no-op).
+      if (options.purpose === DISTILL_PURPOSE && deps.distillAttempts?.parked(options) === true) {
         return drainForLateDistill(upstream)
       }
       return upstream
