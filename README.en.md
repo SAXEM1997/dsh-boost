@@ -116,10 +116,12 @@ When the page cannot reach its data it shows a stable code instead of an empty t
 | Shows | degradation codes and what to do, substitution saving as a lower/upper bound, projection gross/net, retrieval count, receipt counts, fixed overhead, effective configuration (read-only) |
 | Writes | four fields of `<dshHome>/boost/scope.json`: `mode`, `workspaceIds`, `shadow`, `projection` |
 
-Receipt codes for distillation (receipt distillation, ADR 0001): `distill` (adopted; carried by a
-`projected` receipt), `distill-failed`, `distill-rejected:timeout`,
-`distill-rejected:unverifiable`, `distill-rejected:not-smaller`. Meaning and remedy per code: the
-receipt-code table in [the release notes](docs/RELEASE.md).
+Receipts for distillation (receipt distillation, ADR 0001): an **adopted** distillation writes
+`code: 'projected'` (`kind: 'projection'`) plus `mode: 'adopted'` and the `distill_*` fields — to a
+ledger reader it *is* this receipt's projection; `distill` names the decision, not a receipt code.
+Not adopted writes `distill-failed`, `distill-rejected:timeout`, `distill-rejected:unverifiable` or
+`distill-rejected:not-smaller`. Meaning and remedy per code: the receipt-code table in
+[the release notes](docs/RELEASE.md).
 
 It writes through the **same** CAS as the `boost` tool's `scope-set`, so neither overwrites the
 other; if someone else got there first the page reports `ERR_SCOPE_REVISION_CONFLICT` and keeps

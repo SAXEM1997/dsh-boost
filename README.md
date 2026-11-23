@@ -100,8 +100,9 @@ workspace UUID，不是路径；找不到时单用户机器可以用 `"mode": "g
 | 看 | 降级码与处置、替换节省的上下界、投影毛额/净额、取回次数、收据计数、常驻开销、生效配置（只读） |
 | 写 | `<dshHome>/boost/scope.json` 的四个字段：`mode`、`workspaceIds`、`shadow`、`projection` |
 
-蒸馏（receipt distillation，ADR 0001）用的收据码：`distill`（采用；以 `projected` 收据承载）、
-`distill-failed`、`distill-rejected:timeout`、`distill-rejected:unverifiable`、
+蒸馏（receipt distillation，ADR 0001）的收据：**被采用时写的是 `code: 'projected'`**（`kind: 'projection'`）
+加 `mode: 'adopted'` 与 `distill_*` 字段——对账本读者它就是这条回执的投影，`distill` 只是决策名，不是收据码。
+未采用时写 `distill-failed`、`distill-rejected:timeout`、`distill-rejected:unverifiable`、
 `distill-rejected:not-smaller`。逐条含义与处置见 [发布说明](docs/RELEASE.md) 的「收据 `code`：
 跳过与重置」一节。
 
