@@ -106,7 +106,7 @@ function baseInput(store: DistillStore, over: Partial<DecideInput> = {}): Decide
 test('verifyQuotes：每个引用都是原文的非空子串才通过', () => {
   const source = 'alpha\nbeta\ngamma'
   assert.equal(verifyQuotes(['alpha', 'gamma'], source), true)
-  assert.equal(verifyQuotes([], source), true, 'an answer that quotes nothing is not a forged one')
+  assert.equal(verifyQuotes([], source), false, 'an answer that quotes nothing is unverifiable, not merely unfaked')
   assert.equal(verifyQuotes(['alpah'], source), false, 'a typo is not a substring')
   assert.equal(verifyQuotes([''], source), false, 'an empty quote is vacuous')
   assert.equal(verifyQuotes(['alpha', 'delta'], source), false, 'one bad quote rejects the answer')
@@ -174,12 +174,73 @@ test('查表优先：同一回执第二次调用只查表，不调模型，且�
   // the model, the second read the table.
   assert.equal(first.evidence.called, true)
   assert.equal(second.evidence.called, false)
-  const { tokens: _tokens, ...firstEvidence } = first.evidence
+  // `tokens` and `inputChars` describe the call itself, so a hit — which made
+  // no call — legitimately omits both.
+  const { tokens: _tokens, inputChars: _inputChars, ...firstEvidence } = first.evidence
   assert.deepEqual({ ...firstEvidence, called: false }, second.evidence)
   assert.deepEqual(first.quotes, second.quotes)
   assert.equal(second.evidence?.adopted, true, 'a hit is reported as adopted')
   assert.equal(first.code, 'distill')
   assert.equal(second.code, 'distill')
+})
+
+test('查表命中不再落盘：产物里钉住 locator，重放不产生第二份 spill 文件', async () => {
+  const store = await makeStore()
+  // The real backend derives the file name from `randomBytes(6)`, so a second
+  // `saveText` for the same receipt returns a *different* locator — which would
+  // make the composed view differ between the first render and any replay.
+  let spills = 0
+  const countingSpill = {
+    saveText: async () => {
+      spills += 1
+      return { locator: `/spill/bash-${spills}.txt`, retrievalHint: 'read it' }
+    },
+  }
+  const fake = fakeFn(async (request) => goodAnswer(request.text))
+  const input = baseInput(store, { distill: fake.fn, spill: countingSpill })
+  const first = await decide(input)
+  const second = await decide(input)
+  assert.ok(first && second)
+  assert.equal(spills, 1, 'a table hit must not write a second spill artifact')
+  assert.equal(second.content, first.content, 'the replay renders the same bytes')
+  assert.equal(fake.calls.length, 1)
+})
+
+test('空正文 → distill-rejected:empty，且不落盘原文', async () => {
+  const store = await makeStore()
+  let spills = 0
+  const countingSpill = { saveText: async () => { spills += 1; return { locator: '/s', retrievalHint: 'r' } } }
+  const fake = fakeFn(async () => ({ text: '   ', quotes: ['npm ERR! Test failed'], model: 'm' }))
+  const r = await decide(baseInput(store, { distill: fake.fn, spill: countingSpill }))
+  assert.equal(r?.code, 'distill-rejected:empty')
+  assert.equal(r?.content, null)
+  assert.equal(spills, 0, 'a body that cannot be used must not spill the original')
+})
+
+test('被拒的结果也钉住：重放读墓碑，不再调模型', async () => {
+  const store = await makeStore()
+  const fake = fakeFn(async () => ({ text: 'x', quotes: ['not in the receipt'], model: 'm' }))
+  const input = baseInput(store, { distill: fake.fn })
+  const first = await decide(input)
+  assert.equal(first?.code, 'distill-rejected:unverifiable')
+  const second = await decide(input)
+  assert.equal(second?.code, 'distill-rejected:unverifiable')
+  assert.equal(second?.content, null)
+  assert.equal(fake.calls.length, 1, 'the refusal is a decision; a replay must not pay for it again')
+  assert.equal(second?.evidence.called, false, 'the replay reports that no call happened')
+})
+
+test('超时不钉墓碑：迟到答案仍能被重放采用', async () => {
+  const store = await makeStore()
+  const slow = { call: () => new Promise<never>(() => {}) }
+  const input = baseInput(store, {
+    distill: slow as never,
+    cfg: onConfig({ timeoutMs: 20 }),
+  })
+  const r = await decide(input)
+  assert.equal(r?.code, 'distill-rejected:timeout')
+  const again = await decide(baseInput(store, { distill: fakeFn(async (q) => goodAnswer(q.text)).fn }))
+  assert.equal(again?.mode, 'adopted', 'nothing was pinned, so a later attempt can still adopt')
 })
 
 test('落盘优先：返回的字节 = 盘上的字节；写盘失败 → distill-failed + null', async () => {
@@ -206,6 +267,13 @@ test('伪造引用 → distill-rejected:unverifiable，content 为 null（调用
   assert.equal(r.content, null)
   assert.equal(r.code, 'distill-rejected:unverifiable')
   assert.equal(r.evidence?.reason, 'unverifiable')
+})
+
+test('一条引用都没有 → unverifiable（引用是唯一的可核验信号）', async () => {
+  const store = await makeStore()
+  const fake = fakeFn(async () => ({ text: 's', quotes: [], model: 'm' }))
+  const r = await decide(baseInput(store, { distill: fake.fn }))
+  assert.equal(r?.code, 'distill-rejected:unverifiable')
 })
 
 test('空引用 → unverifiable', async () => {

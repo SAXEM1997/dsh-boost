@@ -2279,6 +2279,11 @@ test('#10 投影 shadow 模式不蒸馏：只记 projection-shadow', async () =>
   assert.equal(res?.content, undefined, 'shadow writes nothing the model sees')
   assert.ok(env.receipts.some((r) => r.code === 'projection-shadow'))
   assert.equal(env.receipts.some((r) => r.mode !== undefined), false, 'no distillation receipt in shadow mode')
+  // The receipt is the only observable a user sees; the call itself is the
+  // cost. Shadow mode must not pay for a model call, spill the original or pin
+  // a product (design §5.4: shadow writes nothing).
+  assert.equal(env.seam.calls.length, 0, 'shadow mode must not call the distiller')
+  assert.equal(env.saved.length, 0, 'shadow mode must not spill')
 })
 
 test('#10 蒸馏收据带 distill_mode，status 据此计 calls/tokens/adopted/rejected/fallback', async () => {

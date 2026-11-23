@@ -154,14 +154,18 @@ export function createLlmDistiller(
       // Built synchronously, before anything is awaited: the request object
       // must be registered (see `attempts.ts`) before `llm.stream` can start
       // the provider request that arrives at the hook.
-      const options = requestOptionsOf(request) as GenerateOptions
+      const options = (request.options ?? requestOptionsOf(request)) as GenerateOptions
       let text = ''
       let failed = false
       let tokens: number | undefined
       for await (const chunk of llm.stream(options)) {
         const delta = (chunk as { text?: unknown }).text
         if (typeof delta === 'string' && (chunk.type === undefined || chunk.type === 'text-delta')) {
-          if (text.length < MAX_ANSWER_CHARS) text += delta
+          // Clamp the delta, not just the accumulation: one chunk can carry the
+          // whole body, and `text.length < MAX` alone would let a single 10 MB
+          // delta through and make the constant a lie.
+          const room = MAX_ANSWER_CHARS - text.length
+          if (room > 0) text += delta.length <= room ? delta : delta.slice(0, room)
         }
         if (tokens === undefined) tokens = completionTokensOf(chunk)
         if (isFailedFinish(chunk)) {

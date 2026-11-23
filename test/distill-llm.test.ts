@@ -123,3 +123,26 @@ test('answers 的 model 字段被忽略：模型标识来自请求路由', async
   const got = await createLlmDistiller(llmOf(answer)).call(request())
   assert.equal(got?.model, 'deepseek-chat')
 })
+
+test('一次 delta 超过上限时被截断，不会被整块吞下', async () => {
+  // The guard used to read `if (text.length < MAX) text += delta`, so a single
+  // delta carrying the whole body walked straight past the cap.
+  const huge = 'x'.repeat(200_000)
+  const answer = JSON.stringify({ text: huge, quotes: ['npm ERR! boom'] })
+  const distill = createLlmDistiller(llmOf(answer))
+  const got = await distill.call(request())
+  // The JSON is now truncated, so it cannot parse: "no answer", not a 200 KB body.
+  assert.equal(got, undefined)
+})
+
+test('request.options 存在时用它，不再另建一个请求对象', async () => {
+  // One object per call is what makes the parking registry and the stream
+  // hook's identity check agree; two objects per call both register and one of
+  // them is never cleaned up.
+  const seen: { options?: GenerateOptions } = {}
+  const answer = JSON.stringify({ text: 'npm ERR! boom', quotes: ['npm ERR! boom'] })
+  const distill = createLlmDistiller(llmOf(answer, seen))
+  const options = { purpose: DISTILL_PURPOSE, provider: 'p', model: 'm', messages: [] }
+  await distill.call(request({ options } as never))
+  assert.equal(seen.options, options, 'the very object handed in is the one sent')
+})

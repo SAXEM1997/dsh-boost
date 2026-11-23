@@ -42,8 +42,26 @@ export interface DistillProduct {
   quotes: string[]
   /** The model that answered. */
   model: string
-  /** ISO timestamp of the first computation. */
-  createdAt: string
+  /**
+   * The spill handle the first render named in its footer.
+   *
+   * Pinned so a replay composes the *same* bytes: the host backend names each
+   * file with `randomBytes(6)`, and the footer text is
+   * `(Omitted N bytes. … stored at: <locator>. <retrievalHint>)` — so a second
+   * `saveText` changes both halves of what the model reads. Absent on products
+   * written before this field existed; a miss re-spills and adopts the new
+   * handle.
+   */
+  spill?: { locator: string; retrievalHint: string }
+  /**
+   * A pinned refusal, with no body.
+   *
+   * A rejection is a decision as much as an adoption is, so it is written here
+   * and read back by a replay — otherwise the same receipt pays for the same
+   * refused answer on every replay. `timeout` is never pinned: it has no answer
+   * to pin, and a late one must be able to land.
+   */
+  rejected?: string
 }
 
 /** Whether a parsed file is a well-formed product. */
@@ -52,10 +70,15 @@ function isProduct(value: unknown): value is DistillProduct {
   const record = value as Record<string, unknown>
   return (
     typeof record.text === 'string' &&
+    (record.rejected === undefined || typeof record.rejected === 'string') &&
     Array.isArray(record.quotes) &&
     record.quotes.every((quote) => typeof quote === 'string') &&
     typeof record.model === 'string' &&
-    typeof record.createdAt === 'string'
+    (record.spill === undefined ||
+      (typeof record.spill === 'object' &&
+        record.spill !== null &&
+        typeof (record.spill as Record<string, unknown>).locator === 'string' &&
+        typeof (record.spill as Record<string, unknown>).retrievalHint === 'string'))
   )
 }
 
@@ -112,13 +135,16 @@ export class DistillStore {
   async write(
     sessionId: string,
     key: Pick<DistillKey, 'file'>,
-    product: Pick<DistillProduct, 'text' | 'quotes' | 'model'>,
+    product: Partial<Omit<DistillProduct, 'model'>> & Pick<DistillProduct, 'model'>,
   ): Promise<void> {
     const body: DistillProduct = {
-      text: product.text,
-      quotes: [...product.quotes],
+      text: product.text ?? '',
+      quotes: [...(product.quotes ?? [])],
       model: product.model,
-      createdAt: new Date().toISOString(),
+      ...(product.rejected === undefined ? {} : { rejected: product.rejected }),
+      ...(product.spill === undefined
+        ? {}
+        : { spill: { locator: product.spill.locator, retrievalHint: product.spill.retrievalHint } }),
     }
     const json = JSON.stringify(body)
     const dir = this.dir()

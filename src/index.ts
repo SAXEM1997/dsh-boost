@@ -1650,11 +1650,12 @@ export function apply(ctx: PluginContext, config: unknown): void {
       get distill() {
         const backend = llmBackend()
         if (backend === undefined) return undefined
-        return createLlmDistiller(backend, (request) => {
-          const options = { ...distillRequestOptions(request) }
-          distillAttempts.register(options, request)
-          return options
-        })
+        // No registration here: `distillRequestOptions` below builds the one
+        // object per call and registers it, and `decide` hands that same object
+        // to this distiller. Registering in both places put two entries in the
+        // parking registry per call — the unused one leaked until `MAX_PARKED`
+        // evicted a parked call that had not answered yet.
+        return createLlmDistiller(backend)
       },
       distillRoute: (sessionId) => {
         const pinned = cfg.distillation.route

@@ -50,7 +50,22 @@ import type { DistillRouteOf } from './llm.js'
 export type DistillCode = 'distill' | 'distill-failed' | `distill-rejected:${DistillRejectReason}`
 
 /** Why an answer was not adopted. */
-export type DistillRejectReason = 'not-smaller' | 'unverifiable' | 'timeout'
+export type DistillRejectReason = 'empty' | 'not-smaller' | 'unverifiable' | 'timeout'
+
+/**
+ * The reasons a replayed decision must not pay for the model again.
+ *
+ * `timeout` is excluded on purpose: it carries no answer, and the whole point of
+ * parking the request is that a late answer lands and a replay adopts it. The
+ * three below are decisions — the answer arrived and was refused — so they are
+ * pinned as tombstones, otherwise every replay of the same receipt pays for the
+ * same refusal.
+ */
+const PINNED_REJECTIONS: ReadonlySet<DistillRejectReason> = new Set<DistillRejectReason>([
+  'empty',
+  'unverifiable',
+  'not-smaller',
+])
 
 /** Everything one decision reads; every host service arrives pre-bound. */
 export interface DecideInput {
@@ -92,6 +107,16 @@ export interface DistillEvidence {
   called: boolean
   /** Tokens reported by the call; `NaN`-safe: omitted when the adapter did not say. */
   tokens?: number
+  /**
+   * Code points of the receipt body sent to the model.
+   *
+   * The answer's tokens are completion only — the prompt is the receipt, which
+   * is the larger half of the cost, and an auxiliary request is deliberately
+   * never observed by the usage ledger. Recording the prompt's size is what
+   * lets an operator see "did the saving get spent again" without inventing a
+   * token count the host never reported.
+   */
+  inputChars?: number
   /** The model that produced the adopted body. */
   model?: string
   /** The adopted view is the one the caller must use. */
@@ -134,6 +159,10 @@ export interface DistillOutcome {
  * answer, and the size and quote gates are the only gates there are.
  */
 export function verifyQuotes(quotes: readonly string[], source: string): boolean {
+  // An answer that cites nothing is not a forged answer — it is an unverifiable
+  // one, and the quote list is the only signal that the body is anchored in the
+  // receipt rather than invented. Zero quotes fails the same gate as a bad one.
+  if (quotes.length === 0) return false
   for (const quote of quotes) {
     if (typeof quote !== 'string' || quote === '') return false
     if (!source.includes(quote)) return false
@@ -220,15 +249,34 @@ async function adopt(
   answer: { text: string; quotes: string[]; model: string },
   evidence: DistillEvidence,
   fromTable: boolean,
+  pinnedSpill?: { locator: string; retrievalHint: string },
 ): Promise<DistillOutcome> {
-  const reject = (reason: DistillRejectReason): DistillOutcome => ({
-    content: null,
-    code: `distill-rejected:${reason}`,
-    mode: 'fallback',
-    evidence: { ...evidence, adopted: false, reason },
-  })
+  const reject = async (reason: DistillRejectReason): Promise<DistillOutcome> => {
+    // A refusal is a decision too: pin it so a replay reads the tombstone
+    // instead of paying for the same call. Awaited, because the very next
+    // `decide` for this receipt must see it — a fire-and-forget write races the
+    // replay it exists to protect. A failed write is not a failed refusal, so
+    // it never changes the outcome.
+    if (!fromTable && PINNED_REJECTIONS.has(reason)) {
+      await input.store
+        .write(input.sessionId, key, { model: evidence.model ?? 'unknown', rejected: reason })
+        .catch(() => undefined)
+    }
+    return {
+      content: null,
+      code: `distill-rejected:${reason}`,
+      mode: 'fallback',
+      evidence: { ...evidence, adopted: false, reason },
+    }
+  }
 
-  if (!verifyQuotes(answer.quotes, input.text)) return reject('unverifiable')
+  // An empty body passes every other gate — it is trivially a substring of
+  // nothing, and marker + footer is far shorter than the truncation view — and
+  // would replace a whole receipt with a head line. Refuse it before the spill
+  // so the original is never written for a body that cannot be used.
+  if (answer.text.trim() === '') return await reject('empty')
+
+  if (!verifyQuotes(answer.quotes, input.text)) return await reject('unverifiable')
 
   const { formatFooter, spill, cfg, family, text, sessionId } = input
   if (formatFooter === undefined || spill === undefined) {
@@ -241,7 +289,15 @@ async function adopt(
   try {
     // The original goes to the spill store before the decision is final, so
     // the footer names an artifact that exists and holds the whole receipt.
-    ref = await spill.saveText({
+    //
+    // A replay must NOT save it again: the host backend names each file with
+    // `randomBytes(6)`, so a second write returns a different locator and the
+    // footer — the part of the view the model reads — would differ from the
+    // bytes that entered history the first time. The pinned product carries
+    // the locator for exactly this reason (`DistillStore`), and a product
+    // without one (written before the field existed) falls through to a fresh
+    // write, which is the only case where a replay may re-spill.
+    ref = pinnedSpill !== undefined ? pinnedSpill : await spill.saveText({
       owner: { sessionId },
       source: {
         kind: 'tool',
@@ -266,7 +322,7 @@ async function adopt(
   // Strictly smaller than the truncation view of the same receipt, measured in
   // UTF-8 bytes: the unit the footer counts and the ledger reports.
   if (truncationBytes === null || Buffer.byteLength(composed, 'utf8') >= truncationBytes) {
-    return reject('not-smaller')
+    return await reject('not-smaller')
   }
 
   if (!fromTable) {
@@ -274,7 +330,11 @@ async function adopt(
       await input.store.write(sessionId, key, {
         text: answer.text,
         quotes: answer.quotes,
-        model: answer.model,
+        // The model we asked, not the one the answer claims: the key is built
+        // from `route.model`, and a self-reported name that differs would pin
+        // the product under a key no lookup ever computes.
+        model: input.route?.model ?? answer.model,
+        spill: { locator: ref.locator, retrievalHint: ref.retrievalHint },
       })
     } catch {
       return { content: null, code: 'distill-failed', mode: 'fallback', evidence: { ...evidence, adopted: false } }
@@ -315,6 +375,17 @@ export async function decide(input: DecideInput): Promise<DistillOutcome | null>
 
   const key = keyFor(input.text, question, route.model)
   const pinned = await input.store.read(key)
+  if (pinned !== undefined && typeof pinned.rejected === 'string') {
+    // A pinned refusal: the answer arrived and was refused, so the replay reads
+    // the tombstone instead of paying for the same call.
+    const reason = pinned.rejected as DistillRejectReason
+    return {
+      content: null,
+      code: `distill-rejected:${reason}` as DistillCode,
+      mode: 'fallback',
+      evidence: { called: false, adopted: false, model: pinned.model, reason },
+    }
+  }
   if (pinned !== undefined) {
     return adopt(
       input,
@@ -323,6 +394,7 @@ export async function decide(input: DecideInput): Promise<DistillOutcome | null>
       { text: pinned.text, quotes: pinned.quotes, model: pinned.model },
       { called: false, adopted: false, model: pinned.model },
       true,
+      pinned.spill,
     )
   }
 
@@ -352,7 +424,11 @@ export async function decide(input: DecideInput): Promise<DistillOutcome | null>
     // the hook would pass the request through and a late answer would never
     // be observed.
     requestOptions = input.requestOptions?.(request)
-    started = Promise.resolve().then(() => distill.call(request))
+    // Hand the caller's object to the distiller so exactly one `GenerateOptions`
+    // reaches the host: the registry keys on identity, and a second object would
+    // register an entry nothing ever parks or deletes.
+    const call = requestOptions === undefined ? request : { ...request, options: requestOptions }
+    started = Promise.resolve().then(() => distill.call(call))
   } catch {
     started = Promise.reject(new Error('distillation request could not be built'))
   }
@@ -398,9 +474,17 @@ export async function decide(input: DecideInput): Promise<DistillOutcome | null>
   return adopt(
     input,
     question,
-    keyFor(input.text, question, model),
+    // The key the *lookup* computes, not one built from the answer's claim: a
+    // product pinned under a self-reported model name is never found again.
+    keyFor(input.text, question, route.model),
     { text: answer.text, quotes: answer.quotes, model },
-    { called: true, adopted: false, model, ...(tokens === undefined ? {} : { tokens }) },
+    {
+      called: true,
+      adopted: false,
+      model,
+      inputChars: Array.from(input.text).length,
+      ...(tokens === undefined ? {} : { tokens }),
+    },
     false,
   )
 }

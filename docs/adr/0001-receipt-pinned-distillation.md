@@ -27,3 +27,19 @@ accepted（2026-11-23）
 - **跨机器不保证**：产物跟着 `dshHome` 走，换机器 fork 同一会话会重算，字节可能不同。那台机器本来也是冷缓存，影响有限，但**不能声称跨机器一致**。
 - **产物需要清理**：与收据同生命周期、同淘汰策略。
 - 这条约束由 `AGENTS.md` 的「变换必须只追加」与 `test/projection-determinism.test.ts` 承载；二期蒸馏落地时必须复用同一套测试思路，而不是新写一套。
+
+## Replay is a decision, not only an adoption
+
+A refusal is pinned too. `empty`, `unverifiable` and `not-smaller` write a
+bodyless tombstone under the same `(receipt, question, version)` key, so a replay
+reads the refusal instead of paying for the same call again. `timeout` is
+deliberately not pinned: it has no answer, and the parked call exists precisely
+so a late answer can still land.
+
+The product also pins the spill handle (`locator` + `retrievalHint`), because the
+host backend names each artifact with `randomBytes(6)`: re-spilling on a replay
+would change the footer — the half of the view the model reads — and the bytes
+would no longer be the ones that entered history.
+
+Deleting the product file is the documented way to make one receipt eligible
+again.

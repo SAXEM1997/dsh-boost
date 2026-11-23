@@ -102,8 +102,9 @@ workspace UUID，不是路径；找不到时单用户机器可以用 `"mode": "g
 
 蒸馏（receipt distillation，ADR 0001）的收据：**被采用时写的是 `code: 'projected'`**（`kind: 'projection'`）
 加 `mode: 'adopted'` 与 `distill_*` 字段——对账本读者它就是这条回执的投影，`distill` 只是决策名，不是收据码。
-未采用时写 `distill-failed`、`distill-rejected:timeout`、`distill-rejected:unverifiable`、
-`distill-rejected:not-smaller`。逐条含义与处置见 [发布说明](docs/RELEASE.md) 的「收据 `code`：
+未采用时写 `distill-failed`、`distill-rejected:empty`、`distill-rejected:timeout`、
+`distill-rejected:unverifiable`、`distill-rejected:not-smaller`。被拒的三种（`empty`/`unverifiable`/
+`not-smaller`）会钉一条无正文的墓碑，重放读它而不重新调模型；`timeout` 不钉，好让迟到的答案仍能落地。逐条含义与处置见 [发布说明](docs/RELEASE.md) 的「收据 `code`：
 跳过与重置」一节。
 
 写入与 `boost` 工具的 `scope-set` 走**同一个** CAS，所以两边改都不会互相覆盖；别人先改了，

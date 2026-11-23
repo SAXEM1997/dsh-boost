@@ -34,7 +34,9 @@ test('write 后 read 得到同一产物：text/quotes/model 逐字相同', async
   assert.equal(got.text, PRODUCT.text)
   assert.deepEqual(got.quotes, PRODUCT.quotes)
   assert.equal(got.model, PRODUCT.model)
-  assert.equal(typeof got.createdAt, 'string')
+  // No wall-clock field: the product file must be reproducible from its inputs
+  // alone, so the determinism scan can cover `src/distill/` wholesale.
+  assert.equal('createdAt' in got, false)
 })
 
 test('文件位置与内容形状：<root>/distilled/<receipt>-<question>-<version>.json', async () => {
@@ -43,7 +45,7 @@ test('文件位置与内容形状：<root>/distilled/<receipt>-<question>-<versi
   await store.write('s1', { file: 'r1-q1-v1' }, PRODUCT)
   const path = join(dir, 'distilled', 'r1-q1-v1.json')
   const parsed = JSON.parse(await readFile(path, 'utf8'))
-  assert.deepEqual(Object.keys(parsed).sort(), ['createdAt', 'model', 'quotes', 'text'])
+  assert.deepEqual(Object.keys(parsed).sort(), ['model', 'quotes', 'text'])
   assert.equal(parsed.text, PRODUCT.text)
 })
 

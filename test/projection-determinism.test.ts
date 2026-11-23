@@ -196,6 +196,16 @@ test('projection path must not read clocks or randomness (prefix stability)', as
     sources.push({ label: `src/projection/${file}`, source: await readFile(join(projectionDir, file), 'utf8') })
   }
 
+  // Distillation (ADR 0001) decides a receipt's bytes too, so it is scanned by
+  // the same rule. Its products carry no timestamp — the audit trail lives in
+  // the receipt, which is where every other wall-clock stamp in this plugin is.
+  const distillDir = join(ROOT, 'src/distill')
+  const distillFiles = (await readdir(distillDir)).filter(name => name.endsWith('.ts')).sort()
+  assert.deepEqual(distillFiles, ['attempt.ts', 'decide.ts', 'llm.ts', 'pin.ts', 'store.ts', 'types.ts'])
+  for (const file of distillFiles) {
+    sources.push({ label: `src/distill/${file}`, source: await readFile(join(distillDir, file), 'utf8') })
+  }
+
   // The projection call site, not the whole hook: `post-execute` legitimately
   // stamps receipt timestamps with the wall clock elsewhere.
   const postExecute = await readFile(join(ROOT, 'src/hooks/post-execute.ts'), 'utf8')

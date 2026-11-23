@@ -34,6 +34,14 @@ export interface DistillRequest {
   key: DistillKey
   /** The session the request belongs to; recorded for audit. */
   sessionId: string
+  /**
+   * The exact `GenerateOptions` object to send, when the caller built one.
+   *
+   * One object per call is the whole point: the parking registry keys on the
+   * object identity the `llm/stream` hook sees, so building a second one inside
+   * the distiller would register two entries per call — one parked, one leaked.
+   */
+  options?: object
 }
 
 /** The model's answer: a distilled body and the verbatim fragments it rests on. */

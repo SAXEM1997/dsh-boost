@@ -2036,7 +2036,10 @@ function distillReceiptCode(outcome: DistillOutcome): string {
  * counts; `distill_calls` is `1` only when this invocation called the model, so
  * a table hit is visible as a product that was adopted but not paid for;
  * `distill_tokens` and `distill_saved_tokens` are omitted — never zeroed —
- * when the model or the meter did not report a number.
+ * when the model or the meter did not report a number. `distill_input_chars`
+ * is the receipt body the call read: the prompt is the larger half of the cost
+ * and an auxiliary request is never observed by the usage ledger, so its size
+ * is the only honest record of what the call consumed.
  */
 function distillEvidence(outcome: DistillOutcome, omittedCodePoints?: number): Record<string, unknown> {
   const e = outcome.evidence
@@ -2044,6 +2047,7 @@ function distillEvidence(outcome: DistillOutcome, omittedCodePoints?: number): R
     mode: outcome.mode === 'adopted' ? 'adopted' : e.reason !== undefined ? 'rejected' : 'fallback',
     distill_calls: e.called ? 1 : 0,
     ...(e.tokens === undefined ? {} : { distill_tokens: e.tokens }),
+    ...(e.inputChars === undefined ? {} : { distill_input_chars: e.inputChars }),
     ...(outcome.omittedBytes === undefined ? {} : { distill_omitted_bytes: outcome.omittedBytes }),
     ...(outcome.distillBytes === undefined ? {} : { distill_bytes: outcome.distillBytes }),
     ...(omittedCodePoints === undefined ? {} : { distill_omitted_code_points: omittedCodePoints }),
@@ -2072,6 +2076,10 @@ async function distillDecision(
   // service, so the projection path is exactly the 0.2.7 path.
   const distillation = deps.config?.distillation
   if (distillation === undefined || distillation.enabled !== true) return null
+  // Error receipts are refused by the projection path for the same reason
+  // (`projectApply`'s `'error-receipt'`): their text is the diagnostic a model
+  // must read verbatim, so nothing may replace it with a summary.
+  if (ctx.result !== undefined && (ctx.result as { isError?: unknown }).isError === true) return null
   if (!Array.isArray(distillation.families) || !distillation.families.includes(family)) return null
   // A plugin wired without a store still distils, but cannot pin the answer.
   // `distillStoreOf` lets a caller bind the root lazily; a store with no root
@@ -2237,11 +2245,6 @@ async function projectDecision(
   // carry `estimate:'unknown'` and no fabricated numbers.
   const estimate = estimatorOf(deps)
 
-  // Ticket #10: a family the configuration lists may try distillation first.
-  // `null` means "not a candidate" — the whole path below is exactly the
-  // pre-distillation projection, byte for byte.
-  const distillation = await distillDecision(deps, ctx, family, target)
-
   try {
     if (mode === 'shadow') {
       const outcome = await projectShadow({
@@ -2283,6 +2286,15 @@ async function projectDecision(
       return decision
     }
 
+    // Ticket #10: a family the configuration lists may try distillation first.
+    // `null` means "not a candidate" — the path below is exactly the
+    // pre-distillation projection, byte for byte.
+    //
+    // This runs only on the apply path. In shadow mode the model is not asked
+    // anything, so a distillation there would pay for a model call, spill the
+    // original and pin a product that never reaches a receipt — design §5.4's
+    // "shadow must not write" applies to every writer, not just the spill.
+    const distillation = await distillDecision(deps, ctx, family, target)
     if (distillation !== null) {
       // `distillDecision` already spilled the original and wrote the product:
       // an adopted body replaces the receipt here, and anything else falls
