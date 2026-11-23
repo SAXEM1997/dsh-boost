@@ -2315,3 +2315,33 @@ test('#10 蒸馏收据带 distill_mode，status 据此计 calls/tokens/adopted/r
   assert.equal(status.distill.rejected, 0)
   assert.equal(status.distill.fallback, 0)
 })
+
+test('#10 mode=late 的收据只加 token：不算 calls、不算任何结局', async () => {
+  // A timed-out call writes its own receipt (calls: 1, tokens: absent). When its
+  // answer lands afterwards it writes a second line; if that line also counted a
+  // call the two would disagree with the one model request that happened.
+  const { runBoost } = await import('../src/tools/boost.ts')
+  const env = await distillSetup()
+  const late = [
+    { kind: 'skip', code: 'distill-late', mode: 'late', distill_calls: 0, distill_tokens: 42, distill_input_chars: 9000 },
+  ]
+  const result = await runBoost({
+    args: { cmd: 'status' },
+    scope: env.deps.scope,
+    receipts: {
+      scan: async function* () {
+        yield* late as Any[]
+      },
+      readErrors: () => 0,
+      scanTruncated: () => false,
+      stopped: () => false,
+    } as Any,
+  })
+  assert.equal(result.ok, true)
+  const status = (result as Any).data
+  assert.equal(status.distill.tokens, 42, 'the late call\'s cost is now visible')
+  assert.equal(status.distill.calls, 0, 'no extra call is claimed')
+  assert.equal(status.distill.adopted, 0)
+  assert.equal(status.distill.rejected, 0)
+  assert.equal(status.distill.fallback, 0)
+})

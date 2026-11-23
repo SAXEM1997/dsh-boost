@@ -120,7 +120,8 @@ Receipts for distillation (receipt distillation, ADR 0001): an **adopted** disti
 `code: 'projected'` (`kind: 'projection'`) plus `mode: 'adopted'` and the `distill_*` fields — to a
 ledger reader it *is* this receipt's projection; `distill` names the decision, not a receipt code.
 Not adopted writes `distill-failed`, `distill-rejected:empty`, `distill-rejected:timeout`,
-`distill-rejected:unverifiable` or `distill-rejected:not-smaller`. The three refusals
+`distill-rejected:unverifiable` or `distill-rejected:not-smaller`; a call whose answer lands after its
+timeout writes a separate `distill-late` line. The three refusals
 (`empty`/`unverifiable`/`not-smaller`) pin a bodyless tombstone that a replay reads instead of paying
 for the call again; `timeout` is never pinned, so a late answer can still land. Meaning and remedy per code: the receipt-code table in
 [the release notes](docs/RELEASE.md).

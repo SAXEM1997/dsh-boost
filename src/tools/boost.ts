@@ -719,7 +719,15 @@ async function aggregate(
     // A distillation decision is the receipt's own `mode`: `adopted` when its
     // body is in history, `rejected` when a named gate refused it, `fallback`
     // when nothing usable came back (no model, a throw, a failed write).
-    if (receipt.mode === 'adopted' || receipt.mode === 'rejected' || receipt.mode === 'fallback') {
+    // `late` is a timed-out call whose answer landed afterwards. Its own receipt
+    // carries no call (`distill_calls: 0`) and no outcome — the timeout line
+    // already counted both — so only the token totals move.
+    if (receipt.mode === 'late') {
+      const lateTokens = receipt.distill_tokens
+      if (typeof lateTokens === 'number' && Number.isFinite(lateTokens) && lateTokens >= 0) {
+        distill.tokens += lateTokens
+      }
+    } else if (receipt.mode === 'adopted' || receipt.mode === 'rejected' || receipt.mode === 'fallback') {
       if (receipt.mode === 'adopted') distill.adopted += 1
       else if (receipt.mode === 'rejected') distill.rejected += 1
       else distill.fallback += 1

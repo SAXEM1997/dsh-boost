@@ -35,6 +35,13 @@ export interface DistillRequest {
   /** The session the request belongs to; recorded for audit. */
   sessionId: string
   /**
+   * The turn the receipt belongs to.
+   *
+   * Carried so a *late* answer — one that lands after its timeout already wrote
+   * a receipt — can still be recorded against the turn it was spent for.
+   */
+  turn?: number
+  /**
    * The exact `GenerateOptions` object to send, when the caller built one.
    *
    * One object per call is the whole point: the parking registry keys on the

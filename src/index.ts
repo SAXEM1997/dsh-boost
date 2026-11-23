@@ -38,6 +38,8 @@ import { AnchorStore } from './gate/invalidate.js'
 import type { Plan } from './gate/plan.js'
 import { resolveBoostRoot } from './host/root.js'
 import { DistillAttempts } from './distill/attempt.js'
+import type { LateProduct } from './distill/attempt.js'
+import { appendReceipt } from './hooks/session-state.js'
 import { createLlmDistiller, distillRequestOptions } from './distill/llm.js'
 import { DistillStore } from './distill/store.js'
 import { clearSession, SessionRuntime } from './hooks/llm-stream.js'
@@ -1407,7 +1409,23 @@ export function apply(ctx: PluginContext, config: unknown): void {
     // persists a timed-out call's answer when it lands. Both are inert while
     // `distillation.enabled` is false, which is the default.
     const distillStore = new DistillStore(root)
-    const distillAttempts = new DistillAttempts(distillStore)
+    // A timed-out call already wrote its own receipt, so its eventual answer's
+    // cost cannot be added there. It gets its own line instead: `mode: 'late'`
+    // moves only the token totals, never `calls` or the outcome counts.
+    const distillAttempts = new DistillAttempts(distillStore, (late: LateProduct) => {
+      void appendReceipt(deps, {
+        ts: new Date().toISOString(),
+        sessionId: late.sessionId,
+        turn: late.turn,
+        kind: 'skip',
+        code: 'distill-late',
+        mode: 'late',
+        distill_calls: 0,
+        model: late.model,
+        ...(late.tokens === undefined ? {} : { distill_tokens: late.tokens }),
+        ...(late.inputChars === undefined ? {} : { distill_input_chars: late.inputChars }),
+      })
+    })
     /** Session id → workspace id, populated by the visibility warm. */
     const workspaces = new Map<string, string>()
     /** Session id → the route the selector call inherits. */

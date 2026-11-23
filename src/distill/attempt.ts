@@ -44,6 +44,24 @@ interface CallIdentity {
   question: DistillQuestion
   /** The owning session; the write is attributed to it. */
   sessionId: string
+  /** The turn the call was spent for; `0` when the caller had none. */
+  turn?: number
+}
+
+/**
+ * What a late answer cost, handed to the receipt writer.
+ *
+ * A timed-out call already wrote its own receipt, so its cost cannot be added
+ * there. It is recorded as its own line instead: `calls` stays `0` (this line
+ * made no call) and only the token totals move, which is exactly the gap the
+ * RELEASE note used to admit.
+ */
+export interface LateProduct {
+  sessionId: string
+  turn: number
+  model: string
+  tokens?: number
+  inputChars?: number
 }
 
 
@@ -56,9 +74,11 @@ interface CallIdentity {
 export class DistillAttempts {
   private readonly entries = new Map<object, CallIdentity & { settled?: Promise<DistillAnswer | undefined> }>()
   private readonly store: DistillStore
+  private readonly onLate: ((product: LateProduct) => void) | undefined
 
-  constructor(store: DistillStore) {
+  constructor(store: DistillStore, onLate?: (product: LateProduct) => void) {
     this.store = store
+    this.onLate = onLate
   }
 
   /**
@@ -123,5 +143,18 @@ export class DistillAttempts {
       quotes: answer.quotes,
       model: call.model,
     })
+    // Only after the product is on disk: a receipt that claims a cost the table
+    // cannot back is worse than a missing line.
+    try {
+      this.onLate?.({
+        sessionId: call.sessionId,
+        turn: call.turn ?? 0,
+        model: call.model,
+        ...(answer.tokens === undefined ? {} : { tokens: answer.tokens }),
+        inputChars: Array.from(call.text).length,
+      })
+    } catch {
+      // Evidence, never a precondition.
+    }
   }
 }

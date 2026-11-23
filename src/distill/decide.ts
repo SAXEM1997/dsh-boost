@@ -77,6 +77,8 @@ export interface DecideInput {
   cfg: BoostConfig
   /** The owning session, which also names the products it wrote. */
   sessionId: string
+  /** The turn the receipt belongs to; carried so a late answer can be receipted. */
+  turn?: number
   /** The product table. */
   store: DistillStore
   /** The model call, or `undefined` when the host has no LLM (then `distill-failed`). */
@@ -408,6 +410,7 @@ export async function decide(input: DecideInput): Promise<DistillOutcome | null>
     timeoutMs: input.cfg.distillation.timeoutMs,
     key,
     sessionId: input.sessionId,
+    ...(input.turn === undefined ? {} : { turn: input.turn }),
   }
   // `settled` is created **before** anything else can await, so a time-bounded
   // caller (the parked branch below) already holds a promise that will fire

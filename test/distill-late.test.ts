@@ -182,3 +182,34 @@ test('超时后的答案在落地时落盘：下一次渲染命中钉住产物�
   assert.ok(env.parked.seen.length >= 1)
   for (const request of env.parked.seen) assert.equal(request.purpose, DISTILL_PURPOSE)
 })
+
+test('迟到答案落盘后写一条 mode=late 的收据：只有 token，没有 calls', async () => {
+  // The timeout receipt already counted the call and the outcome, so the late
+  // answer's own line must move only the token totals — otherwise `calls`
+  // double-counts and the RELEASE note's "adopted > 0 with tokens: 0" stays true
+  // forever.
+  const dir = await mkdtemp(join(tmpdir(), 'dsh-late-receipt-'))
+  const store = new DistillStore(dir)
+  const late: Array<Record<string, unknown>> = []
+  const attempts = new DistillAttempts(store, (product) => late.push(product as never))
+  const options = { purpose: DISTILL_PURPOSE }
+  const question = questionOf('bash')!
+  attempts.register(options, {
+    model: 'deepseek-flash',
+    text: 'line1\nnpm ERR! boom\nline3',
+    question,
+    sessionId: SESSION,
+    turn: 4,
+  })
+  let settle: (answer: unknown) => void = () => {}
+  const settled = new Promise((resolve) => { settle = resolve })
+  attempts.park(options, settled as never)
+  settle({ text: 'npm ERR! boom', quotes: ['npm ERR! boom'], model: 'deepseek-flash', tokens: 77 })
+  await new Promise((resolve) => setTimeout(resolve, 20))
+  assert.equal(late.length, 1, 'the late answer reports itself once')
+  const product = late[0]!
+  assert.equal(product.tokens, 77)
+  assert.equal(product.turn, 4)
+  assert.equal(product.sessionId, SESSION)
+  assert.equal(product.inputChars, Array.from('line1\nnpm ERR! boom\nline3').length)
+})

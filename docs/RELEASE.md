@@ -492,7 +492,7 @@ JSON 体返回一个码，页面据码决定说什么。`ERR_CLIENT_*` 是页面
 | `selector-error` | 选择器调用失败（派发错误）而弃权 | 查 LLM 路由与日志；与“选择器正常但没标签”区分 |
 | `selector-abstain` | 选择器没给出标签或超时，不是调用失败 | 正常弃权；多候选时替换不提交 |
 | `distill-failed` | 蒸馏没产出可用结果：宿主没有 `ctx.llm`、没有路由（`route: null` 且没有边界路由）、调用抛错、解析不出 JSON、产物落盘失败或页脚/ spill 拼不出来。回执 `mode:'fallback'`；历史里仍是投影（或不投影）的原文 | 看 `distill_calls`：`1` 说明模型被调过、失败在解析或落盘；`0` 说明根本没调（缺服务/路由）。不映射到新的 `degraded` 码，宿主缺 `llm` 就是 `ERR_HOST_SELECTOR_UNAVAILABLE` 那条路 |
-| `distill-rejected:timeout` | 超过 `distillation.timeoutMs` 没有回答；迟到的答案仍会落盘（`llm/stream` 观察到被登记的那次调用），所以重放不会重复计费。**代价**：这次调用的 token 不进 `status.distill.tokens`——回执在超时时已经写成 timeout，晚到的产物只在下次渲染命中时体现为 `distill_calls: 0` 的采用，所以 `adopted > 0` 与 `tokens: 0` 可能同时出现 | 偶尔出现是正常；持续出现说明 `timeoutMs` 对当前路由太短，或路由挂了 |
+| `distill-rejected:timeout` | 超过 `distillation.timeoutMs` 没有回答；迟到的答案仍会落盘（`llm/stream` 观察到被登记的那次调用），所以重放不会重复计费。晚到的调用另写一条 `code: distill-late` / `mode: late` 的收据，只把它的 `distill_tokens` 与 `distill_input_chars` 加进 `status.distill`——`calls` 与结局计数留在超时那条上，不重复 | 偶尔出现是正常；持续出现说明 `timeoutMs` 对当前路由太短，或路由挂了 |
 | `distill-rejected:empty` | 答案正文为空（或只有空白）。空正文能通过其余每一道门——它平凡地是原文的子串，而 marker + 页脚远短于截断视图——所以单独拒绝，且在落盘原文之前拒绝 | 模型没按 JSON 契约给正文。看 `distill_tokens`；必要时收紧 `maxOutputTokens` 或换 `distillation.route` |
 | `distill-rejected:unverifiable` | 答案里有引用不是原文的非空子串（伪造），或落盘产物被改过 | 模型在编引用。看同一模型的 `distill_tokens` 与 `adopted` 比例；必要时换 `distillation.route` |
 | `distill-rejected:not-smaller` | 蒸馏正文 + 页脚按 UTF-8 字节不短于同回执的截断视图，净赚为负，不采用 | 正常门；持续出现说明该族的正文太长（`maxOutputTokens` 没约束住），收紧它 |
