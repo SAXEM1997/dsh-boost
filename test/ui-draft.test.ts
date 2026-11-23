@@ -9,6 +9,7 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import {
   disableReasons,
+  distillStateOf,
   draftOf,
   isDirty,
   isTicked,
@@ -18,6 +19,7 @@ import {
   staleWorkspaceIds,
   toggleTicked,
 } from '../ui/src/draft.ts'
+import type { BoostConfig } from '../src/types.ts'
 
 const doc = (over: Record<string, unknown> = {}) => ({
   ok: true as const,
@@ -166,4 +168,17 @@ test('勾选按工作区 id，不按路径', () => {
 
   const unticked = toggleTicked(ticked, entry)
   assert.deepEqual(unticked.workspaceIds, [])
+})
+
+// The distill card has three operator facts to tell apart, and the page must
+// never collapse the two it cannot answer into "off". This pins the boundary:
+// no config = unknown, config without the section = absent (older build), only
+// the third can answer whether distillation is on.
+test('distillStateOf 区分「不知道」与「这个构建没有该段」', () => {
+  assert.equal(distillStateOf(undefined), 'unknown')
+  assert.equal(distillStateOf({} as BoostConfig), 'absent')
+  assert.equal(distillStateOf({ distillation: null } as unknown as BoostConfig), 'absent')
+  assert.equal(distillStateOf({ distillation: 'no' } as unknown as BoostConfig), 'absent')
+  assert.equal(distillStateOf({ distillation: { enabled: false } } as unknown as BoostConfig), 'present')
+  assert.equal(distillStateOf({ distillation: { enabled: true } } as unknown as BoostConfig), 'present')
 })

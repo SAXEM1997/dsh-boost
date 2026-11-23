@@ -75,6 +75,32 @@ test('the gate accepts a host package resolved through require', () => {
   assert.doesNotThrow(() => assertClientBundleText(text, PACKAGE_NAME))
 })
 
+test('the gate accepts a host package resolved through a deconflicted resolver name', () => {
+  // Rollup renames the factory parameter when the bundle binds `require`
+  // itself, and the real artifact ships `factory: (require2) =>`. Matching only
+  // the literal `require` rejected that legitimate call.
+  const text = mutated((s) =>
+    s
+      .replace('factory: (require) =>', 'factory: (require2) =>')
+      .replace(/\brequire\("/g, 'require2("')
+      .replace(
+        'exports.apply =',
+        'const tools = require2("@deepseek-ai/dsh-tools");\n    exports.apply =',
+      ),
+  )
+  assert.doesNotThrow(() => assertClientBundleText(text, PACKAGE_NAME))
+})
+
+test('the gate still rejects a bare host import even when the resolver is renamed', () => {
+  const text = mutated((s) =>
+    s
+      .replace('factory: (require) =>', 'factory: (require2) =>')
+      .replace(/\brequire\("/g, 'require2("')
+      .replace('exports.apply =', 'import { x } from "@deepseek-ai/dsh-tools";\n    exports.apply ='),
+  )
+  assert.throws(() => assertClientBundleText(text, PACKAGE_NAME), /outside `require\(\.\.\.\)`/)
+})
+
 test('the gate rejects a bundle that never resolves React through the host', () => {
   const text = mutated((s) => s.replace('require("react/jsx-runtime")', 'jsxRuntime'))
   assert.throws(() => assertClientBundleText(text, PACKAGE_NAME), /never resolves React/)

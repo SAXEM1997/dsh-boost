@@ -6,7 +6,7 @@ checkout with the development dependencies installed.
 
 ## Session statistics
 
-`npm run stats` prints npm's own banner (`> dsh-boost@0.2.3 stats` and the
+`npm run stats` prints npm's own banner (`> dsh-boost@0.3.2 stats` and the
 command line) on **stdout** before the JSON, so it must not be piped directly.
 For a machine-readable stream use one of the quiet forms:
 
@@ -69,9 +69,10 @@ lifecycle scripts. It installs the tarball into a throwaway project with
   literal and the host preflight range cannot drift apart;
 - no shipped `.d.ts` imports `@deepseek-ai/*`. Host packages are
   devDependencies, so a published declaration that names them would break a
-  consumer's `skipLibCheck: false` typecheck. Only `dist/index.d.ts` and
-  `dist/types.d.ts` ship; `package.json` `files` excludes the internal
-  declarations with `!dist/**/*.d.ts` and re-includes the public two;
+  consumer's `skipLibCheck: false` typecheck. Only `dist/index.d.ts`,
+  `dist/types.d.ts` and `dist/distill/types.d.ts` ship; `package.json` `files`
+  excludes the internal declarations with `!dist/**/*.d.ts` and re-includes
+  the public three;
 - the ESM import, the `require()` path, `name`/`inject`/`apply`, the
   `./package.json` + `./locale/*.json` export subpaths, and a tiny TypeScript
   consumer.

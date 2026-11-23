@@ -11,9 +11,9 @@
  * measurement.
  */
 import { copyOf, adviceFor, type Copy } from './copy'
-import { configOf, envelopeOf } from './draft'
+import { configOf, distillStateOf, envelopeOf } from './draft'
 import { useT } from './i18n'
-import { useCallback, useEffect, useState, type ReactNode } from 'react'
+import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react'
 import { fetchState, type StateResult } from './api'
 import { ScopeForm } from './ScopeForm'
 
@@ -131,16 +131,25 @@ export function App() {
   const t = useT()
   const c = copyOf(t)
 
+  // A manual reload must cancel the read it supersedes: otherwise two
+  // responses can land out of order and the older one wins, which reads as
+  // "the change I just saved did not take".
+  const inFlight = useRef<AbortController | undefined>(undefined)
+
   const load = useCallback(() => {
+    inFlight.current?.abort()
     const controller = new AbortController()
+    inFlight.current = controller
     setPending(true)
     void fetchState(controller.signal)
       .then(next => {
+        if (controller.signal.aborted) return
         setResult(next)
         setPending(false)
       })
       .catch(() => {
         // Abort: the component is gone or a newer read replaced this one.
+        if (controller.signal.aborted) return
         setPending(false)
       })
     return () => controller.abort()
@@ -183,6 +192,10 @@ export function App() {
   const configGroups = grouped(flatten(config))
   const distill = config?.distillation
   const distillStatus = status?.distill
+  // `distillState` answers the operator's question (unknown / absent / present);
+  // `distillKnown` is the same fact phrased for the type system so the rows
+  // below can read `distill` without a guard each.
+  const distillState = distillStateOf(config)
   const distillKnown = distill !== undefined
   const distillOn = distill?.enabled === true
 
@@ -281,7 +294,16 @@ export function App() {
           <Card title={c.SECTION_DISTILL} meta={distillKnown ? (distillOn ? c.DISTILL_ON : c.DISTILL_OFF) : undefined}>
             {distillKnown ? null : (
               <p className="boost-settings__muted">
-                {c.CONFIG_UNAVAILABLE_CODE} <code>{configCode ?? ''}</code>
+                {distillState === 'unknown' ? (
+                  <>
+                    {c.CONFIG_UNAVAILABLE_CODE} <code>{configCode ?? c.UNKNOWN}</code>
+                  </>
+                ) : (
+                  // The config parsed; only this section is missing. Saying
+                  // "could not read the config" here would be a false alarm
+                  // about a host that answered fine.
+                  c.DISTILL_NOT_IN_CONFIG
+                )}
               </p>
             )}
             {distillKnown ? (
@@ -290,7 +312,13 @@ export function App() {
                   <Row label={c.LABEL_DISTILL_ENABLED} value={distillOn ? c.DISTILL_ON : c.DISTILL_OFF} />
                   <Row
                     label={c.LABEL_DISTILL_FAMILIES}
-                    value={Array.isArray(distill.families) ? distill.families.join(', ') : c.UNKNOWN}
+                    value={
+                      Array.isArray(distill.families)
+                        ? distill.families.length === 0
+                          ? c.EMPTY_LIST
+                          : distill.families.join(', ')
+                        : c.UNKNOWN
+                    }
                   />
                   <Row
                     label={c.LABEL_DISTILL_TRIGGER}
@@ -339,7 +367,7 @@ export function App() {
             <p className="boost-settings__hint">{c.CONFIG_READONLY}</p>
             {configGroups.length === 0 ? (
               <p className="boost-settings__muted">
-                {c.CONFIG_UNAVAILABLE_CODE} <code>{configCode ?? ''}</code>
+                {c.CONFIG_UNAVAILABLE_CODE} <code>{configCode ?? c.UNKNOWN}</code>
               </p>
             ) : (
               configGroups.map(([group, rows]) => (

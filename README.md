@@ -63,7 +63,7 @@ dsh plugin --profile <name> add dsh-boost@^0.3.0 --registry=https://registry.npm
 
 `dsh plugin` 要求指定 profile，其余参数转发给该 profile 里的 pnpm（所以 pnpm 必须在 PATH
 上）；本地 checkout 安装先 `npm run build`，再把绝对路径传给 `add`。npmjs 上的 `latest` 是
-`0.3.0`；镜像可能滞后，在意 registry 时显式带上 `--registry`。版本历史、镜像与
+`0.3.2`；镜像可能滞后，在意 registry 时显式带上 `--registry`。版本历史、镜像与
 `0.0.0-stage` 的坑见[运维](docs/operating.md#安装与版本)。装完**必须重启 DSH**（插件在宿主
 启动时加载）；web profile 就是重启 `dsh web`。
 

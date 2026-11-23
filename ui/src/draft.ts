@@ -220,3 +220,18 @@ export function configOf(value: unknown): { config?: BoostConfig; code?: string 
   // No `ok` at all: the pre-envelope shape.
   return { config: value as BoostConfig }
 }
+
+/**
+ * Which of the three operator facts the distill card is looking at.
+ *
+ * They are not interchangeable: a config that could not be read is "I do not
+ * know whether distillation is on", a config without the section is "this
+ * host's build predates the feature", and only the third can answer the
+ * question. Rendering the first two as "off" tells the operator a fact that
+ * was never observed.
+ */
+export function distillStateOf(config: BoostConfig | undefined): 'unknown' | 'absent' | 'present' {
+  if (config === undefined) return 'unknown'
+  const section = (config as { distillation?: unknown }).distillation
+  return section === null || typeof section !== 'object' ? 'absent' : 'present'
+}

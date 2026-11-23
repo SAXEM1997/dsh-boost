@@ -39,13 +39,16 @@ import type { DisableReason } from './draft'
  * user can simply retry.
  */
 const REREAD_CODES = new Set([
+  // A conflict is cured by re-reading: the document moved, the draft did not.
   'ERR_SCOPE_REVISION_CONFLICT',
-  'ERR_SCOPE_LOCKED',
+  // A read failure may be transient (a torn shard, a permissions blip).
   'ERR_SCOPE_READ_FAILED',
-  'ERR_SCOPE_UNKNOWN_VERSION',
-  'ERR_SCOPE_FUTURE_VERSION',
-  'ERR_SCOPE_PARSE_FAILED',
 ])
+// Deliberately absent: LOCKED (waiting fixes it), UNKNOWN_VERSION /
+// FUTURE_VERSION (an upgrade or a downgrade fixes it) and PARSE_FAILED (the
+// file has to be repaired). Offering a re-read there would both fail to fix
+// the cause and throw the draft away, which is the one thing the form
+// promises never to do on failure.
 
 interface ScopeFormProps {
   /**
@@ -140,6 +143,14 @@ export function ScopeForm({ payload, scopeCode, hasSpill, onReload }: ScopeFormP
         <div className="boost-settings__card-body">
         <p className="boost-settings__muted" data-code={scopeCode ?? ''}>
           {scopeCode === undefined ? c.UNAVAILABLE_REGISTRY : adviceFor(t, scopeCode)}
+          {/* The code is the only part a maintainer can act on, so it is shown,
+              not hidden in a data attribute. */}
+          {scopeCode === undefined ? null : (
+            <>
+              {' '}
+              <code>{scopeCode}</code>
+            </>
+          )}
         </p>
         <BlockedBy reasons={reasons} />
         </div>
@@ -194,7 +205,7 @@ export function ScopeForm({ payload, scopeCode, hasSpill, onReload }: ScopeFormP
         </legend>
         {workspaces?.available === false ? (
           <p className="boost-settings__muted" data-code={workspaces.code}>
-            {adviceFor(t, workspaces.code)}
+            {adviceFor(t, workspaces.code)} <code>{workspaces.code}</code>
           </p>
         ) : entries.length === 0 ? (
           <p className="boost-settings__muted">{c.HINT_NO_WORKSPACES_TO_PICK}</p>

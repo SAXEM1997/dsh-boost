@@ -8,6 +8,41 @@ This file records user-visible changes. Format follows Keep a Changelog; version
 Design rationale lives in `docs/superpowers/specs/`; the release-acceptance procedure is in
 `docs/RELEASE.md`.
 
+## [0.3.3] - 2026-11-23
+
+### 修复
+
+- **设置页把「读不到」渲染成「已关闭」**：`/state` 的 `config` 在没有 `distillation` 段的宿主上
+  会被判成读失败，于是蒸馏开关显示「已关闭」、其余字段显示「未测量」——把一个没观测到的事实说成
+  观测到了。现在分三态：读不到 / 这个构建没有该段 / 有这个段，三种各说各的。
+- **「读不到生效配置」旁边的码显示成字面量 `{code}`**：占位符没有被替换。文案不再带占位符，码单独
+  渲染；读失败时也不再显示空码。
+- **`ERR_HOST_NO_SPILL` 的处置文案说反了**：原文说「投影只保留截断文本、不保存原文」，实际是没有
+  spill 后端时**投影被跳过、原文完整保留**。这是一条会让人误以为丢了数据的安全向假警报。
+- **「重新读取」按钮出现在重读修不了的失败上**：版本不支持、解析失败、锁被占用这三类失败下，按钮
+  既修不好问题又会丢掉草稿。现在只在冲突与读失败时出现。
+- **手动重读不取消上一次请求**：两次响应可能乱序落地，旧的覆盖新的，读起来像「刚保存的没生效」。
+- **发布门会误拒合法的宿主 `require`**：rollup 会把工厂参数改名成 `require2`（bundle 自己绑定了
+  `require` 时），旧正则只认字面 `require`，于是把合法调用判成裸 import。现在按「任意标识符 + 字符串
+  字面量」剥离，并补了改名解析器的正反两例。
+- 空 `distillation.families` 渲染成空白（读起来像「没配置」），现在渲染「（无）」。
+- 替换账的上下界文案用严格「高于/低于」，改成「不低于/不高于」——无回放时两者可以相等。
+- 「常驻开销」写「每次请求」，但 778 是协议段 + 工具 schema 的**合计**；当前作用域下实际每请求只付
+  其中一部分。标签改「（合计）」，提示里说明。
+
+### 文档
+
+- `AGENTS.md` 的「错误码同步三处码表」改为「`docs/RELEASE.md` 是唯一权威表」——README 从来没有
+  码表，规则指向了不存在的东西。
+- `docs/operating.md` 补蒸馏一节（六个键、`status.distill` 六个字段、收据码、净赚门的已知偏差、
+  回退与产物生命周期），并逐字段定义 `projection_gross_tokens` / `projectionGross` /
+  `projectionNet` / `retrievals` 四个数为什么不是同一个数。
+- `docs/how-it-works.md` 补蒸馏一章（四道硬约束与为什么需要钉住）。
+- 版本串与计数：README×2 的 `latest`、`operating.md` 的安全钉法与历史版本列表、`RELEASE.md` 的
+  安装规格与版本记录（补 0.2.2/0.3.1/0.3.2）、发货声明文件「两个」改「三个」、
+  `RELEASE.md` 里描述 0.3.2 修掉的那个 bug 的旧措辞、收据表补 `skip:no-scope` 与四个
+  `projection-skipped:*`。
+
 ## [0.3.2] - 2026-11-23
 
 ### 修复

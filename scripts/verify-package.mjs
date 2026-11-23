@@ -370,7 +370,13 @@ export function assertClientBundleText(text, id) {
   // and a copy that is actually inlined erases the specifier entirely, so this
   // clause can only police the literal form. Strip the allowed calls, then
   // reject any remaining mention.
-  const withoutRequires = text.replace(/\brequire\(\s*["'`][^"'`]*["'`]\s*\)/g, 'require()')
+  // The resolver parameter is not always named `require`: rollup deconflicts
+  // it against the bundle's own bindings and emits `require2` (or `require3`)
+  // when a module happens to bind `require`. Matching only the literal
+  // `require` rejected those legitimate calls, so the name is whatever the
+  // factory signature declares -- any identifier followed by a string literal
+  // argument.
+  const withoutRequires = text.replace(/\b[A-Za-z_$][\w$]*\(\s*["'`][^"'`]*["'`]\s*\)/g, 'RESOLVE()')
   if (/@deepseek-ai\//.test(withoutRequires)) {
     throw new Error(
       'client bundle names an @deepseek-ai/* package outside `require(...)`: the shell already ' +

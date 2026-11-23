@@ -24,29 +24,31 @@
 `dsh plugin` 要求指定 profile，剩下的参数原样转发给该 profile 目录里的 pnpm：
 
 ```bash
-# 从 registry 安装：npmjs 上的 latest 是 0.2.6（本仓库 .npmrc 与 lockfile
+# 从 registry 安装：npmjs 上的 latest 是 0.3.2（本仓库 .npmrc 与 lockfile
 # 也已钉在 npmjs，见下）
-dsh plugin --profile <name> add dsh-boost@^0.2.6 --registry=https://registry.npmjs.org/
+dsh plugin --profile <name> add dsh-boost@^0.3.2 --registry=https://registry.npmjs.org/
 
 # 或从本地 checkout 安装（先构建；dist/ 不入库）
 npm run build
 dsh plugin --profile <name> add /absolute/path/to/dsh-boost
 ```
 
-例如 web profile：`dsh plugin --profile web add dsh-boost@^0.2.6 --registry=https://registry.npmjs.org/`。
+例如 web profile：`dsh plugin --profile web add dsh-boost@^0.3.2 --registry=https://registry.npmjs.org/`。
 `dsh plugin` 把操作转发给 pnpm，所以 pnpm 必须在 PATH 上。
 
 ### 版本与 registry
 
-> **`^0.2.6` 是当前的安全钉法。** `registry.npmjs.org` 上 `latest` 是 `0.2.6`，历史版本依次是
+> **`^0.3.2` 是当前的安全钉法。** `registry.npmjs.org` 上 `latest` 是 `0.3.2`，历史版本依次是
+> `0.3.1`、`0.3.0`、`0.2.7`、`0.2.6`、`0.2.5`、`0.2.4`、`0.2.3`、`0.2.2`、`0.2.1`、`0.2.0`、
 > `0.1.4`、`0.1.3`、`0.1.2`、`0.1.1`、`0.1.0`，以及首次发布时 npm 自动创建的占位版本
 > `0.0.0-stage`——**不要安装 `0.0.0-stage`**，它不是可用构建。`0.2.0` 新增了设置页（`dsh.client`
-> 与 `./client` 出口、`/dsh-boost/api` 路由、随包发布的 `lib/client.js`）与中英双语，`0.2.1`
-> 修了页面上三处会读到错误数值或错误提示的缺陷；`0.1.4` 及更早**没有设置页**，`^0.1.4` 也不会
-> 解析到 `0.2.x`（`^` 不跨大版本），所以从 `0.1.x` 升上来要显式写 `@^0.2.6`（英文 README 的旧版这里写 `@^0.2.0`，那是 0.2.0 发布时的钉法；当前 latest 已是 0.2.6）。本仓库已把
-> `.npmrc` 与 lockfile 钉在 npmjs，但**你机器上的全局 npm 配置**可能仍指向一个尚未同步 `0.2.6`
-> 的镜像：那是本机配置，不是本仓库的状态。在意 registry 时显式传
-> `--registry=https://registry.npmjs.org/`；镜像滞后时 `@^0.2.6` 会在同步前解析失败。
+> 与 `./client` 出口、`/dsh-boost/api` 路由、随包发布的 `lib/client.js`）与中英双语；`0.3.0` 新增
+> 回执蒸馏（默认关闭），`0.3.2` 修了「每次蒸馏都被自己抽干」的缺陷——**`0.3.0`/`0.3.1` 的蒸馏从未
+> 生效过**，要用就装 `0.3.2` 及以上。`0.1.4` 及更早**没有设置页**，`^0.1.4` 也不会解析到 `0.3.x`
+> （`^` 不跨大版本），所以从 `0.1.x`/`0.2.x` 升上来要显式写 `@^0.3.2`。本仓库已把 `.npmrc` 与
+> lockfile 钉在 npmjs，但**你机器上的全局 npm 配置**可能仍指向一个尚未同步 `0.3.2` 的镜像：那是
+> 本机配置，不是本仓库的状态。在意 registry 时显式传 `--registry=https://registry.npmjs.org/`；
+> 镜像滞后时 `@^0.3.2` 会在同步前解析失败。
 
 ### 包装形态与重启
 
@@ -285,6 +287,33 @@ token，它只产出下一节的四个比例；`selected + []` 下协议段为�
 | `historyTurns` | 5 | 求步数均值所用的最近 turn 数 |
 | `dshHome` | `$DSH_HOME`，未设则 `~/.dsh` | 状态根前缀：实际用 `<dshHome>/boost`，且优先于 `$DSH_HOME`；空白或非字符串视为未设，相对路径按装配时 cwd 解析一次。装配日志会打印解析后的 `root=` |
 
+### 蒸馏（`distillation.*`，默认关闭）
+
+回执蒸馏让快速模型把一条 `bash`/`ssh` 回执压成一段可核验的正文，用它替换截断视图。机制与
+取舍见 `docs/adr/0001-receipt-pinned-distillation.md`。
+
+| 键 | 默认值 | 作用 |
+|---|---|---|
+| `distillation.enabled` | `false` | 总开关。关着时**一次模型调用都不发**，也不产生 `distilled/` 产物 |
+| `distillation.families` | `['bash','ssh']` | 只对这些族蒸；空数组表示不蒸任何族（页面渲染为「（无）」） |
+| `distillation.triggerChars` | `null` | 预门：回执短于它就根本不试。`null` 表示用该族投影的 `triggerChars` |
+| `distillation.maxOutputTokens` | 256 | 蒸馏调用的输出预算 |
+| `distillation.timeoutMs` | 3000 | 超过它就放弃这次调用（迟到的答案仍会落盘并另记一条 `distill-late`） |
+| `distillation.route` | `null` | `null` 表示复用边界路由；给了就显式指定一个更便宜的模型 |
+
+运行态在 `status.distill`：`calls`（真花掉的调用数）、`tokens`（完成 token）、`input_chars`
+（送进去的字符数——它是成本主体，`tokens` 只是输出侧）、`adopted`（采用次数，**含读表重放**，
+所以可能大于 `calls`）、`rejected`、`failed`。收据码见 `docs/RELEASE.md` 的 `distill-*` 段。
+
+**净赚门只看视图大小，不看调用成本**：采用条件是「蒸馏正文 + 页脚」按 UTF-8 字节严格短于同回执
+的截断视图。一次采用省下的重放量通常远大于一次调用的成本，但**首次渲染**可能净亏——短会话里开
+蒸馏是负收益，长会话才回本。要不要把调用成本也计入门槛，是已知的开放决策。
+
+**回退**：把 `enabled` 改回 `false` 并重启，只影响之后的回执；已经进入历史的字节不会回滚。要让某条
+回执重新尝试，删掉 `<dshHome>/boost/distilled/` 下对应的文件。产物按
+`（回执哈希, 问题哈希, 版本）` 钉住，且**在会话销毁时删除**——同会话内重放只查表，跨会话
+（`resume`/`fork`）会重新蒸一次。
+
 字符按 Unicode 码点计。错误回执与超过 256 KiB 的回执不投影。触发阈值、窗口、页脚与死区的
 完整算术见[原理的投影一节](how-it-works.md)；那里也说明了为什么 `triggerChars` 不能只按
 `headChars + tailChars + 1` 设。
@@ -399,6 +428,15 @@ horizon 重放，并计入 `projection_horizon_reestimated`；`projection_horizo
   **两个替换数是一对区间，不是同一个量**：`substitution` 取被跳过请求的**下一**个真实请求的输入
   （含被替换调用自己的结果，所以是**上界**）；`substitutionAvoided` 取计划那一次请求的
   `input + cacheRead + output`（不含被替换调用的结果，所以是**下界**）。真实节省落在两者之间。
+  **三个投影字段各是什么**（它们不是同一个数的三种写法）：
+  - `projection_gross_tokens`（顶层，一次性）：每条被投影回执**自己那一次**少掉的 token 之和。
+    这是这一单的事实，不含外推。
+  - `projectionGross`（`saved` 里，重放口径）：每条回执的节省乘以**它自己的** `(1 + horizon)` 再求和。
+    它是净额的被减数，所以和上面那个数不同；每条收据在决策时钉住自己的 `horizon_steps`，
+    旧收据没有这个字段时按当前视界重估，并在 `projection_horizon_reestimated` 里报数。
+  - `projectionNet`：`重放毛额 − 取回内容成本 − 取回调用成本`。取回成本按模型对 spill locator
+    发起的 `read`/`grep` 计价；有取回但无法定价时它是 `'unknown'`，不是 0。
+  - `retrievals`：模型对 spill locator 的取回次数（读一次 spill 算一次）。
 
 `projection: 'on'` 时，完整原文在替换发生**之前**写入宿主的 spill 后端，页脚 locator 可以用
 `read` / `grep` 取回。投影不会丢掉唯一副本；spill 写入失败就不替换（收据记

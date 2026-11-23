@@ -45,8 +45,9 @@ import type {
  *
  * Re-exported here as well as declared in `./types`: every other module names
  * this type through `./llm` (the model call), which is what keeps the emitted
- * `dist/` from importing the type-only module at runtime — so it never ships a
- * `dist/distill/types.d.ts` the package's `files` list has to know about.
+ * `dist/` from importing the type-only module at runtime. The declaration file
+ * `dist/distill/types.d.ts` is still emitted and does ship — `package.json`'s
+ * `files` list names it explicitly.
  */
 export type DistillAnswer = AnswerType
 export type DistillFn = FnType
