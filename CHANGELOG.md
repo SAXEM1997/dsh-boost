@@ -8,6 +8,19 @@ This file records user-visible changes. Format follows Keep a Changelog; version
 Design rationale lives in `docs/superpowers/specs/`; the release-acceptance procedure is in
 `docs/RELEASE.md`.
 
+## [0.3.4] - 2026-11-24
+
+### 变更
+
+- **蒸馏产物不再随会话销毁删除**。产物是进入历史的那串字节的证据，而 `resume`/`fork` 会重放同一批
+  回执；删掉等于让操作者再付一次调用，而且没有任何信号（收据码仍是 `projected`，`calls` 只多 1）。
+  目录改为按上限自我裁剪：超过 5,000 个文件或 16 MiB 时从最旧的开始删，刚写的那条永不被裁。
+  要一次性清空就删整个目录。
+- **新增回本预判**：调模型之前先算 `最乐观节省 ×（1 + 剩余步数）` 是否超过 `回执输入 + 输出预算`，
+  不超过就不调（`distill-rejected:not-worth-it`）。此前只有「每次重放是否更小」这一道门，它不回答
+  「这次调用能不能赚回来」——会话最后一步的回执必然净亏，而现在不会被蒸。宿主缺估算器或缺剩余步数
+  时这道门关闭，不用猜的值替代。
+
 ## [0.3.3] - 2026-11-23
 
 ### 修复

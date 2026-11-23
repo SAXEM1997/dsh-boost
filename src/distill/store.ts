@@ -18,21 +18,44 @@
  * - The write is atomic (temp file + rename), so a concurrent reader sees the
  *   old product or the new one, and no reader ever sees a half-written file
  *   from a crash.
- * - `clearSession` removes the products this process wrote for a session and
- *   touches nothing else: a session end is the receipts' lifecycle, and a file
- *   this process did not write (a foreign or hand-made one) is not ours to
- *   delete.
+ * - Products are **not** deleted when a session ends. A product is the pinned
+ *   bytes that entered history; ADR 0001 promises a replay only reads the
+ *   table, and a session end is not the boundary of a replay (a resumed or
+ *   forked session replays the same receipts). Deleting there made the promise
+ *   depend on process lifetime and charged the operator a second call with no
+ *   signal. The store bounds itself instead: `write` prunes the oldest files
+ *   once the directory passes `maxFiles` or `maxBytes`.
+ * - `clearSession` still removes the products this process wrote for one
+ *   session, and touches nothing else: a file this process did not write (a
+ *   foreign or hand-made one) is not ours to delete. It exists for tests and
+ *   for an operator who wants one session's evidence gone; production no
+ *   longer calls it on session dispose.
  *
  * The store knows no host services; the caller resolves the root.
  *
  * @module dsh-boost/distill/store
  */
-import { mkdir, readFile, rename, unlink, writeFile } from 'node:fs/promises'
+import { mkdir, readdir, readFile, rename, stat, unlink, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import type { DistillKey } from './pin.js'
 
 /** The directory under the boost root that holds the products. */
 const DISTILLED_DIR = 'distilled'
+
+/**
+ * Retention bounds.
+ *
+ * A product is roughly 0.5–2 KB, so 5,000 files is single-digit megabytes — the
+ * same order as one day of receipts. The cap exists to keep a long-lived
+ * install from growing without bound, not to keep the directory small.
+ */
+export interface Limits {
+  maxFiles: number
+  maxBytes: number
+}
+
+export const MAX_FILES = 5000
+export const MAX_BYTES = 16 * 1024 * 1024
 
 /** One persisted product. */
 export interface DistillProduct {
@@ -89,14 +112,21 @@ export class DistillStore {
    * Session → the product file stems this process wrote for it.
    *
    * Only an in-process write is recorded, so `clearSession` can never delete a
-   * file another process (or an operator) put there. An entry is dropped when
-   * `clearSession` runs; a session that is never disposed leaks one stem per
-   * product, bounded by the products that session produced.
+   * file another process (or an operator) put there. Production never calls
+   * `clearSession` (products outlive their session), so this map grows with the
+   * products this process wrote — a handful of short strings per session, and
+   * only while the process lives.
    */
   private readonly written = new Map<string, Set<string>>()
 
-  constructor(root: string) {
+  private readonly limits: Limits
+
+  constructor(root: string, limits: Partial<Limits> = {}) {
     this.root = root
+    this.limits = {
+      maxFiles: limits.maxFiles ?? MAX_FILES,
+      maxBytes: limits.maxBytes ?? MAX_BYTES,
+    }
   }
 
   /** The product directory for this root. */
@@ -166,6 +196,69 @@ export class DistillStore {
       this.written.set(sessionId, stems)
     }
     stems.add(key.file)
+    // Retention runs after the write, never instead of it: the caller is about
+    // to render these bytes, so the product just written must survive even when
+    // it alone exceeds the byte cap. A pruning failure is not a write failure —
+    // the product is already on disk and correct.
+    await this.prune(target).catch(() => undefined)
+  }
+
+  /**
+   * Drop the oldest products until the directory is inside both caps.
+   *
+   * `keep` is the file just written: it is the one the caller is about to
+   * render, so it is never a candidate even when it is the whole overage.
+   * Ordering is by `mtimeMs`, which the atomic rename refreshes on every write.
+   */
+  private async prune(keep: string): Promise<void> {
+    const dir = this.dir()
+    let names: string[]
+    try {
+      names = await readdir(dir)
+    } catch {
+      return
+    }
+    const files = names.filter((name) => name.endsWith('.json'))
+    if (files.length <= this.limits.maxFiles) {
+      const bytes = await this.totalBytes(dir, files)
+      if (bytes <= this.limits.maxBytes) return
+    }
+    const stats: { name: string; mtimeMs: number; size: number }[] = []
+    for (const name of files) {
+      if (join(dir, name) === keep) continue
+      try {
+        const info = await stat(join(dir, name))
+        stats.push({ name, mtimeMs: info.mtimeMs, size: info.size })
+      } catch {
+        // Vanished between readdir and stat: nothing to prune.
+      }
+    }
+    stats.sort((a, b) => a.mtimeMs - b.mtimeMs)
+    let count = files.length
+    let bytes = await this.totalBytes(dir, files)
+    for (const entry of stats) {
+      if (count <= this.limits.maxFiles && bytes <= this.limits.maxBytes) return
+      try {
+        await unlink(join(dir, entry.name))
+        count -= 1
+        bytes -= entry.size
+      } catch {
+        // Already gone; the caps are re-checked on the next write.
+      }
+    }
+  }
+
+  /** Sum of the sizes of the given files, ignoring ones that vanished. */
+  private async totalBytes(dir: string, names: readonly string[]): Promise<number> {
+    let total = 0
+    for (const name of names) {
+      try {
+        total += (await stat(join(dir, name))).size
+      } catch {
+        // Vanished; not part of the total.
+      }
+    }
+    return total
   }
 
   /**

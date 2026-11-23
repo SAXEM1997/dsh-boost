@@ -24,26 +24,26 @@
 `dsh plugin` 要求指定 profile，剩下的参数原样转发给该 profile 目录里的 pnpm：
 
 ```bash
-# 从 registry 安装：npmjs 上的 latest 是 0.3.2（本仓库 .npmrc 与 lockfile
+# 从 registry 安装：npmjs 上的 latest 是 0.3.4（本仓库 .npmrc 与 lockfile
 # 也已钉在 npmjs，见下）
-dsh plugin --profile <name> add dsh-boost@^0.3.2 --registry=https://registry.npmjs.org/
+dsh plugin --profile <name> add dsh-boost@^0.3.4 --registry=https://registry.npmjs.org/
 
 # 或从本地 checkout 安装（先构建；dist/ 不入库）
 npm run build
 dsh plugin --profile <name> add /absolute/path/to/dsh-boost
 ```
 
-例如 web profile：`dsh plugin --profile web add dsh-boost@^0.3.2 --registry=https://registry.npmjs.org/`。
+例如 web profile：`dsh plugin --profile web add dsh-boost@^0.3.4 --registry=https://registry.npmjs.org/`。
 `dsh plugin` 把操作转发给 pnpm，所以 pnpm 必须在 PATH 上。
 
 ### 版本与 registry
 
-> **`^0.3.2` 是当前的安全钉法。** `registry.npmjs.org` 上 `latest` 是 `0.3.2`，历史版本依次是
-> `0.3.1`、`0.3.0`、`0.2.7`、`0.2.6`、`0.2.5`、`0.2.4`、`0.2.3`、`0.2.2`、`0.2.1`、`0.2.0`、
+> **`^0.3.4` 是当前的安全钉法。** `registry.npmjs.org` 上 `latest` 是 `0.3.4`，历史版本依次是
+> `0.3.3`、`0.3.2`、`0.3.1`、`0.3.0`、`0.2.7`、`0.2.6`、`0.2.5`、`0.2.4`、`0.2.3`、`0.2.2`、`0.2.1`、`0.2.0`、
 > `0.1.4`、`0.1.3`、`0.1.2`、`0.1.1`、`0.1.0`，以及首次发布时 npm 自动创建的占位版本
 > `0.0.0-stage`——**不要安装 `0.0.0-stage`**，它不是可用构建。`0.2.0` 新增了设置页（`dsh.client`
 > 与 `./client` 出口、`/dsh-boost/api` 路由、随包发布的 `lib/client.js`）与中英双语；`0.3.0` 新增
-> 回执蒸馏（默认关闭），`0.3.2` 修了「每次蒸馏都被自己抽干」的缺陷——**`0.3.0`/`0.3.1` 的蒸馏从未
+> 回执蒸馏（默认关闭），`0.3.2` 修了「每次蒸馏都被自己抽干」的缺陷，`0.3.4` 让产物跨会话保留并加了回本预判——**`0.3.0`/`0.3.1` 的蒸馏从未
 > 生效过**，要用就装 `0.3.2` 及以上。`0.1.4` 及更早**没有设置页**，`^0.1.4` 也不会解析到 `0.3.x`
 > （`^` 不跨大版本），所以从 `0.1.x`/`0.2.x` 升上来要显式写 `@^0.3.2`。本仓库已把 `.npmrc` 与
 > lockfile 钉在 npmjs，但**你机器上的全局 npm 配置**可能仍指向一个尚未同步 `0.3.2` 的镜像：那是
@@ -309,10 +309,18 @@ token，它只产出下一节的四个比例；`selected + []` 下协议段为�
 的截断视图。一次采用省下的重放量通常远大于一次调用的成本，但**首次渲染**可能净亏——短会话里开
 蒸馏是负收益，长会话才回本。要不要把调用成本也计入门槛，是已知的开放决策。
 
+**回本预判**：调用之前还有一道门——`最乐观节省（截断视图 − 页脚）×（1 + 剩余步数）` 必须
+超过 `回执输入 + 输出预算`，否则不调模型（`distill-rejected:not-worth-it`）。它挡掉的只有「无论
+蒸成什么样都赚不回那次调用」的情形，典型是会话最后一步。宿主不提供估算器或剩余步数时这道门关闭，
+不会用猜的值替代。
+
 **回退**：把 `enabled` 改回 `false` 并重启，只影响之后的回执；已经进入历史的字节不会回滚。要让某条
-回执重新尝试，删掉 `<dshHome>/boost/distilled/` 下对应的文件。产物按
-`（回执哈希, 问题哈希, 版本）` 钉住，且**在会话销毁时删除**——同会话内重放只查表，跨会话
-（`resume`/`fork`）会重新蒸一次。
+回执重新尝试，删掉 `<dshHome>/boost/distilled/` 下对应的文件。
+
+**产物保留**：产物按 `（回执哈希, 问题哈希, 版本）` 钉住，**不随会话销毁删除**——它是进入历史的
+那串字节的证据，而 `resume`/`fork` 会重放同一批回执，删掉就等于让操作者再付一次调用、且没有任何
+信号。目录按上限自我裁剪：超过 **5,000 个文件**或 **16 MiB** 时从最旧的开始删，刚写的那一条永不
+被裁。要一次性清空就删整个目录。
 
 字符按 Unicode 码点计。错误回执与超过 256 KiB 的回执不投影。触发阈值、窗口、页脚与死区的
 完整算术见[原理的投影一节](how-it-works.md)；那里也说明了为什么 `triggerChars` 不能只按

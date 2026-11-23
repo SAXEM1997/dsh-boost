@@ -1156,9 +1156,11 @@ function wireSessionEvents(
     preStepSeen.delete(sessionId)
     horizon.clear(sessionId)
     scope.forget(sessionId)
-    // A distillation product belongs to the round that produced it: the
-    // session end removes the ones this process wrote (ADR 0001).
-    void deps.distillStore?.clearSession(sessionId).catch(() => undefined)
+    // Distillation products deliberately outlive the session: they are the
+    // pinned bytes that entered history, and a resumed or forked session
+    // replays the same receipts. Deleting here charged the operator a second
+    // call with no signal. The store bounds itself by count and bytes instead
+    // (`DistillStore.write` prunes).
     // Flush this session's buffered lines before evicting its state, then make
     // every later hook for the id a no-op.
     try {

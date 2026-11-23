@@ -2117,6 +2117,15 @@ async function distillDecision(
       spill: deps.spill,
       toolName: ctx.exec.name,
       ...(typeof ctx.exec.callId === 'string' ? { callId: ctx.exec.callId } : {}),
+      // The payback gate needs both sides of its comparison from the host: how
+      // many more replays to expect, and the estimator that prices them. Either
+      // missing turns the gate off rather than guessing.
+      ...(deps.estimateText === undefined
+        ? {}
+        : { estimate: deps.estimateText }),
+      ...(deps.horizonFor === undefined
+        ? {}
+        : { remainingSteps: projectionHorizonOf(deps, ctx.sessionId) }),
       ...(deps.distillAttempts === undefined ? {} : { park: (options, settled) => deps.distillAttempts?.park(options, settled) }),
       ...(deps.distillRequestOptions === undefined || deps.distillAttempts === undefined
         ? {}

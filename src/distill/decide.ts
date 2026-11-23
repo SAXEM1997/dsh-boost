@@ -50,7 +50,7 @@ import type { DistillRouteOf } from './llm.js'
 export type DistillCode = 'distill' | 'distill-failed' | `distill-rejected:${DistillRejectReason}`
 
 /** Why an answer was not adopted. */
-export type DistillRejectReason = 'empty' | 'not-smaller' | 'unverifiable' | 'timeout'
+export type DistillRejectReason = 'empty' | 'not-smaller' | 'not-worth-it' | 'unverifiable' | 'timeout'
 
 /**
  * The reasons a replayed decision must not pay for the model again.
@@ -101,6 +101,18 @@ export interface DecideInput {
   park?: (options: object, settled: Promise<DistillAnswer | undefined>) => void
   /** The request constructor the parking seam is paired with (`requestOptionsOf` below). */
   requestOptions?: (request: DistillRequest) => object
+  /**
+   * How many more model requests this session is expected to replay the receipt
+   * through, excluding this one. Optional: without it the payback gate is off,
+   * because a guess about the future must not silently become a decision.
+   */
+  remainingSteps?: number
+  /**
+   * The host's token estimator. Optional for the same reason: the payback gate
+   * compares a saving against a cost, and both sides have to be measured in the
+   * same unit by the same instrument.
+   */
+  estimate?: (text: string) => number
 }
 
 /** Where a product came from, so `status` can count the paths apart. */
@@ -244,6 +256,49 @@ function keyFor(text: string, question: DistillQuestion, model: string): Distill
  * read from disk and a product just received go through the same quote and size
  * gates before either can reach history.
  */
+/**
+ * Whether a distillation could ever pay for its own model call.
+ *
+ * The most a distillation can save is `truncation view − footer` per replay —
+ * an empty body plus a footer is the smallest view any answer can produce — and
+ * a receipt is replayed `1 + remainingSteps` times. The call costs at least the
+ * receipt as input plus the output budget. When the best case does not cover
+ * the cost, no answer pays back, so the call is skipped instead of paid for.
+ *
+ * Both sides go through the same estimator, so the comparison is unit-correct
+ * even when the estimator is the crude `chars / 4` fallback. A host without an
+ * estimator never reaches here (`input.estimate` is undefined).
+ */
+function paysBack(
+  text: string,
+  cfg: BoostConfig,
+  family: ToolFamily,
+  formatFooter: FormatFooter,
+  estimate: (text: string) => number,
+  remainingSteps: number,
+  maxOutputTokens: number,
+): boolean {
+  const params = cfg.projection[family]
+  if (params === undefined) return false
+  const truncation = truncate(text, params)
+  // No truncation view means nothing to beat: the receipt is either too short
+  // or over the projection's byte ceiling, and both are refusals elsewhere.
+  if (truncation === null) return false
+  const footer = formatFooter({ kind: 'exact', count: truncation.omittedBytes }, {
+    locator: '',
+    retrievalHint: '',
+  })
+  const truncationTokens = estimate(
+    `${renderHeadLine(truncation)}\n${truncation.head}\n${footer}\n${truncation.tail}`,
+  )
+  const bestSaving = truncationTokens - estimate(footer)
+  if (!Number.isFinite(bestSaving) || bestSaving <= 0) return false
+  const replays = 1 + Math.max(0, Math.floor(remainingSteps))
+  const cost = estimate(text) + maxOutputTokens
+  if (!Number.isFinite(cost)) return false
+  return bestSaving * replays > cost
+}
+
 async function adopt(
   input: DecideInput,
   question: DistillQuestion,
@@ -427,6 +482,30 @@ export async function decide(input: DecideInput): Promise<DistillOutcome | null>
   // would be discarded anyway.
   if (input.formatFooter === undefined || input.spill === undefined) {
     return { content: null, code: 'distill-failed', mode: 'fallback', evidence: { called: false, adopted: false } }
+  }
+
+  // Payback gate. The byte gate below compares two renderings of one receipt;
+  // it says nothing about whether the model call that produced them ever pays
+  // for itself. A receipt is replayed `1 + remainingSteps` times, so the most a
+  // distillation can ever save is (truncation view − footer) per replay, and
+  // the least it costs is the receipt as input plus the output budget. When
+  // even that most-optimistic product does not cover the cost, no answer can
+  // pay back and the call is skipped — which is the only place a distillation
+  // can be a guaranteed loss (typically the last step of a session).
+  if (
+    input.remainingSteps !== undefined &&
+    input.estimate !== undefined &&
+    !paysBack(input.text, input.cfg, input.family, input.formatFooter, input.estimate, input.remainingSteps, input.cfg.distillation.maxOutputTokens)
+  ) {
+    // Deliberately not pinned: the horizon that produced this refusal changes
+    // as the session grows, and a tombstone would freeze a decision the
+    // evidence has since contradicted.
+    return {
+      content: null,
+      code: 'distill-rejected:not-worth-it' as DistillCode,
+      mode: 'fallback',
+      evidence: { called: false, adopted: false, reason: 'not-worth-it' },
+    }
   }
   const settled = new Promise<DistillAnswer | undefined>((resolve) => {
     settle = resolve

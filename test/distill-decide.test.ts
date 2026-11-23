@@ -534,3 +534,57 @@ test('影子模式：已采纳的产物记 projection-shadow，数字与采用�
   assert.equal(typeof adopted, 'number')
   assert.ok(adopted > 0, 'a distilled view is cheaper than the original')
 })
+
+// The payback gate: the byte gate compares two renderings of one receipt, and
+// says nothing about whether the call that produced them ever pays for itself.
+// A receipt replayed once (the last step of a session) cannot.
+test('回本预判：只剩这一步时不调模型，直接 not-worth-it', async () => {
+  const store = await makeStore()
+  const fake = fakeFn(async (request) => goodAnswer(request.text))
+  const r = await decide(
+    baseInput(store, {
+      distill: fake.fn,
+      remainingSteps: 0,
+      estimate: (text) => Math.ceil(Array.from(text).length / 4),
+    }),
+  )
+  assert.equal(fake.calls.length, 0, 'no model call: nothing could pay it back')
+  assert.equal(r?.code, 'distill-rejected:not-worth-it')
+  assert.equal(r?.evidence.called, false)
+})
+
+test('回本预判：还剩很多步时照常调用', async () => {
+  const store = await makeStore()
+  const fake = fakeFn(async (request) => goodAnswer(request.text))
+  const r = await decide(
+    baseInput(store, {
+      distill: fake.fn,
+      remainingSteps: 20,
+      estimate: (text) => Math.ceil(Array.from(text).length / 4),
+    }),
+  )
+  assert.equal(fake.calls.length, 1)
+  assert.equal(r?.mode, 'adopted')
+})
+
+test('回本预判：没有估算器或没有剩余步数时门是关的，不猜', async () => {
+  for (const missing of [{ remainingSteps: 20 }, { estimate: (t: string) => Math.ceil(t.length / 4) }]) {
+    const store = await makeStore()
+    const fake = fakeFn(async (request) => goodAnswer(request.text))
+    const r = await decide(baseInput(store, { distill: fake.fn, ...missing }))
+    assert.equal(fake.calls.length, 1, `gate must stay open when ${Object.keys(missing)[0]} is absent`)
+    assert.equal(r?.mode, 'adopted')
+  }
+})
+
+test('回本预判的拒绝不钉墓碑：视界变大后同一回执仍会重新尝试', async () => {
+  const store = await makeStore()
+  const estimate = (text: string) => Math.ceil(Array.from(text).length / 4)
+  const first = fakeFn(async (request) => goodAnswer(request.text))
+  await decide(baseInput(store, { distill: first.fn, remainingSteps: 0, estimate }))
+  assert.equal(first.calls.length, 0)
+  const second = fakeFn(async (request) => goodAnswer(request.text))
+  const r = await decide(baseInput(store, { distill: second.fn, remainingSteps: 20, estimate }))
+  assert.equal(second.calls.length, 1, 'a tombstone here would freeze a decision the evidence contradicts')
+  assert.equal(r?.mode, 'adopted')
+})
