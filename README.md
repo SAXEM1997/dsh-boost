@@ -1,15 +1,34 @@
+<div align="center">
+
+[English](README.en.md) | **简体中文**
+
+</div>
+
 # dsh-boost
 
-通过**工具回执投影**与**确定性只读替换**降低 DeepSeek Harness（DSH）的 token 消耗。
+**降低 DeepSeek Harness 的 token 消耗** — DSH 插件
 
-> **状态：v1 已实现。** 投影、替换与控制面均已落地；`npm run build` 干净，测试套件全部通过。
-> 收益区间是设计阶段的事前估算（下界 3.5% / 理想上界 10.0%；投影侧在 300 个最长会话上的
-> 聚合净额约 0.4%），两端都是离线估算、不是每会话保底，交付物**无法复算**——见下。
+用**工具回执投影**与**确定性只读替换**把每次模型请求回放的历史压短：大回执截断成头尾加定位符、
+原文落 spill 可回读；跨工具重复的只读结果用确定性替换省掉一次模型回合。附一个同源设置页，
+用来看降级码、节省账与生效配置。
+
+```mermaid
+flowchart LR
+    R["工具回执<br/>read · grep · glob · bash · ssh"] --> P["投影<br/>截断 + 定位符 + spill"]
+    R --> S["替换<br/>确定性只读 · 影子期只记账"]
+    P --> M["模型请求<br/>更短的上下文"]
+    S --> M
+    U["设置页<br/>状态 · 作用域 · 影子开关"] --> S
+```
+
+> **状态：v1 已实现。** 投影、替换与控制面均已落地，测试套件全部通过。收益区间是设计阶段的
+> **事前估算**（下界 3.5% / 理想上界 10.0%；投影侧在 300 个最长会话上的聚合净额约 0.4%），
+> 两端都是离线估算、**不是每会话保底**，交付物无法复算——见 [`docs/RELEASE.md`](docs/RELEASE.md) §3。
 
 ## 它解决什么
 
 DSH 每次模型请求都会回放全部历史。本机 300 个最长会话的实测聚合（`npm run --silent stats`——不带
-`--silent` 时 npm 会把 `> dsh-boost@0.2.3 stats` 横幅打进 stdout，机器解析请用 `--silent` 或直接
+`--silent` 时 npm 会把 `> dsh-boost@0.2.6 stats` 横幅打进 stdout，机器解析请用 `--silent` 或直接
 `node scripts/session-stats.mjs`；快照时刻 `2026-11-19T03:13:21Z`）：54,141 步、54,088 个请求，合计 10,575,904,022 raw token。按步均值
 195,340 token，按请求均值 195,531、中位 187,681；97.01% 的输入是缓存读。工具回执是体积主体
 （bash 61.75%、read 22.13%、ssh 10.01%），而下一步真正会用到的部分通常远小于回执本身。
@@ -64,25 +83,25 @@ v1 的**事前估算**区间是 **3.5%（下界）– 10.0%（理想上界）**�
 `dsh plugin` 要求指定 profile，剩下的参数原样转发给该 profile 目录里的 pnpm：
 
 ```bash
-# 从 registry 安装：npmjs 上的 latest 是 0.2.3（本仓库 .npmrc 与 lockfile
+# 从 registry 安装：npmjs 上的 latest 是 0.2.6（本仓库 .npmrc 与 lockfile
 # 也已钉在 npmjs，见下）
-dsh plugin --profile <name> add dsh-boost@^0.2.3 --registry=https://registry.npmjs.org/
+dsh plugin --profile <name> add dsh-boost@^0.2.6 --registry=https://registry.npmjs.org/
 
 # 或从本地 checkout 安装（先构建；dist/ 不入库）
 npm run build
 dsh plugin --profile <name> add /absolute/path/to/dsh-boost
 ```
 
-例如 web profile：`dsh plugin --profile web add dsh-boost@^0.2.3 --registry=https://registry.npmjs.org/`。
+例如 web profile：`dsh plugin --profile web add dsh-boost@^0.2.6 --registry=https://registry.npmjs.org/`。
 `dsh plugin` 把操作转发给 pnpm，所以 pnpm 必须在 PATH 上。
 
-> **`^0.2.3` 是当前的安全钉法。** `registry.npmjs.org` 上 `latest` 是 `0.2.3`，历史版本依次是
+> **`^0.2.6` 是当前的安全钉法。** `registry.npmjs.org` 上 `latest` 是 `0.2.6`，历史版本依次是
 > `0.1.4`、`0.1.3`、`0.1.2`、`0.1.1`、`0.1.0`，以及首次发布时 npm 自动创建的占位版本
 > `0.0.0-stage`——**不要安装 `0.0.0-stage`**，它不是可用构建。`0.2.0` 新增了设置页（`dsh.client` 与 `./client` 出口、`/dsh-boost/api` 路由、随包发布的
 > `lib/client.js`）与中英双语，`0.2.1` 修了页面上三处会读到错误数值或错误提示的缺陷；`0.1.4` 及更早**没有设置页**，`^0.1.4` 也不会解析到 `0.2.x`（`^` 不跨大版本），所以从
-> `0.1.x` 升上来要显式写 `@^0.2.3`。本仓库已把 `.npmrc` 与 lockfile 钉在 npmjs，但**你机器上
-> 的全局 npm 配置**可能仍指向一个尚未同步 `0.2.3` 的镜像：那是本机配置，不是本仓库的状态。
-> 在意 registry 时显式传 `--registry=https://registry.npmjs.org/`；镜像滞后时 `@^0.2.3` 会在
+> `0.1.x` 升上来要显式写 `@^0.2.6`。本仓库已把 `.npmrc` 与 lockfile 钉在 npmjs，但**你机器上
+> 的全局 npm 配置**可能仍指向一个尚未同步 `0.2.6` 的镜像：那是本机配置，不是本仓库的状态。
+> 在意 registry 时显式传 `--registry=https://registry.npmjs.org/`；镜像滞后时 `@^0.2.6` 会在
 > 同步前解析失败。
 
 ## 设置页

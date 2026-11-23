@@ -1,18 +1,38 @@
+<div align="center">
+
+**English** | [简体中文](README.md)
+
+</div>
+
 # dsh-boost
 
-Cut DeepSeek Harness (DSH) token usage with **tool-receipt projection** and **deterministic
-read-only substitution**.
+**Cut DeepSeek Harness token usage** — a DSH plugin
 
-> **Status: v1 is implemented.** Projection, substitution, and the control surface are all in
-> place; `npm run build` is clean and the full test suite passes. The benefit range is an
-> **ex-ante design estimate** (3.5% lower bound / 10.0% ideal upper bound; ~0.4% aggregate net
-> on the 300 longest sessions). Both ends are offline estimates, not per-session floors, and
-> nothing in the deliverable can recompute them — see below.
+**Tool-receipt projection** and **deterministic read-only substitution** shorten the history every
+model request replays: large receipts are truncated to head and tail plus a locator, with the
+original spilled and re-readable; repeated read-only results across tools are skipped with a
+deterministic substitution that saves one model round-trip. A same-origin settings page shows the
+degradation codes, the savings ledger and the effective configuration.
+
+```mermaid
+flowchart LR
+    R["Tool receipts<br/>read · grep · glob · bash · ssh"] --> P["Projection<br/>truncate + locator + spill"]
+    R --> S["Substitution<br/>deterministic read-only · shadow-only accounting"]
+    P --> M["Model request<br/>shorter context"]
+    S --> M
+    U["Settings page<br/>status · scope · shadow switch"] --> S
+```
+
+> **Status: v1 is implemented.** Projection, substitution and the control surface are all in
+> place, and the full test suite passes. The benefit range is an **ex-ante design estimate**
+> (3.5% lower bound / 10.0% ideal upper bound; ~0.4% aggregate net on the 300 longest sessions),
+> an offline estimate at both ends — **not a per-session floor** — and not reproducible from the
+> deliverables. See [`docs/RELEASE.md`](docs/RELEASE.md) §3.
 
 ## What it does
 
 DSH replays the whole history on every model request. Across the 300 longest sessions measured
-locally (`npm run --silent stats` — without `--silent`, npm prints its `> dsh-boost@0.2.3 stats`
+locally (`npm run --silent stats` — without `--silent`, npm prints its `> dsh-boost@0.2.6 stats`
 banner to stdout, so use `--silent` or `node scripts/session-stats.mjs` for machine-readable
 output; snapshot at `2026-11-19T03:13:21Z`): 54,141 steps and 54,088 requests,
 10,575,904,022 raw tokens in total. The mean is 195,340 tokens per step and 195,531 per request
@@ -85,19 +105,19 @@ denominator statistic that a later version must add.
 directory:
 
 ```bash
-# install from the registry: npmjs has latest = 0.2.3 (this repository's
+# install from the registry: npmjs has latest = 0.2.6 (this repository's
 # .npmrc and lockfile are pinned to npmjs too — see below)
-dsh plugin --profile <name> add dsh-boost@^0.2.3 --registry=https://registry.npmjs.org/
+dsh plugin --profile <name> add dsh-boost@^0.2.6 --registry=https://registry.npmjs.org/
 
 # or from a local checkout (build first; dist/ is not committed)
 npm run build
 dsh plugin --profile <name> add /absolute/path/to/dsh-boost
 ```
 
-For the web profile: `dsh plugin --profile web add dsh-boost@^0.2.3 --registry=https://registry.npmjs.org/`.
+For the web profile: `dsh plugin --profile web add dsh-boost@^0.2.6 --registry=https://registry.npmjs.org/`.
 `dsh plugin` forwards the operation to pnpm, so pnpm must be on `PATH`.
 
-> **`^0.2.3` is the current safe pin.** `registry.npmjs.org` has `latest` at `0.2.3`, with
+> **`^0.2.6` is the current safe pin.** `registry.npmjs.org` has `latest` at `0.2.6`, with
 > `0.1.4`, `0.1.3`, `0.1.2`, `0.1.1`, `0.1.0` behind it, plus `0.0.0-stage`, the placeholder npm
 > creates on a package's first publish — **do not install `0.0.0-stage`**; it is not a usable
 > build. `0.2.0` adds the settings page (`dsh.client`, the `./client` export, the
