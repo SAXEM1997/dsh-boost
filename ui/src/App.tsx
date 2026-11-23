@@ -178,6 +178,24 @@ export function App() {
               label={c.LABEL_ESTIMATE}
               value={status?.estimate_kind === 'host' ? c.ESTIMATE_HOST : c.UNKNOWN}
             />
+            <Row
+              label={c.LABEL_CACHE_HIT_RATIO}
+              value={
+                typeof status?.cache_hit_ratio === 'number'
+                  ? `${(status.cache_hit_ratio * 100).toFixed(2)}%`
+                  : c.UNKNOWN
+              }
+              hint={c.HINT_CACHE_HIT_RATIO}
+            />
+            <Row
+              label={c.LABEL_PREFIX_DROPS}
+              value={
+                status?.prefix_drops === undefined
+                  ? c.UNKNOWN
+                  : `${status.prefix_drops.count} / ${status.prefix_drops.tokens.toLocaleString()}`
+              }
+              hint={c.HINT_PREFIX_DROPS}
+            />
           </Section>
 
           {result.ok === true ? (

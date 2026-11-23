@@ -714,11 +714,14 @@ async function aggregate(
     // measurement, while no receipt carrying the field means "not measured"
     // and the key is omitted from `status` rather than reported as zero
     // (review row 7).
-    // Pair the two sums on the same receipt: a rollover settlement writes a
-    // numeric lower bound with `saved_input_tokens: 'unknown'`, so summing the
-    // lower over a superset could report a floor above the ceiling
-    // (review qr5#2). A receipt that carries only one side contributes to
-    // neither.
+    // The lower sum demands **both** sides, the upper does not. That asymmetry
+    // is deliberate (review qr5#2): a rollover settlement writes a numeric
+    // `avoided_total_tokens` with `saved_input_tokens: 'unknown'`, so summing
+    // the lower over a superset could report a floor above the ceiling. The
+    // reverse case — a receipt with only `saved_input_tokens` — is safe: it
+    // enlarges an over-estimate and only widens the bracket. Consequence: the
+    // two sums may cover different receipt sets; the lower never exceeds the
+    // upper, but do not read them as "the same N measurements, twice".
     const avoided = receipt.avoided_total_tokens
     const upper = receipt.saved_input_tokens
     if (

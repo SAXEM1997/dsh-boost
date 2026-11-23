@@ -102,5 +102,9 @@
   "ADVICE_FOR_CODE.ERR_HOST_NO_SPILL": "宿主没有可用的 spill 后端，投影因此只保留截断后的文本、不保存原文。装一个 spill 后端（`dsh-spill-local` 或你们自己的实现）后重启。",
   "HINT_PROJECTION_ON_SPILL_OK": "宿主解析出了 spill 后端（`status.hasSpill` 为 true），原文会落到那里。注意这只证明后端在，不证明它写得进去——真写不进去时 `boost status` 会报 `ERR_HOST_SPILL_UNUSABLE`。",
   "HINT_PROJECTION_ON_SPILL_UNKNOWN": "投影需要 spill 后端：原文要落盘，否则截断后的文本就是唯一副本。现在读不到 `status.hasSpill`，无法确认宿主有没有——先修好状态读取，或装一个（`dsh-spill-local` 或你们自己的实现）。",
-  "LABEL_HORIZON_REESTIMATED": "按当前视界重算的回执"
+  "LABEL_HORIZON_REESTIMATED": "按当前视界重算的回执",
+  "LABEL_CACHE_HIT_RATIO": "缓存命中率",
+  "HINT_CACHE_HIT_RATIO": "最近一次真实请求的 cacheRead / 全部输入。没有样本时显示未测量，不写 0。",
+  "LABEL_PREFIX_DROPS": "前缀回落（次 / token）",
+  "HINT_PREFIX_DROPS": "同一会话内相邻请求里，缓存读低于上一次输入总量的次数与缺口。压缩或换路由也会造成回落，所以它是诊断，不是告警。"
 }

@@ -102,5 +102,9 @@
   "ADVICE_FOR_CODE.ERR_HOST_NO_SPILL": "The host has no usable spill backend, so projection keeps only the truncated text and does not save the original. Install a spill backend (`dsh-spill-local` or your own) and restart.",
   "HINT_PROJECTION_ON_SPILL_OK": "The host resolved a spill backend (`status.hasSpill` is true), so the original will land there. That proves the backend is present, not that it can write — `boost status` reports `ERR_HOST_SPILL_UNUSABLE` when it cannot.",
   "HINT_PROJECTION_ON_SPILL_UNKNOWN": "Projection needs a spill backend: the original has to land somewhere, or the truncated text is the only copy. `status.hasSpill` cannot be read right now, so there is no telling whether the host has one — fix the status read first, or install one (`dsh-spill-local` or your own).",
-  "LABEL_HORIZON_REESTIMATED": "Receipts re-estimated at the current horizon"
+  "LABEL_HORIZON_REESTIMATED": "Receipts re-estimated at the current horizon",
+  "LABEL_CACHE_HIT_RATIO": "Cache hit ratio",
+  "HINT_CACHE_HIT_RATIO": "cacheRead over all input on the most recent real request. With no sample this shows \"unknown\", never 0.",
+  "LABEL_PREFIX_DROPS": "Prefix drops (count / tokens)",
+  "HINT_PREFIX_DROPS": "Within one session, how often cacheRead fell below the previous request's total input, and by how much. Compaction or a route change also causes this, so it is a diagnostic, not an alarm."
 }

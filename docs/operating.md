@@ -393,6 +393,9 @@ horizon 重放，并计入 `projection_horizon_reestimated`；`projection_horizo
 - `saved`：兼容旧消费者的 camelCase 账目对象（`substitution` / `substitutionAvoided` /
   `projectionGross` / `projectionNet` / `retrievals`），与顶层 snake_case 字段由同一次聚合派生。
   旧投影收据（pre-T23b）没有 `saved_projection_tokens` 时，按收据里的 legacy `saved` 字段回退计价。
+  **两个和覆盖的收据集合可以不同**：下界只累加**同时**带两侧数值的收据，上界只看 `saved_input_tokens` 是否可读。
+  这是故意的——写上下界时若一侧缺失就整体不计入下界，能保证下界永不超过上界；反过来只放大上界，只会让区间更宽。
+  不要把两个数读成「同一批测量算了两次」。
   **两个替换数是一对区间，不是同一个量**：`substitution` 取被跳过请求的**下一**个真实请求的输入
   （含被替换调用自己的结果，所以是**上界**）；`substitutionAvoided` 取计划那一次请求的
   `input + cacheRead + output`（不含被替换调用的结果，所以是**下界**）。真实节省落在两者之间。

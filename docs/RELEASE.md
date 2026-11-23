@@ -1,6 +1,6 @@
 # dsh-boost 发布验收
 
-本文是 `dsh-boost` 0.2.3 的发布验收手册（版本以 `package.json` 为准）。它覆盖四件事：
+本文是 `dsh-boost` 的发布验收手册（版本以 `package.json` 为准）。它覆盖四件事：
 
 1. `npm run verify:package` 一条命令的打包与产物验收（§1），以及零 peerDependencies 现状下
    两条降级路径的验收方式（§2）；
@@ -37,7 +37,7 @@ npm run verify:package
    将来若有人把 `prepare` 改成无条件重建，这条也不会让它在断言之前悄悄重建（并“修复”）工作树。
    显式构建后打包，包内容就是这次构建的产物；干净 clone 上即使 `dist/` 不存在也能跑，因为构建
    发生在打包之前。
-2. **exact allowlist**：每一个 tar 条目都必须由六类来源之一解释——固定根文件（`package.json`、
+2. **exact allowlist**：每一个 tar 条目都必须由七类来源之一解释——固定根文件（`package.json`、
    `LICENSE`、`NOTICE`、两份 README）、`dsh.bundle.patch` 指向的 patch 文件、`locale/*.json`、
    `static/*`（README 里引用的图片）、
    `exports["./client"]` 指向的客户端产物（仅当 `dsh.client` 声明时；两者必须同时存在或同时缺席，
@@ -328,7 +328,7 @@ grep -c '"code":"ERR_HOST_NO_TOKENMETER"' "$DSH_HOME"/boost/receipts/*.jsonl
 
 `package.json` **不声明任何 `peerDependencies` / `peerDependenciesMeta`**。四个
 `@deepseek-ai/*`（`dsh-llm`、`dsh-tools`、`dsh-spill-policy`、`dsh-token-meter`）只以精确钉版
-出现在 `devDependencies`（`0.2.3-rc.4`，不跟随范围）。
+出现在 `devDependencies`（`0.2.2-rc.4`，不跟随范围）。
 删除的原因：npm 11 会把声明的 peerOptional **直接装上**——在 rc.4 宿主树里装带 peer 的旧
 tarball 会拉进 `dsh-spill-policy@rc.5` 并 `ERESOLVE`（当时实测 exit 1），“optional 标记允许
 宿主不装”的初衷反被堵死。删除之后的事实：
@@ -337,16 +337,20 @@ tarball 会拉进 `dsh-spill-policy@rc.5` 并 `ERESOLVE`（当时实测 exit 1�
 - 模块**不依赖它们也能加载**：`dsh-llm` / `dsh-tools` 在运行时是纯 type import；
   `@deepseek-ai/dsh-token-meter/estimate` 与 `@deepseek-ai/dsh-spill-policy/notice` 是带兜底的
   动态 import，从**宿主树**解析——宿主提供它们，解析不到走降级（§2.1、§2.2）；
-- 与宿主的兼容性由 `engines.dsh`（区间 `>=0.2.3-rc.4 <0.2.3-0`，按宿主自己的 `includePrerelease` 语义）声明；`engines.node` 是
-  `>=24.9.0`（对齐宿主 `@deepseek-ai/dsh@0.2.3-rc.4` 的 Node 下限）。加载时若解析到的宿主版本
+- 与宿主的兼容性由 `engines.dsh`（区间 `>=0.2.2-rc.4 <0.2.3-0`，按宿主自己的 `includePrerelease` 语义）声明；`engines.node` 是
+  `>=24.9.0`（对齐宿主 `@deepseek-ai/dsh@0.2.2-rc.4` 的 Node 下限）。加载时若解析到的宿主版本
   **落在区间外**，插件告警 `ERR_HOST_VERSION_MISMATCH` 但**仍然加载**（advisory：版本不符是风险，
-  不是 API 已改的证明；改名仍可能让插件失效）。区间内但不是验证过的 `0.2.3-rc.4`（如 `rc.5` /
-  `0.2.3`）只记 info、不发码——`0.2.3-rc.5` 与本插件触及的九个包逐字节相同。
+  不是 API 已改的证明；改名仍可能让插件失效）。区间内但不是验证过的 `0.2.2-rc.4`（如果将来有 `0.2.2-rc.5`）只记 info、不发码。
+  **`0.2.3-rc.4` / `0.2.3-rc.5` / `0.2.3` 都在区间外**：它们会告警一次，但仍照常加载——`0.2.3-rc.5`
+  与本插件触及的九个包逐字节相同（见 §6），所以那条告警说的是「没验证过」，不是「会坏」。
 
-安装规格：**`dsh-boost@^0.2.3`**。registry 上有九条版本记录，其中一条是占位版本，不要把它当成
+安装规格：**`dsh-boost@^0.2.6`**。registry 上有十三条版本记录，其中一条是占位版本，不要把它当成
 “更早的 API”：
 
-- `0.2.3` — 当前 `latest`；第二轮通读后的修复，其中三条是 0.2.1 带着发布的（写失败码被 `SCOPE_CODES` 吞成 `ERR_BOOST_INTERNAL`、git 安装缺 `lib/client.js`、`/state` 失败被渲染成「一切正常」）；
+- `0.2.6` — 当前 `latest`；修掉 0.2.5 引入的「`degraded` 不是数组时整页崩」，并补 `boost status` 的两个缓存护栏字段（`cache_hit_ratio`、`prefix_drops`）；
+- `0.2.5` — 失效工作区标签措辞、`NO_DEGRADED` 改为只陈述观测、渲染视界重算计数；
+- `0.2.4` — 修 0.2.3 引入的「状态面板永远显示读不到」，spill 提示区分存在与可用；
+- `0.2.3` — 第三轮通读后的修复，其中三条是 0.2.1 带着发布的（写失败码被 `SCOPE_CODES` 吞成 `ERR_BOOST_INTERNAL`、git 安装缺 `lib/client.js`、`/state` 失败被渲染成「一切正常」）；
 - `0.2.1` — 第一轮通读后的修复，其中三条是 0.2.0 带着发布的行为错误（状态面板读高一层信封、危险提示挂错开关、写失败被报成读失败）；
 - `0.2.0` — 首个带设置页的版本；新增设置页（`dsh.client`、`./client` 出口、`/dsh-boost/api` 路由、
   随包发布的 `lib/client.js`）与中英双语；`0.1.x` 没有设置页；
@@ -382,7 +386,7 @@ tarball 会拉进 `dsh-spill-policy@rc.5` 并 `ERESOLVE`（当时实测 exit 1�
 
 #### `0.2.3-rc.5` 逐字节复核（2026-11-21）
 
-`engines.dsh` 的上界放行 `0.2.3-rc.5`，依据是它在本插件触及的九个宿主包里与 rc.4 逐字节相同。
+`0.2.3-rc.5` 落在 `engines.dsh` 区间**外**（会告警 `ERR_HOST_VERSION_MISMATCH`），但它在本插件触及的九个宿主包里与验证过的 rc.4 逐字节相同——所以那条告警表示「没验证」，不表示「跑不了」。这条断言可以复跑：
 这条断言可以复跑（需要能访问 registry；无 `DIFF` 输出即九个包的 `lib/` 全部相同）：
 
 ```bash
@@ -451,7 +455,7 @@ JSON 体返回一个码，页面据码决定说什么。`ERR_CLIENT_*` 是页面
 | `ERR_BOOST_INVALID_ARGS` | `boost` 工具失败 `code` | `baseRevision` 缺失或不是非负整数（`scope-set` / `shadow`） | 从 `status` 取整数 revision 再传 |
 | `ERR_BOOST_INVALID_BODY` | `boost` 工具失败 `code` | `body` 形状/类型不对；`scope-set` 带了保留字段 `version` / `revision`；`shadow` 的 body 不是布尔 | 按工具 schema 重写 body |
 | `ERR_BOOST_INTERNAL` | `boost` 工具失败 `code` | 未预期的内部失败（工具仍以值返回，不抛出） | 记录 `status` 与日志，按 bug 上报 |
-| `ERR_HOST_VERSION_MISMATCH` | 加载日志警告 | 解析到的宿主版本**落在 `engines.dsh` 区间外**（`<0.2.3-rc.4` 或 `>=0.2.3-0`）；插件**仍然加载**，改名 API 仍可能让它失效。区间内的 `rc.5` / `0.2.3` 只记 info，不发码 | 核对 `engines.dsh` 与宿主版本；换回区间内或接受风险 |
+| `ERR_HOST_VERSION_MISMATCH` | 加载日志警告 | 解析到的宿主版本**落在 `engines.dsh` 区间外**（`<0.2.2-rc.4` 或 `>=0.2.3-0`，包含 `0.2.3-rc.x`）；插件**仍然加载**，改名 API 仍可能让它失效 | 核对 `engines.dsh` 与宿主版本；换回区间内或接受风险 |
 | `ERR_HOST_NO_AGENT_REQUEST` | 加载日志警告（一次） | `llm/stream` 前没观察到 `agent/request`；selector 路由捕获不到，多候选替换会 fail-closed | 宿主事件已废弃/移除；升级宿主，或只用单候选替换 |
 | `ERR_HOST_NO_SYSTEM_PROMPT_ASSEMBLE` | 加载日志警告（一次） | 首个 `agent/pre-step` 到达前从未观察到 `system-prompt/assemble`：协议段无法预热/打补丁（事件可能被改名或移除）。事件名同时进 `missingMounts`，所以 `status.degraded` 里看到的是 `ERR_BOOST_PARTIAL_MOUNT` | 核对宿主提示装配事件；升级宿主，或接受协议段不可用 |
 | `ERR_HOST_NO_AGENT_PRE_STEP` | 加载日志警告（一次） | 首个**主** `llm/stream` 前没有该会话的 `agent/pre-step`：步进时钟无法推进，替换不可能（带 `purpose` 的辅助请求不触发）。同样进 `missingMounts` | 升级宿主；此宿主上替换不可用，投影仍可用 |
