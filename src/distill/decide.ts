@@ -78,7 +78,7 @@ export interface DecideInput {
   /** The owning session, which also names the products it wrote. */
   sessionId: string
   /** The turn the receipt belongs to; carried so a late answer can be receipted. */
-  turn?: number
+  turn: number
   /** The product table. */
   store: DistillStore
   /** The model call, or `undefined` when the host has no LLM (then `distill-failed`). */
@@ -327,7 +327,12 @@ async function adopt(
     return await reject('not-smaller')
   }
 
-  if (!fromTable) {
+  // Written on the first decision, and also when a table hit had no pin to
+  // reuse: a product persisted by the late-answer path (`DistillAttempts`)
+  // carries no locator, so the first adoption spills for it — and unless that
+  // locator is recorded here, every later adoption spills again and renders
+  // different bytes for the same receipt.
+  if (!fromTable || pinnedSpill === undefined) {
     try {
       await input.store.write(sessionId, key, {
         text: answer.text,
@@ -410,12 +415,19 @@ export async function decide(input: DecideInput): Promise<DistillOutcome | null>
     timeoutMs: input.cfg.distillation.timeoutMs,
     key,
     sessionId: input.sessionId,
-    ...(input.turn === undefined ? {} : { turn: input.turn }),
+    turn: input.turn,
   }
   // `settled` is created **before** anything else can await, so a time-bounded
   // caller (the parked branch below) already holds a promise that will fire
   // however deep the call chain is.
   let settle: (answer: DistillAnswer | undefined) => void = () => {}
+  // Pre-flight the two things a usable answer needs before paying for one: a
+  // footer formatter and a spill backend. Checked inside `adopt` they would
+  // cost a model call per render on a host that has neither, and the answer
+  // would be discarded anyway.
+  if (input.formatFooter === undefined || input.spill === undefined) {
+    return { content: null, code: 'distill-failed', mode: 'fallback', evidence: { called: false, adopted: false } }
+  }
   const settled = new Promise<DistillAnswer | undefined>((resolve) => {
     settle = resolve
   })
@@ -441,6 +453,11 @@ export async function decide(input: DecideInput): Promise<DistillOutcome | null>
   )
   // The race observes the same outcome; a throw is a value here, never a
   // rejection of `decide`.
+  // What the call cost in prompt bytes is known before it is made, so every
+  // outcome — answered, threw, timed out — can report it. Without this a
+  // throw or an unanswered timeout reports `calls: 1` and zero input, which is
+  // the opposite of what the ledger is for.
+  const inputChars = Array.from(input.text).length
   const call = started.then(
     (answer): CallOutcome => ({ kind: 'answered', answer }),
     (): CallOutcome => ({ kind: 'threw' }),
@@ -460,7 +477,7 @@ export async function decide(input: DecideInput): Promise<DistillOutcome | null>
       content: null,
       code: 'distill-rejected:timeout',
       mode: 'fallback',
-      evidence: { called: true, adopted: false, reason: 'timeout' },
+      evidence: { called: true, adopted: false, reason: 'timeout', inputChars },
     }
   }
   const answer = raced.kind === 'answered' ? raced.answer : undefined
@@ -470,7 +487,7 @@ export async function decide(input: DecideInput): Promise<DistillOutcome | null>
     typeof answer.text !== 'string' ||
     !Array.isArray(answer.quotes)
   ) {
-    return { content: null, code: 'distill-failed', mode: 'fallback', evidence: { called: true, adopted: false } }
+    return { content: null, code: 'distill-failed', mode: 'fallback', evidence: { called: true, adopted: false, inputChars } }
   }
   const model = typeof answer.model === 'string' && answer.model !== '' ? answer.model : route.model
   const tokens = typeof answer.tokens === 'number' && Number.isFinite(answer.tokens) ? answer.tokens : undefined
@@ -485,7 +502,7 @@ export async function decide(input: DecideInput): Promise<DistillOutcome | null>
       called: true,
       adopted: false,
       model,
-      inputChars: Array.from(input.text).length,
+      inputChars,
       ...(tokens === undefined ? {} : { tokens }),
     },
     false,

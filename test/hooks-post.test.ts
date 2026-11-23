@@ -2153,11 +2153,10 @@ test('#10 伪造引用 → distill-rejected:unverifiable，历史里是截断视
   })
   const text = bashReceipt()
   const res = await runBash(env.host, text)
-  // Not adopted: the decision is untouched by the distill path, and in
-  // production the next shaper (the host spill policy) then truncates it. Here
-  // `formatFooter` is a test seam the host never reads, so the assertion is
-  // that the plugin handed over no distilled body.
-  assert.equal(res?.content, undefined, 'the distill path did not accept the receipt')
+  // #9: a refusal falls back to the deterministic truncation, so enabling
+  // distillation can never be worse than plain projection. The body is the
+  // projection's head/tail view, not the raw receipt.
+  assert.ok(res?.content?.[0]?.text.includes('[output '), 'the refusal falls back to the truncation view')
   const receipt = env.receipts.find((r) => r.code === 'distill-rejected:unverifiable')
   assert.ok(receipt, JSON.stringify(env.receipts.map((r) => r.code)))
   assert.equal(receipt.kind, 'skip')
@@ -2184,7 +2183,7 @@ test('#10 蒸馏比截断长 → distill-rejected:not-smaller', async () => {
   })
   const text = bashReceipt()
   const res = await runBash(env.host, text)
-  assert.equal(res?.content, undefined)
+  assert.ok(res?.content?.[0]?.text.includes('[output '), 'a refusal falls back to the truncation view')
   const receipt = env.receipts.find((r) => r.code === 'distill-rejected:not-smaller')
   assert.ok(receipt)
   assert.equal(receipt.mode, 'rejected')
@@ -2192,22 +2191,30 @@ test('#10 蒸馏比截断长 → distill-rejected:not-smaller', async () => {
 })
 
 test('#10 挂起超过 timeoutMs → distill-rejected:timeout，不抛', async () => {
+  let attempts = 0
   const env = await distillSetup({
     cfg: distillConfig({ timeoutMs: 100 }),
     deps: {
       distill: {
-        call: () => new Promise(() => {}),
+        call: () => {
+          attempts += 1
+          return new Promise(() => {})
+        },
       },
     },
   })
   const text = bashReceipt()
   const res = await runBash(env.host, text)
-  assert.equal(res?.content, undefined, 'no exception, no replacement')
+  assert.ok(res?.content?.[0]?.text.includes('[output '), 'a refusal falls back to the truncation view')
   const receipt = env.receipts.find((r) => r.code === 'distill-rejected:timeout')
   assert.ok(receipt)
   assert.equal(receipt.distill_calls, 1)
-  // The model never answered and nothing was pinned: a replay may try again.
-  assert.equal(env.saved.length, 0)
+  // A timeout is the one refusal that is not pinned, so a replay tries again.
+  // (The spill above is the *projection's* — the truncation view always writes
+  // its original — not a distilled product.)
+  const before = attempts
+  await runBash(env.host, text)
+  assert.equal(attempts, before + 1, 'an unanswered timeout pins nothing')
 })
 
 test('#10 DistillFn 抛错 → distill-failed，返回正常', async () => {
@@ -2221,7 +2228,7 @@ test('#10 DistillFn 抛错 → distill-failed，返回正常', async () => {
     },
   })
   const res = await runBash(env.host, bashReceipt())
-  assert.equal(res?.content, undefined)
+  assert.ok(res?.content?.[0]?.text.includes('[output '), 'a refusal falls back to the truncation view')
   assert.ok(env.receipts.some((r) => r.code === 'distill-failed' && r.kind === 'skip'))
 })
 
@@ -2229,7 +2236,7 @@ test('#10 没有 LLM 或没有路由 → distill-failed（不报新的降级码�
   for (const deps of [{ distill: undefined }, { distillRoute: () => undefined }]) {
     const env = await distillSetup({ deps })
     const res = await runBash(env.host, bashReceipt())
-    assert.equal(res?.content, undefined)
+    assert.ok(res?.content?.[0]?.text.includes('[output '), 'a refusal falls back to the truncation view')
     const receipt = env.receipts.find((r) => r.code === 'distill-failed')
     assert.ok(receipt)
     assert.equal(receipt.distill_calls, 0)
@@ -2276,7 +2283,7 @@ test('#10 ssh 族同样可蒸馏；read 族永不蒸馏', async () => {
 test('#10 投影 shadow 模式不蒸馏：只记 projection-shadow', async () => {
   const env = await distillSetup({ doc: doc({ projection: 'shadow' }) })
   const res = await runBash(env.host, bashReceipt())
-  assert.equal(res?.content, undefined, 'shadow writes nothing the model sees')
+  assert.equal(res?.content, undefined, 'shadow mode replaces nothing')
   assert.ok(env.receipts.some((r) => r.code === 'projection-shadow'))
   assert.equal(env.receipts.some((r) => r.mode !== undefined), false, 'no distillation receipt in shadow mode')
   // The receipt is the only observable a user sees; the call itself is the

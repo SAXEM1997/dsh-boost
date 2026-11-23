@@ -8,6 +8,25 @@ This file records user-visible changes. Format follows Keep a Changelog; version
 Design rationale lives in `docs/superpowers/specs/`; the release-acceptance procedure is in
 `docs/RELEASE.md`.
 
+## [0.3.1] - 2026-11-23
+
+修复 0.3.0 里蒸馏路径的五处缺陷。前四条在默认配置下不显形（`distillation.enabled` 默认 `false`），但一旦打开就会让投影**变差**。
+
+### 修复
+
+- **拒绝不再取消投影。** 蒸馏被拒、失败或超时时，0.3.0 把原始回执原样交下去，连确定性截断都跳过了——打开蒸馏反而比只开投影更糟，而墓碑会让第一次拒绝永久冻结这个状态。现在一律退回截断视图（#9 的「可回退」）。
+- **迟到产物补写 spill 钉。** 超时后落盘的产物不带 `spill`，第一次采用会为它 spill，但那个 locator 没被记下；此后每次采用都重新 spill，页脚因此每次都变——同一回执渲染出不同字节，前缀缓存从那里断掉。
+- **模型调用前先查前置条件。** 没有页脚拼装器或没有 spill 后端时，0.3.0 仍先付一次模型调用再把答案丢掉；现在在调用之前返回 `distill-failed`（`distill_calls: 0`）。
+- **`distill_input_chars` 覆盖每一次调用。** 抛错、解析失败、超时三条路径原先只记 `calls: 1` 而输入为 0，正好把成本最高的调用记成零输入。
+- **迟到收据带上真实回合。** `turn` 在 `post-execute` 到 `decide` 之间没有接线，`distill-late` 收据恒为 `turn: 0`；`DecideInput.turn` 改成必填，漏传现在是类型错误。
+
+### 文档
+
+- `distill-rejected:timeout` 不再声称「重放不会重复计费」——答案始终没来时同一回执会重调一次。
+- `distill-rejected:unverifiable` 补上「答案没给出任何引用」这一触发条件。
+- 收据码表补 `distill-late` 行；墓碑说明从表内移到表后（它原先切断了表格）。
+- 说明 `status.distill.adopted` 数的是采用次数（含读表重放），可能大于 `calls`。
+
 ## [0.3.0] - 2026-11-23
 
 ### 新增

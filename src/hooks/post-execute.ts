@@ -2109,6 +2109,7 @@ async function distillDecision(
       family,
       cfg: deps.config,
       sessionId: ctx.sessionId,
+      turn: ctx.turn,
       store,
       distill: deps.distill,
       route,
@@ -2148,6 +2149,8 @@ async function finishDistillDecision(
   estimate: ((text: string) => number) | undefined,
 ): Promise<PostExecuteDecision> {
   if (outcome.content === null || outcome.mode !== 'adopted') {
+    // Unreachable: the caller records a refusal and falls through to the
+    // ordinary projection. Kept as a type-narrowing guard.
     await appendReceipt(
       deps,
       ledgerEntry(ctx, 'skip', distillReceiptCode(outcome), distillEvidence(outcome)),
@@ -2295,11 +2298,20 @@ async function projectDecision(
     // original and pin a product that never reaches a receipt — design §5.4's
     // "shadow must not write" applies to every writer, not just the spill.
     const distillation = await distillDecision(deps, ctx, family, target)
-    if (distillation !== null) {
-      // `distillDecision` already spilled the original and wrote the product:
-      // an adopted body replaces the receipt here, and anything else falls
-      // through to the ordinary truncation below with its reason recorded.
+    if (distillation !== null && distillation.mode === 'adopted') {
+      // `distillDecision` already spilled the original and wrote the product;
+      // an adopted body replaces the receipt here.
       return await finishDistillDecision(deps, ctx, decision, family, target, distillation, estimate)
+    }
+    if (distillation !== null) {
+      // #9: "超时、失败、被拒，一律退回确定性截断". A refusal is not a reason to
+      // hand the raw receipt to the model — that would make enabling
+      // distillation *worse* than plain projection, and with tombstones the
+      // first refusal would freeze that state for every replay.
+      await appendReceipt(
+        deps,
+        ledgerEntry(ctx, 'skip', distillReceiptCode(distillation), distillEvidence(distillation)),
+      )
     }
 
     const { content, outcome } = await projectApply({

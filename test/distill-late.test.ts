@@ -128,7 +128,10 @@ test('超时后的答案在落地时落盘：下一次渲染命中钉住产物�
     [{ name: 'bash', callId: 'b1', agent }, { content: [{ type: 'text', text }] }],
     async () => ({ kind: 'accept' }),
   )
-  assert.equal((decision as { content?: unknown }).content, undefined, 'a timeout replaces nothing')
+  assert.ok(
+    String((decision as { content?: Array<{ text?: string }> }).content?.[0]?.text).startsWith('[output '),
+    'a timeout falls back to the truncation view',
+  )
   const timeout = (env.receipts as Array<{ code: string }>).find((r) => r.code === 'distill-rejected:timeout')
   assert.ok(timeout)
 

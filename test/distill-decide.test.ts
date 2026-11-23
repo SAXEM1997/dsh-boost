@@ -19,7 +19,7 @@ import { join } from 'node:path'
 import { decide, verifyQuotes } from '../src/distill/decide.ts'
 import type { DecideInput } from '../src/distill/decide.ts'
 import type { DistillAnswer, DistillRequest } from '../src/distill/types.ts'
-import { questionOf } from '../src/distill/pin.ts'
+import { keyOf, questionKeyOf, questionOf, receiptKeyOf, versionOf } from '../src/distill/pin.ts'
 import { DistillStore } from '../src/distill/store.ts'
 import { DEFAULT_CONFIG } from '../src/config.ts'
 import { renderHeadLine, truncate } from '../src/projection/truncate.ts'
@@ -94,6 +94,7 @@ function baseInput(store: DistillStore, over: Partial<DecideInput> = {}): Decide
     family: 'bash',
     cfg: onConfig(),
     sessionId: 's1',
+    turn: 1,
     store,
     distill: fakeFn(async (request) => goodAnswer(request.text)).fn,
     route: { provider: 'p', model: 'deepseek-flash' },
@@ -204,6 +205,32 @@ test('查表命中不再落盘：产物里钉住 locator，重放不产生第二
   assert.equal(spills, 1, 'a table hit must not write a second spill artifact')
   assert.equal(second.content, first.content, 'the replay renders the same bytes')
   assert.equal(fake.calls.length, 1)
+})
+
+test('迟到产物没有 spill 钉：首次采用补写钉子，第三次渲染字节仍相同', async () => {
+  const store = await makeStore()
+  let spills = 0
+  const countingSpill = {
+    saveText: async () => {
+      spills += 1
+      return { locator: `/spill/late-${spills}.txt`, retrievalHint: 'read it' }
+    },
+  }
+  const input = baseInput(store, { distill: fakeFn(async (r) => goodAnswer(r.text)).fn, spill: countingSpill })
+  // The late-answer path (`DistillAttempts.persist`) writes a product with no
+  // `spill`, so the first adoption has to spill for it.
+  const question = questionOf('bash')
+  assert.ok(question)
+  const key = keyOf(receiptKeyOf(input.text), questionKeyOf(question), versionOf('deepseek-flash', question))
+  const late = goodAnswer(input.text)
+  await store.write(input.sessionId, key, { text: late.text, quotes: late.quotes, model: 'deepseek-flash' })
+  const first = await decide(input)
+  const second = await decide(input)
+  const third = await decide(input)
+  assert.ok(first && second && third)
+  assert.equal(spills, 1, 'the pin written by the first adoption must be reused afterwards')
+  assert.equal(second.content, first.content)
+  assert.equal(third.content, first.content)
 })
 
 test('空正文 → distill-rejected:empty，且不落盘原文', async () => {
