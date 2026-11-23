@@ -2,13 +2,14 @@
  * Ticket #10: the product store.
  *
  * Products live at `<root>/distilled/<receipt_hash>-<question_hash>-<version>.json`
- * and follow the receipts' lifecycle: a session end removes what that session
- * wrote, because a product is evidence for the round that produced it, and a
- * stale product is a cache entry nothing will read again.
+ * and outlive the session that produced them (ADR 0001): a replay must read the
+ * same bytes instead of paying for the same call again, so nothing deletes a
+ * product on session end. Retention is bounded by count and total size instead,
+ * oldest first, and the product just written is never a candidate.
  */
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtemp, mkdir, readFile, readdir, rm, writeFile } from 'node:fs/promises'
+import { mkdtemp, mkdir, readFile, readdir, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { DistillStore } from '../src/distill/store.ts'
@@ -74,33 +75,6 @@ test('write 失败向上抛（由 decide 映射成 distill-failed），不吞', 
   await assert.rejects(() => store.write('s1', { file: 'a' }, PRODUCT))
 })
 
-test('按会话清理：只删该会话写过的产物，别的会话与手写文件不动', async () => {
-  const dir = await root()
-  const store = new DistillStore(dir)
-  await store.write('s1', { file: 'one' }, PRODUCT)
-  await store.write('s1', { file: 'two' }, PRODUCT)
-  await store.write('s2', { file: 'three' }, PRODUCT)
-  await writeFile(join(dir, 'distilled', 'manual.json'), '{}')
-
-  const removed = await store.clearSession('s1')
-
-  assert.equal(removed, 2)
-  assert.equal(await store.read({ file: 'one' }), undefined)
-  assert.equal(await store.read({ file: 'two' }), undefined)
-  assert.ok(await store.read({ file: 'three' }), 'another session keeps its products')
-  assert.deepEqual((await readdir(join(dir, 'distilled'))).sort(), ['manual.json', 'three.json'])
-})
-
-test('会话清理是幂等的，对未知会话与缺失目录都是 0', async () => {
-  const dir = await root()
-  const store = new DistillStore(dir)
-  assert.equal(await store.clearSession('ghost'), 0)
-  await store.write('s1', { file: 'one' }, PRODUCT)
-  assert.equal(await store.clearSession('s1'), 1)
-  assert.equal(await store.clearSession('s1'), 0)
-  await rm(dir, { recursive: true, force: true })
-})
-
 test('并发读写同一 key：写是原子的，读到的要么是旧值要么是新值', async () => {
   const dir = await root()
   const store = new DistillStore(dir)
@@ -139,22 +113,10 @@ test('写入超过总字节上限时也裁，且至少留下刚写的那一条',
     await new Promise((resolve) => setTimeout(resolve, 12))
   }
   const files = await readdir(join(dir, 'distilled'))
-  // Three products are ~500 bytes together, well past 200: only the tail stays,
-  // and never zero — the product just written is the one the caller is about to
-  // render, so pruning must not delete it out from under them.
-  assert.ok(files.length >= 1)
-  assert.equal(files.includes('c-v1.json'), true)
-  assert.ok(files.length < 3)
+  // Three products are well past 200 bytes together, so the oldest go one by
+  // one until the total fits: exactly the newest survives, and never zero — the
+  // product just written is the one the caller is about to render, so pruning
+  // must not delete it out from under them.
+  assert.deepEqual(files, ['c-v1.json'])
 })
 
-test('clearSession 仍然只删本进程为该会话写过的产物', async () => {
-  const dir = await root()
-  const store = new DistillStore(dir)
-  await mkdir(join(dir, 'distilled'), { recursive: true })
-  // A file this process never wrote: not ours to delete, even on session end.
-  await writeFile(join(dir, 'distilled', 'foreign-v1.json'), JSON.stringify(PRODUCT), 'utf8')
-  await store.write('s1', { file: 'mine-v1' }, PRODUCT)
-  assert.equal(await store.clearSession('s1'), 1)
-  const files = await readdir(join(dir, 'distilled'))
-  assert.deepEqual(files, ['foreign-v1.json'])
-})

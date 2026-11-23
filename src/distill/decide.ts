@@ -200,6 +200,13 @@ function triggerOf(cfg: BoostConfig, family: ToolFamily): number | null {
 
 /** The empty locator used for the first render, whose only job is to measure the footer. */
 
+/** The rendered truncation view: marker, head, footer, tail, then preserved signals. */
+function truncationViewText(truncation: { head: string; tail: string; signals?: readonly string[] } & Parameters<typeof renderHeadLine>[0], footer: string): string {
+  const view = `${renderHeadLine(truncation)}\n${truncation.head}\n${footer}\n${truncation.tail}`
+  const signals = truncation.signals ?? []
+  return signals.length === 0 ? view : `${view}\n${signals.join('\n')}`
+}
+
 /**
  * The truncation view of the same receipt, in bytes.
  *
@@ -223,10 +230,7 @@ function truncationViewBytes(
     locator,
     retrievalHint: '',
   })
-  const view = `${renderHeadLine(truncation)}\n${truncation.head}\n${footer}\n${truncation.tail}`
-  const signals = truncation.signals ?? []
-  const withSignals = signals.length === 0 ? view : `${view}\n${signals.join('\n')}`
-  return Buffer.byteLength(withSignals, 'utf8')
+  return Buffer.byteLength(truncationViewText(truncation, footer), 'utf8')
 }
 
 /**
@@ -249,27 +253,43 @@ function keyFor(text: string, question: DistillQuestion, model: string): Distill
   return keyOf(receiptKeyOf(text), questionKeyOf(question), versionOf(model, question))
 }
 
+/** What the payback gate concluded: `unknown` means the gate does not apply. */
+type Payback = 'worth' | 'not-worth' | 'unknown'
+
 /**
- * Persist the answer and adopt it, or explain why not.
+ * Price one string, or answer "I cannot price this".
  *
- * Split out so the hit path and the call path share one verification: a product
- * read from disk and a product just received go through the same quote and size
- * gates before either can reach history.
+ * The injected estimator is a host seam: it throws when the meter is broken and
+ * answers `NaN` when it cannot price a message. Both mean the same thing here —
+ * the comparison has no inputs — so they collapse to `undefined` rather than
+ * becoming a number that makes the gate refuse on arithmetic it never did.
  */
+function priced(estimate: (text: string) => number, text: string): number | undefined {
+  try {
+    const value = estimate(text)
+    return Number.isFinite(value) ? value : undefined
+  } catch {
+    return undefined
+  }
+}
+
 /**
  * Whether a distillation could ever pay for its own model call.
  *
  * The most a distillation can save is `truncation view − footer` per replay —
  * an empty body plus a footer is the smallest view any answer can produce — and
- * a receipt is replayed `1 + remainingSteps` times. The call costs at least the
+ * a receipt is replayed `max(1, remainingSteps)` times: once for the request
+ * that carries it, then once per remaining step. The call costs at least the
  * receipt as input plus the output budget. When the best case does not cover
  * the cost, no answer pays back, so the call is skipped instead of paid for.
  *
- * Both sides go through the same estimator, so the comparison is unit-correct
- * even when the estimator is the crude `chars / 4` fallback. A host without an
- * estimator never reaches here (`input.estimate` is undefined).
+ * `unknown` is not a refusal: it means this receipt has no truncation view to
+ * beat (too short for the window, over the projection's byte ceiling, or a
+ * window that would not shorten it) or the estimator could not price it. The
+ * ordinary path already refuses those for its own reasons, and inventing an
+ * economic refusal would report a comparison that never ran.
  */
-function paysBack(
+function payback(
   text: string,
   cfg: BoostConfig,
   family: ToolFamily,
@@ -277,28 +297,36 @@ function paysBack(
   estimate: (text: string) => number,
   remainingSteps: number,
   maxOutputTokens: number,
-): boolean {
+): Payback {
   const params = cfg.projection[family]
-  if (params === undefined) return false
+  if (params === undefined) return 'unknown'
   const truncation = truncate(text, params)
-  // No truncation view means nothing to beat: the receipt is either too short
-  // or over the projection's byte ceiling, and both are refusals elsewhere.
-  if (truncation === null) return false
+  if (truncation === null) return 'unknown'
   const footer = formatFooter({ kind: 'exact', count: truncation.omittedBytes }, {
     locator: '',
     retrievalHint: '',
   })
-  const truncationTokens = estimate(
-    `${renderHeadLine(truncation)}\n${truncation.head}\n${footer}\n${truncation.tail}`,
-  )
-  const bestSaving = truncationTokens - estimate(footer)
-  if (!Number.isFinite(bestSaving) || bestSaving <= 0) return false
-  const replays = 1 + Math.max(0, Math.floor(remainingSteps))
-  const cost = estimate(text) + maxOutputTokens
-  if (!Number.isFinite(cost)) return false
-  return bestSaving * replays > cost
+  const viewTokens = priced(estimate, truncationViewText(truncation, footer))
+  const footerTokens = priced(estimate, footer)
+  const costTokens = priced(estimate, text)
+  if (viewTokens === undefined || footerTokens === undefined || costTokens === undefined) {
+    return 'unknown'
+  }
+  const bestSaving = viewTokens - footerTokens
+  // A view no smaller than its own footer leaves nothing to save; that is a
+  // byte-gate matter, not an economic one.
+  if (bestSaving <= 0) return 'unknown'
+  const replays = Math.max(1, Math.floor(remainingSteps))
+  return bestSaving * replays > costTokens + maxOutputTokens ? 'worth' : 'not-worth'
 }
 
+/**
+ * Persist the answer and adopt it, or explain why not.
+ *
+ * Split out so the hit path and the call path share one verification: a product
+ * read from disk and a product just received go through the same quote and size
+ * gates before either can reach history.
+ */
 async function adopt(
   input: DecideInput,
   question: DistillQuestion,
@@ -486,25 +514,32 @@ export async function decide(input: DecideInput): Promise<DistillOutcome | null>
 
   // Payback gate. The byte gate below compares two renderings of one receipt;
   // it says nothing about whether the model call that produced them ever pays
-  // for itself. A receipt is replayed `1 + remainingSteps` times, so the most a
-  // distillation can ever save is (truncation view − footer) per replay, and
-  // the least it costs is the receipt as input plus the output budget. When
+  // for itself. A receipt is replayed `max(1, remainingSteps)` times, so the
+  // most a distillation can ever save is (truncation view − footer) per replay,
+  // and the least it costs is the receipt as input plus the output budget. When
   // even that most-optimistic product does not cover the cost, no answer can
-  // pay back and the call is skipped — which is the only place a distillation
-  // can be a guaranteed loss (typically the last step of a session).
-  if (
-    input.remainingSteps !== undefined &&
-    input.estimate !== undefined &&
-    !paysBack(input.text, input.cfg, input.family, input.formatFooter, input.estimate, input.remainingSteps, input.cfg.distillation.maxOutputTokens)
-  ) {
-    // Deliberately not pinned: the horizon that produced this refusal changes
-    // as the session grows, and a tombstone would freeze a decision the
-    // evidence has since contradicted.
-    return {
-      content: null,
-      code: 'distill-rejected:not-worth-it' as DistillCode,
-      mode: 'fallback',
-      evidence: { called: false, adopted: false, reason: 'not-worth-it' },
+  // pay back and the call is skipped — the one place a distillation is a
+  // guaranteed loss, which is the end of a short-turn session.
+  if (input.remainingSteps !== undefined && input.estimate !== undefined) {
+    const verdict = payback(
+      input.text,
+      input.cfg,
+      input.family,
+      input.formatFooter,
+      input.estimate,
+      input.remainingSteps,
+      input.cfg.distillation.maxOutputTokens,
+    )
+    if (verdict === 'not-worth') {
+      // Deliberately not pinned: the horizon that produced this refusal changes
+      // as the session grows, and a tombstone would freeze a decision the
+      // evidence has since contradicted.
+      return {
+        content: null,
+        code: 'distill-rejected:not-worth-it' as DistillCode,
+        mode: 'fallback',
+        evidence: { called: false, adopted: false, reason: 'not-worth-it' },
+      }
     }
   }
   const settled = new Promise<DistillAnswer | undefined>((resolve) => {

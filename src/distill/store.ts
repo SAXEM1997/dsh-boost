@@ -57,6 +57,16 @@ export interface Limits {
 export const MAX_FILES = 5000
 export const MAX_BYTES = 16 * 1024 * 1024
 
+/**
+ * What one product is assumed to weigh, for the cheap byte check.
+ *
+ * A product is the distilled body plus a handful of verbatim quotes, so it is
+ * bounded by the output budget in practice. Used only to decide whether the
+ * expensive per-file `stat` pass is worth running; the pass itself measures the
+ * real bytes.
+ */
+const ASSUMED_PRODUCT_BYTES = 4096
+
 /** One persisted product. */
 export interface DistillProduct {
   /** The distilled body, without the head marker and the footer. */
@@ -108,17 +118,6 @@ function isProduct(value: unknown): value is DistillProduct {
 /** Pinned products under one boost root. */
 export class DistillStore {
   private readonly root: string
-  /**
-   * Session → the product file stems this process wrote for it.
-   *
-   * Only an in-process write is recorded, so `clearSession` can never delete a
-   * file another process (or an operator) put there. Production never calls
-   * `clearSession` (products outlive their session), so this map grows with the
-   * products this process wrote — a handful of short strings per session, and
-   * only while the process lives.
-   */
-  private readonly written = new Map<string, Set<string>>()
-
   private readonly limits: Limits
 
   constructor(root: string, limits: Partial<Limits> = {}) {
@@ -162,8 +161,17 @@ export class DistillStore {
    * cannot be serialised (it cannot, structurally) fails here too; and the
    * rename means a reader never observes the temp file's name.
    */
+  /**
+   * Write one product.
+   *
+   * `_sessionId` is retained for call-site symmetry with the receipt stores and
+   * for audit value in stack traces; products are keyed by receipt, question and
+   * distiller version only, because they outlive the session that produced them
+   * (ADR 0001). Nothing indexes by session any more — that index is what used to
+   * make a session's products deletable.
+   */
   async write(
-    sessionId: string,
+    _sessionId: string,
     key: Pick<DistillKey, 'file'>,
     product: Partial<Omit<DistillProduct, 'model'>> & Pick<DistillProduct, 'model'>,
   ): Promise<void> {
@@ -190,12 +198,6 @@ export class DistillStore {
       await unlink(temp).catch(() => {})
       throw error
     }
-    let stems = this.written.get(sessionId)
-    if (stems === undefined) {
-      stems = new Set()
-      this.written.set(sessionId, stems)
-    }
-    stems.add(key.file)
     // Retention runs after the write, never instead of it: the caller is about
     // to render these bytes, so the product just written must survive even when
     // it alone exceeds the byte cap. A pruning failure is not a write failure —
@@ -208,7 +210,18 @@ export class DistillStore {
    *
    * `keep` is the file just written: it is the one the caller is about to
    * render, so it is never a candidate even when it is the whole overage.
-   * Ordering is by `mtimeMs`, which the atomic rename refreshes on every write.
+   * Ordering is by `mtimeMs`, which the atomic rename refreshes on every write;
+   * ties fall back to `readdir` order, which decides only *which* of two equally
+   * old products goes, never the bytes any product holds.
+   *
+   * The cheap checks run first. `readdir` costs one call for the whole
+   * directory and `stat` costs one per file, so a directory that cannot be over
+   * a cap pays for nothing. The byte cap is estimated from
+   * {@link ASSUMED_PRODUCT_BYTES}: a product is a body plus a handful of quotes,
+   * so the directory cannot be over the byte cap until it holds
+   * `maxBytes / ASSUMED_PRODUCT_BYTES` files. A product far larger than the
+   * assumption can therefore carry the directory past the byte cap between
+   * checks; the file cap still bounds it and the next write reclaims.
    */
   private async prune(keep: string): Promise<void> {
     const dir = this.dir()
@@ -219,23 +232,24 @@ export class DistillStore {
       return
     }
     const files = names.filter((name) => name.endsWith('.json'))
-    if (files.length <= this.limits.maxFiles) {
-      const bytes = await this.totalBytes(dir, files)
-      if (bytes <= this.limits.maxBytes) return
-    }
+    const maybeOverBytes = files.length * ASSUMED_PRODUCT_BYTES > this.limits.maxBytes
+    if (files.length <= this.limits.maxFiles && !maybeOverBytes) return
     const stats: { name: string; mtimeMs: number; size: number }[] = []
+    let count = 0
+    let bytes = 0
     for (const name of files) {
-      if (join(dir, name) === keep) continue
+      const path = join(dir, name)
       try {
-        const info = await stat(join(dir, name))
-        stats.push({ name, mtimeMs: info.mtimeMs, size: info.size })
+        const info = await stat(path)
+        count += 1
+        bytes += info.size
+        if (path !== keep) stats.push({ name, mtimeMs: info.mtimeMs, size: info.size })
       } catch {
-        // Vanished between readdir and stat: nothing to prune.
+        // Vanished between readdir and stat: nothing to count, nothing to prune.
       }
     }
+    if (count <= this.limits.maxFiles && bytes <= this.limits.maxBytes) return
     stats.sort((a, b) => a.mtimeMs - b.mtimeMs)
-    let count = files.length
-    let bytes = await this.totalBytes(dir, files)
     for (const entry of stats) {
       if (count <= this.limits.maxFiles && bytes <= this.limits.maxBytes) return
       try {
@@ -246,40 +260,5 @@ export class DistillStore {
         // Already gone; the caps are re-checked on the next write.
       }
     }
-  }
-
-  /** Sum of the sizes of the given files, ignoring ones that vanished. */
-  private async totalBytes(dir: string, names: readonly string[]): Promise<number> {
-    let total = 0
-    for (const name of names) {
-      try {
-        total += (await stat(join(dir, name))).size
-      } catch {
-        // Vanished; not part of the total.
-      }
-    }
-    return total
-  }
-
-  /**
-   * Delete the products this session wrote; returns how many files went away.
-   *
-   * Idempotent and total: a file already gone (or a directory removed under
-   * us) is counted as nothing, never as an error.
-   */
-  async clearSession(sessionId: string): Promise<number> {
-    const stems = this.written.get(sessionId)
-    if (stems === undefined) return 0
-    this.written.delete(sessionId)
-    let removed = 0
-    for (const stem of stems) {
-      try {
-        await unlink(join(this.dir(), `${stem}.json`))
-        removed += 1
-      } catch {
-        // Already gone: nothing to remove.
-      }
-    }
-    return removed
   }
 }

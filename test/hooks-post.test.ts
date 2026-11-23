@@ -2082,6 +2082,26 @@ const runBash = (host: Any, text: string, execOver: Record<string, unknown> = {}
     async () => ({ kind: 'accept' }),
   )
 
+test('#10 回本预判接进生产装配：horizon 为 0 时不调模型，记 not-worth-it', async () => {
+  // The gate is only useful if the wiring feeds it. A `horizonFor` that answers
+  // 0 means no further replay is expected, so the cheapest possible answer still
+  // cannot cover the call: the receipt must not pay for one.
+  const env = await distillSetup({ deps: { horizonFor: () => 0 } })
+  const res = await runBash(env.host, bashReceipt(), { arguments: { command: 'npm test' } })
+
+  assert.equal(env.seam.calls.length, 0, 'no model call when the call cannot pay back')
+  // Exactly one spill artifact: the projection's own, for the original receipt.
+  // A distillation that never ran must not write a second one.
+  assert.equal(env.saved.length, 1, 'only the projection spilled; no distillation artifact')
+  const receipts = env.receipts
+  const receipt = receipts.find((r: Any) => r.code === 'distill-rejected:not-worth-it')
+  assert.ok(receipt, `expected a not-worth-it receipt, got ${JSON.stringify(receipts.map((r: Any) => r.code))}`)
+  assert.equal(receipt.distill_calls, 0)
+  // The ordinary truncation still applies: refusing to distil must not cost the
+  // receipt its projection.
+  assert.ok(res.content[0].text.startsWith('[output '), res.content[0].text.slice(0, 40))
+})
+
 test('#10 超阈值 bash 回执：历史里是蒸馏正文 + 页脚，spill 里是原文，收据 distill 与页脚字节自洽', async () => {
   const env = await distillSetup()
   const text = bashReceipt()

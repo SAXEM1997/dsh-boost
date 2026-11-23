@@ -1998,6 +1998,24 @@ function safeEstimate(estimate: (t: string) => number, text: string): number | u
  * config's `horizonSteps` is the value in effect. A throwing or malformed
  * answer falls back the same way, never to a fabricated number.
  */
+/**
+ * The live horizon, or `undefined` when the host cannot supply one.
+ *
+ * `projectionHorizonOf` falls back to the configured horizon because the
+ * projection ledger must always have a number to multiply by. The payback gate
+ * must not: it decides whether to spend a model call, so a substituted value
+ * would be a guess dressed as evidence. Two callers, two policies, one seam.
+ */
+function liveHorizonOf(deps: HookDeps, sessionId: string): number | undefined {
+  try {
+    const live = deps.horizonFor?.(sessionId)
+    if (typeof live === 'number' && Number.isFinite(live) && live >= 0) return Math.floor(live)
+  } catch {
+    // A broken horizon turns the gate off; it never blocks the receipt.
+  }
+  return undefined
+}
+
 function projectionHorizonOf(deps: HookDeps, sessionId: string): number {
   try {
     const live = deps.horizonFor?.(sessionId)
@@ -2123,9 +2141,9 @@ async function distillDecision(
       ...(deps.estimateText === undefined
         ? {}
         : { estimate: deps.estimateText }),
-      ...(deps.horizonFor === undefined
+      ...(liveHorizonOf(deps, ctx.sessionId) === undefined
         ? {}
-        : { remainingSteps: projectionHorizonOf(deps, ctx.sessionId) }),
+        : { remainingSteps: liveHorizonOf(deps, ctx.sessionId) as number }),
       ...(deps.distillAttempts === undefined ? {} : { park: (options, settled) => deps.distillAttempts?.park(options, settled) }),
       ...(deps.distillRequestOptions === undefined || deps.distillAttempts === undefined
         ? {}

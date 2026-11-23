@@ -567,7 +567,7 @@ test('回本预判：还剩很多步时照常调用', async () => {
   assert.equal(r?.mode, 'adopted')
 })
 
-test('回本预判：没有估算器或没有剩余步数时门是关的，不猜', async () => {
+test('回本预判：缺估算器或缺剩余步数时停用预判、照常调用（不拿猜的值顶替）', async () => {
   for (const missing of [{ remainingSteps: 20 }, { estimate: (t: string) => Math.ceil(t.length / 4) }]) {
     const store = await makeStore()
     const fake = fakeFn(async (request) => goodAnswer(request.text))
@@ -575,6 +575,60 @@ test('回本预判：没有估算器或没有剩余步数时门是关的，不�
     assert.equal(fake.calls.length, 1, `gate must stay open when ${Object.keys(missing)[0]} is absent`)
     assert.equal(r?.mode, 'adopted')
   }
+})
+
+test('回本预判：估算器答不出价格（NaN 或抛错）时停用预判，不判 not-worth-it', async () => {
+  const broken = [
+    () => Number.NaN,
+    () => {
+      throw new Error('meter down')
+    },
+  ]
+  for (const estimate of broken) {
+    const store = await makeStore()
+    const fake = fakeFn(async (request) => goodAnswer(request.text))
+    const r = await decide(baseInput(store, { distill: fake.fn, remainingSteps: 0, estimate }))
+    // A meter that cannot price must not become an economic refusal: the gate
+    // has no inputs, so it abstains and the ordinary path decides.
+    assert.equal(fake.calls.length, 1, 'gate abstains when the estimator cannot price')
+    assert.notEqual(r?.code, 'distill-rejected:not-worth-it')
+  }
+})
+
+test('回本预判：超过投影字节上限的回执不报 not-worth-it（那是别的拒绝的理由）', async () => {
+  const store = await makeStore()
+  const fake = fakeFn(async (request) => goodAnswer(request.text))
+  // 256 KiB + 1: `truncate` refuses it, so there is no truncation view to beat.
+  const huge = 'x'.repeat(256 * 1024 + 1)
+  const r = await decide(
+    baseInput(store, {
+      text: huge,
+      distill: fake.fn,
+      remainingSteps: 0,
+      estimate: (text) => Math.ceil(Array.from(text).length / 4),
+    }),
+  )
+  assert.notEqual(r?.code, 'distill-rejected:not-worth-it')
+})
+
+test('回本预判：截断视图里带保留信号时照常预判并采用', async () => {
+  const store = await makeStore()
+  const estimate = (text: string) => Math.ceil(Array.from(text).length / 4)
+  // A receipt whose cut middle holds `[exit code: 1]`, so the truncation view
+  // carries a preserved signal. The gate prices the view the projection would
+  // actually render — signals included — so a signal-bearing receipt must reach
+  // the same verdict as any other, not fall into an unpriced branch.
+  const lines = Array.from({ length: 900 }, (_, i) => `line ${i + 1}`)
+  const body = [
+    ...lines.slice(0, 450),
+    'npm ERR! Test failed: expected 3 got 4',
+    '[exit code: 1]',
+    ...lines.slice(450),
+  ].join('\n')
+  const fake = fakeFn(async (request) => goodAnswer(request.text))
+  const r = await decide(baseInput(store, { text: body, distill: fake.fn, remainingSteps: 20, estimate }))
+  assert.equal(fake.calls.length, 1, `code=${r?.code} reason=${r?.evidence.reason}`)
+  assert.equal(r?.mode, 'adopted')
 })
 
 test('回本预判的拒绝不钉墓碑：视界变大后同一回执仍会重新尝试', async () => {
