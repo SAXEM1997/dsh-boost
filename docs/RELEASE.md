@@ -344,10 +344,11 @@ tarball 会拉进 `dsh-spill-policy@rc.5` 并 `ERESOLVE`（当时实测 exit 1�
   **`0.2.3-rc.4` / `0.2.3-rc.5` / `0.2.3` 都在区间外**：它们会告警一次，但仍照常加载——`0.2.3-rc.5`
   与本插件触及的九个包逐字节相同（见 §6），所以那条告警说的是「没验证过」，不是「会坏」。
 
-安装规格：**`dsh-boost@^0.2.6`**。registry 上有十三条版本记录，其中一条是占位版本，不要把它当成
+安装规格：**`dsh-boost@^0.2.7`**。registry 上有十四条版本记录，其中一条是占位版本，不要把它当成
 “更早的 API”：
 
-- `0.2.6` — 当前 `latest`；修掉 0.2.5 引入的「`degraded` 不是数组时整页崩」，并补 `boost status` 的两个缓存护栏字段（`cache_hit_ratio`、`prefix_drops`）；
+- `0.2.7` — 当前 `latest`；缓存护栏（`cache_hit_ratio`、`prefix_drops` 两个字段并上设置页）、投影确定性测试、RELEASE 版本线回到 0.2.x 现状；
+- `0.2.6` — 修掉 0.2.5 引入的「`degraded` 不是数组时整页崩」，并补 `boost status` 的两个缓存护栏字段（`cache_hit_ratio`、`prefix_drops`）；
 - `0.2.5` — 失效工作区标签措辞、`NO_DEGRADED` 改为只陈述观测、渲染视界重算计数；
 - `0.2.4` — 修 0.2.3 引入的「状态面板永远显示读不到」，spill 提示区分存在与可用；
 - `0.2.3` — 第三轮通读后的修复，其中三条是 0.2.1 带着发布的（写失败码被 `SCOPE_CODES` 吞成 `ERR_BOOST_INTERNAL`、git 安装缺 `lib/client.js`、`/state` 失败被渲染成「一切正常」）；

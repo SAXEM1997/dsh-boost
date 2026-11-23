@@ -10,10 +10,19 @@ Design rationale lives in `docs/superpowers/specs/`; the release-acceptance proc
 
 ## [Unreleased]
 
+## [0.2.7] - 2026-11-23
+
 ### 新增
 
 - `boost status` 增加两个缓存护栏字段：`cache_hit_ratio`（最近一次真实请求的命中率，无样本为 `null` 而非 0）与 `prefix_drops`（相邻请求间 `cacheRead` 低于上一次 `input + cacheRead` 的次数与缺口 token 数）。它们只做诊断：压缩、换路由都会造成合法的回落。
 - `test/projection-determinism.test.ts` 钉住投影的确定性：同输入同字节，且投影路径不得读时钟或随机源。
+
+### 文档
+
+- 设置页补两行缓存护栏（命中率、前缀回落次数 / 缺口 token），中英各四个键。
+- `docs/RELEASE.md` 的版本线回到现状：一路停在 0.2.3 的标题、安装规格、依赖钉版与 allowlist 来源数（六→七）都改正；`engines.dsh` 的 `0.2.3-rc.5` 说法与实测不符，改为「落在区间外，会告警但仍加载」。
+- 规格 #2 的 story 5/6 原来说的是「投影节省区间的上下界」，而运行时只报替换账的那一对；ticket #6 的「两类诊断」中 `pathUnmatched` 从未实现、也无法从 `/state` 计算，改为「一个可算诊断 + 移除动作」。
+- 新增 `docs/adr/0001-receipt-pinned-distillation.md`：二期蒸馏产物按 `(receipt_hash, question_hash, distiller_version)` 钉住，重放只查表不重算。
 
 ## [0.2.6] - 2026-11-23
 
