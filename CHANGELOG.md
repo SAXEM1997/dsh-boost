@@ -10,6 +10,11 @@ Design rationale lives in `docs/superpowers/specs/`; the release-acceptance proc
 
 ## [Unreleased]
 
+### 新增
+
+- `boost status` 增加两个缓存护栏字段：`cache_hit_ratio`（最近一次真实请求的命中率，无样本为 `null` 而非 0）与 `prefix_drops`（相邻请求间 `cacheRead` 低于上一次 `input + cacheRead` 的次数与缺口 token 数）。它们只做诊断：压缩、换路由都会造成合法的回落。
+- `test/projection-determinism.test.ts` 钉住投影的确定性：同输入同字节，且投影路径不得读时钟或随机源。
+
 ## [0.2.6] - 2026-11-23
 
 ### 修复 Fixed

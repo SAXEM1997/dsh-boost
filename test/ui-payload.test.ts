@@ -26,6 +26,8 @@ function statusData(over: Partial<BoostStatus> = {}): BoostStatus {
     saved: { substitution: 12, projectionGross: 40, projectionNet: 7, retrievals: 0 },
     counts: { projection: 3 },
     degraded: ['ERR_HOST_NO_SPILL'],
+    cache_hit_ratio: null,
+    prefix_drops: { count: 0, tokens: 0 },
     fixedOverheadTokens: 778,
     fixedOverhead: { protocolTokens: 700, toolSchemaTokens: 78, totalTokens: 778 },
     estimate_kind: 'host',

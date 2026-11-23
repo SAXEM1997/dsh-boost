@@ -241,6 +241,16 @@ interface SessionEntry {
 export class SessionRuntime {
   private readonly bySession = new Map<string, SessionEntry>()
   private readonly stepsPerTurn: number
+  /**
+   * The session whose usage ledger last recorded a real request.
+   *
+   * `boost status` reports one ledger, and a cache rate is only meaningful
+   * within one session. The latest-request pointer is what makes "most recent
+   * request" well defined across sessions without merging their request
+   * sequences (which would count the first request of one session as a prefix
+   * drop against another session's last request).
+   */
+  private latestUsageSession: string | undefined
 
   constructor(stepsPerTurn: number = DEFAULT_CONFIG.stepsPerTurn) {
     // `StepBudget` already treats a non-positive max as empty; only a
@@ -263,6 +273,29 @@ export class SessionRuntime {
   /** The session's usage ledger, created on first use. */
   usageFor(sessionId: string): UsageLedger {
     return this.entry(sessionId).usage
+  }
+
+  /**
+   * Note that this session's ledger just recorded a real request.
+   *
+   * Called after {@link UsageLedger.request} succeeds, never on a read: status
+   * must point at the session that produced the latest measurement, not at
+   * whichever session happened to be touched last by a decision path.
+   */
+  noteUsage(sessionId: string): void {
+    if (this.bySession.has(sessionId)) this.latestUsageSession = sessionId
+  }
+
+  /**
+   * The ledger of the session that recorded the latest real request.
+   *
+   * `undefined` before the first request and after that session is disposed.
+   * Never creates an entry: a status read must not keep a session alive.
+   */
+  latestUsage(): UsageLedger | undefined {
+    const sessionId = this.latestUsageSession
+    if (sessionId === undefined) return undefined
+    return this.bySession.get(sessionId)?.usage
   }
 
   /**
@@ -301,6 +334,7 @@ export class SessionRuntime {
   /** Drop everything this runtime holds for one session. */
   clear(sessionId: string): void {
     this.bySession.delete(sessionId)
+    if (this.latestUsageSession === sessionId) this.latestUsageSession = undefined
   }
 
   /** Number of sessions with state (not the number ever seen). */
@@ -1309,6 +1343,8 @@ function recordUsage(deps: HookDeps, sessionId: string, usage: TokenUsage | unde
       cacheRead: usage.cacheReadTokens ?? 0,
       output: usage.outputTokens,
     })
+    // Only a recorded sample moves status's "most recent request" pointer.
+    deps.sessions?.noteUsage(sessionId)
   } catch {
     // A foreign ledger can only cost a measurement.
   }

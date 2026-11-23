@@ -1697,6 +1697,12 @@ export function apply(ctx: PluginContext, config: unknown): void {
         protocolSuppressed: () => projectionCounters.protocolSuppressions(),
         completeSectionSuppressions: () => projectionCounters.protocolMissings(),
         partialMounts: () => [...missingMounts],
+        // Read at status time (the spread above evaluates this getter), so a
+        // cache rate always describes the session that produced the latest
+        // real request instead of whichever ledger happened to be touched last.
+        get usage() {
+          return sessions.latestUsage()
+        },
       }
       registerBoostTool(ctx, boostDeps)
       // The settings page reads through this plugin's own route, and it reads

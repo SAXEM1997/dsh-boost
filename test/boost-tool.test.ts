@@ -6,6 +6,7 @@ import { join } from 'node:path'
 import { assertSupportedJsonSchema, validateJsonSchemaValue } from '@deepseek-ai/dsh-tools'
 import { runBoost, boostTool } from '../src/tools/boost.ts'
 import type { BoostStatus } from '../src/tools/boost.ts'
+import { UsageLedger } from '../src/admission/usage.ts'
 import { ScopeStore } from '../src/scope/store.ts'
 import { ReceiptStore } from '../src/receipts/store.ts'
 
@@ -1312,4 +1313,46 @@ test('boostTool 忽略不是 AbortSignal 的 exec.signal（不因宿主形状抛
   const def = boostTool(d)
   const result = await def.execute({ cmd: 'status' }, { signal: { aborted: 'no' } })
   assert.equal((result as any).ok, true)
+})
+
+/* ------------------------------------------------------------------------- *
+ * Cache guardrails in status
+ * ------------------------------------------------------------------------- */
+
+test('status 无 usage 样本：cache_hit_ratio 为 null，prefix_drops 为 0/0', async () => {
+  const d = await deps()
+  const status = await getStatus(d)
+  // A rate with no sample is null, never 0; a count with no samples is 0.
+  assert.equal(status.cache_hit_ratio, null)
+  assert.deepEqual(status.prefix_drops, { count: 0, tokens: 0 })
+})
+
+test('status 从 usage 账本读最近命中率与前缀回退（蛇形命名）', async () => {
+  const usage = new UsageLedger()
+  usage.request({ input: 1000, cacheRead: 0, output: 0 })
+  usage.request({ input: 100, cacheRead: 900, output: 0 })
+
+  const d = await deps()
+  const r = await runBoost({ args: { cmd: 'status' }, ...d, usage })
+  assert.equal(r.ok, true)
+  if (!r.ok) return
+  assert.equal(r.data.cache_hit_ratio, 0.9)
+  assert.deepEqual(r.data.prefix_drops, { count: 1, tokens: 100 })
+})
+
+test('status 对会抛的 usage 账本仍然作答：null / 0', async () => {
+  const d = await deps()
+  const usage = {
+    hitRate: () => {
+      throw new Error('foreign ledger')
+    },
+    prefixDrops: () => {
+      throw new Error('foreign ledger')
+    },
+  } as unknown as UsageLedger
+  const r = await runBoost({ args: { cmd: 'status' }, ...d, usage })
+  assert.equal(r.ok, true)
+  if (!r.ok) return
+  assert.equal(r.data.cache_hit_ratio, null)
+  assert.deepEqual(r.data.prefix_drops, { count: 0, tokens: 0 })
 })

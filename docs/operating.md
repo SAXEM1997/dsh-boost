@@ -370,6 +370,9 @@ horizon 重放，并计入 `projection_horizon_reestimated`；`projection_horizo
 
 `status.data` 里还有几个不在 `degraded` 里的状态/账目字段：
 
+- `cache_hit_ratio` / `prefix_drops`：缓存护栏。前者是最近一次真实请求的命中率（无样本为 `null`，不是 0），
+  后者是同一会话内相邻请求间 `cacheRead` 低于上一次 `input + cacheRead` 的次数与缺口 token 数。
+  **回落可能是正常的**（压缩重写历史、换路由、provider 淘汰缓存），这两个数只让无解释的回落可见。
 - `receipts_stopped`：收据连续写失败 3 次后为 `true`。此时替换被**整体拒绝**（fail-closed，
   不再花选择器调用或预算），投影照常；所有账目是停写前的旧快照。恢复写盘并成功追加一行后
   计数清零、该字段回到 `false`。它是唯一说出「收据已停写」的地方——没有对应的 `degraded` 码。

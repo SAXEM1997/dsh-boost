@@ -22,3 +22,4 @@ single-context：根 `GLOSSARY.md` + `docs/adr/`。见 `docs/agents/domain.md`�
 - **零静态宿主 import**：`dist/` 不得静态 import `@deepseek-ai/*`；客户端产物只允许通过 `require` 解析宿主平台模块。
 - **发布门**：`npm run ci && npm run verify:package` 必须绿；门本身要有能失败的负例。
 - **错误码是契约**：新增/改名要同步 `README.md`、`README.en.md`、`docs/RELEASE.md` 三处码表。
+- **变换必须只追加**：投影与替换只能改**尚未进入历史**的回执，绝不改已经发出过的消息；且必须能只凭输入复现同一串字节。重渲染出不同字节会静默作废 provider 的前缀缓存（缓存命中约占输入的 97%），代价远大于一次投影省下的量。`test/projection-determinism.test.ts` 钉这条，不要放宽它。

@@ -316,3 +316,80 @@ test('cod#1 a growing context keeps both bounds ordered', () => {
   assert.equal(settled.saved_input_tokens, 2000)
   assert.equal(settled.avoided_total_tokens, 1010)
 })
+
+/* ------------------------------------------------------------------------- *
+ * Cache guardrails: latest hit rate and prefix drops
+ * ------------------------------------------------------------------------- */
+
+test('hitRate 报告最近一次请求的命中率；没有样本时是 null，不是 0', () => {
+  const ledger = new UsageLedger()
+  assert.equal(ledger.hitRate(), null)
+
+  ledger.request({ input: 100, cacheRead: 900, output: 0 })
+  assert.equal(ledger.hitRate(), 0.9)
+
+  // The latest request wins: an earlier sample does not keep reporting.
+  ledger.request({ input: 500, cacheRead: 500, output: 0 })
+  assert.equal(ledger.hitRate(), 0.5)
+
+  // A zero denominator is "cannot tell", never a measured 0.
+  ledger.request({ input: 0, cacheRead: 0, output: 0 })
+  assert.equal(ledger.hitRate(), null)
+
+  // An unusable latest sample is also unknown, not the previous rate.
+  ledger.request({ input: 1, cacheRead: 9, output: 0 })
+  ledger.request({ input: NaN, cacheRead: 9, output: 0 })
+  assert.equal(ledger.hitRate(), null)
+})
+
+test('prefixDrops：首个请求没有前任，不计回退；无样本为 0/0', () => {
+  const ledger = new UsageLedger()
+  assert.deepEqual(ledger.prefixDrops(), { count: 0, tokens: 0 })
+
+  // The first request of a session has no predecessor, even at 0% hit rate.
+  ledger.request({ input: 5000, cacheRead: 0, output: 10 })
+  assert.deepEqual(ledger.prefixDrops(), { count: 0, tokens: 0 })
+})
+
+test('prefixDrops：命中量低于上一次请求的 input + cacheRead 时记一次回退', () => {
+  const ledger = new UsageLedger()
+  ledger.request({ input: 1000, cacheRead: 0, output: 0 })   // 上次共回放 1000
+  ledger.request({ input: 0, cacheRead: 900, output: 0 })    // 少命中 100
+  assert.deepEqual(ledger.prefixDrops(), { count: 1, tokens: 100 })
+
+  // A hit at or above the previous total is not a drop.
+  ledger.request({ input: 200, cacheRead: 1800, output: 0 }) // 1800 >= 900
+  assert.deepEqual(ledger.prefixDrops(), { count: 1, tokens: 100 })
+})
+
+test('prefixDrops 累计多次回退的差额', () => {
+  const ledger = new UsageLedger()
+  ledger.request({ input: 1000, cacheRead: 0, output: 0 })   // 1000
+  ledger.request({ input: 500, cacheRead: 500, output: 0 })  // 500 < 1000 → +500
+  ledger.request({ input: 0, cacheRead: 400, output: 0 })    // 400 < 1000 → +600
+  ledger.request({ input: 100, cacheRead: 900, output: 0 })  // 900 < 400? no
+  assert.deepEqual(ledger.prefixDrops(), { count: 2, tokens: 1100 })
+})
+
+test('prefixDrops：任何一侧不可用的样本都不猜，绝不产生 NaN', () => {
+  const ledger = new UsageLedger()
+  ledger.request({ input: 1000, cacheRead: 0, output: 0 })
+  ledger.request({ input: NaN, cacheRead: 0, output: 0 })
+  assert.deepEqual(ledger.prefixDrops(), { count: 0, tokens: 0 })
+
+  // An unusable predecessor is not a measurement either.
+  const next = new UsageLedger()
+  next.request({ input: -1, cacheRead: 0, output: 0 })
+  next.request({ input: 0, cacheRead: 0, output: 0 })
+  assert.deepEqual(next.prefixDrops(), { count: 0, tokens: 0 })
+})
+
+test('prefixDrops 是只读快照，调用方改返回值不影响账本', () => {
+  const ledger = new UsageLedger()
+  ledger.request({ input: 1000, cacheRead: 0, output: 0 })
+  ledger.request({ input: 0, cacheRead: 900, output: 0 })
+  const snapshot = ledger.prefixDrops()
+  snapshot.count = 99
+  snapshot.tokens = 99
+  assert.deepEqual(ledger.prefixDrops(), { count: 1, tokens: 100 })
+})

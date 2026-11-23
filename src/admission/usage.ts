@@ -75,12 +75,27 @@ export class UsageLedger {
   private beforeMark: Usage | undefined
   private afterMark: Usage | undefined
   private candidateId: string | undefined
+  private dropCount = 0
+  private dropTokens = 0
 
   /**
    * Record one real request. The first request after a mark claims the pairing
    * slot and keeps it; later requests only advance `last()`.
+   *
+   * A request is also compared with the one immediately before it for
+   * {@link prefixDrops}. The comparison reads only the two samples: an
+   * unusable sample on either side is "cannot tell", so it neither counts nor
+   * corrupts the accumulator.
    */
   request(u: Usage): void {
+    const previous = this.latest
+    if (previous !== undefined && usable(previous) && usable(u)) {
+      const replayed = previous.input + previous.cacheRead
+      if (u.cacheRead < replayed) {
+        this.dropCount += 1
+        this.dropTokens += replayed - u.cacheRead
+      }
+    }
     this.latest = u
     if (this.hasMark && this.afterMark === undefined) this.afterMark = u
   }
@@ -88,6 +103,37 @@ export class UsageLedger {
   /** Most recent request, or `undefined` before the first one. Never consumes. */
   last(): Usage | undefined {
     return this.latest
+  }
+
+  /**
+   * Cache hit rate of the **most recent** request, `cacheRead / (input +
+   * cacheRead)`, through the same helper the substitution delta uses.
+   *
+   * `null` when the rate cannot be told (no request yet, an unusable sample,
+   * or a non-positive denominator). `0` would claim "nothing was cached" for a
+   * request nobody measured.
+   */
+  hitRate(): number | null {
+    return hitRate(this.latest)
+  }
+
+  /**
+   * Prefix regressions observed between consecutive requests in this ledger.
+   *
+   * A drop is `cacheRead <` the previous request's `input + cacheRead`: the
+   * provider re-read part of the prompt it had already cached. `tokens` is the
+   * shortfall summed over every drop.
+   *
+   * **This is a diagnostic, not an alarm.** A drop is a legitimate outcome:
+   * compaction rewrites history, a provider evicts cache, or a request switches
+   * routes. The point is to make an unexplained drop visible; an explained one
+   * is not a fault. The first request of a session has no predecessor and is
+   * never counted, and a pair with an unusable sample on either side is not
+   * measured rather than guessed. A count with no samples is `0`; it is a
+   * count, not a measurement.
+   */
+  prefixDrops(): { count: number; tokens: number } {
+    return { count: this.dropCount, tokens: this.dropTokens }
   }
 
   /**

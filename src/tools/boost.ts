@@ -68,6 +68,7 @@
 import type { JsonSchemaNode } from '@deepseek-ai/dsh-tools'
 import { measureFixedOverhead } from '../admission/fixed-cost.js'
 import type { FixedOverheadMeasurement } from '../admission/fixed-cost.js'
+import type { UsageLedger } from '../admission/usage.js'
 import { DEFAULT_CONFIG } from '../config.js'
 import { isPosixOnly } from '../host/platform.js'
 import type { ProjectionMode } from '../projection/apply.js'
@@ -310,6 +311,16 @@ export interface BoostDeps {
   /** Host capabilities measured by `apply`; absent when no host was probed. */
   host?: BoostHostFacts
   /**
+   * The usage ledger `status` reads for `cache_hit_ratio` / `prefix_drops`.
+   *
+   * Production wires the most recently active session's ledger: a cache rate
+   * is only meaningful within one session, and a global ledger would count a
+   * new session's first request as a prefix drop against another session's
+   * last one. Absent means no request has been observed (or no runtime is
+   * wired), so the rate is `null` and the drop count `0`.
+   */
+  usage?: UsageLedger
+  /**
    * The one fixed-overhead measurement, started at plugin load.
    *
    * A function rather than a promise so `status` can await it lazily; the
@@ -461,6 +472,26 @@ export interface BoostStatus {
     /** Number of `kind:'projection'` receipts marked `retrieved: true`. */
     retrievals: number
   }
+  /**
+   * Cache hit rate of the most recent real request:
+   * `cacheRead / (input + cacheRead)`.
+   *
+   * `null` — never `0` — when no request has been observed yet, or when the
+   * latest sample is unusable. `0` would claim "nothing was cached" for a
+   * request nobody measured.
+   */
+  cache_hit_ratio: number | null
+  /**
+   * Prefix regressions between consecutive requests: `cacheRead` fell below
+   * the previous request's `input + cacheRead`.
+   *
+   * `tokens` is the summed shortfall; the first request of a session has no
+   * predecessor and is not counted. **A diagnostic, not an alarm**: compaction
+   * rewrites history and legitimately causes a drop, so the number exists to
+   * make an unexplained regression visible, not to accuse the plugin. A count
+   * with no samples is `0`; it is a count, not a measurement.
+   */
+  prefix_drops: { count: number; tokens: number }
   /** Receipt count per `code`, over every shard (including the empty session id). */
   counts: Record<string, number>
   /** Stable degradation codes actually observed. */
@@ -833,6 +864,44 @@ function estimateKindOf(deps: BoostDeps): BoostStatus['estimate_kind'] {
 }
 
 /**
+ * The latest request's hit rate, or `null` when it cannot be told.
+ *
+ * A foreign ledger can throw; status must still answer. A rate outside `[0, 1]`
+ * is not a measurement this code can produce, so it is treated as unknown
+ * rather than printed.
+ */
+function cacheHitRatioOf(usage: UsageLedger | undefined): number | null {
+  try {
+    const rate = usage?.hitRate()
+    return typeof rate === 'number' && Number.isFinite(rate) && rate >= 0 && rate <= 1 ? rate : null
+  } catch {
+    return null
+  }
+}
+
+/** The ledger's prefix-drop tally, defensively copied; `0/0` when unreadable. */
+function prefixDropsOf(usage: UsageLedger | undefined): BoostStatus['prefix_drops'] {
+  try {
+    const drops = usage?.prefixDrops()
+    if (drops === null || typeof drops !== 'object') return { count: 0, tokens: 0 }
+    const { count, tokens } = drops
+    if (
+      typeof count !== 'number' ||
+      !Number.isFinite(count) ||
+      count < 0 ||
+      typeof tokens !== 'number' ||
+      !Number.isFinite(tokens) ||
+      tokens < 0
+    ) {
+      return { count: 0, tokens: 0 }
+    }
+    return { count: Math.floor(count), tokens }
+  } catch {
+    return { count: 0, tokens: 0 }
+  }
+}
+
+/**
  * Whether the receipt store has stopped writing, fail-closed.
  *
  * Mirrors `receiptsStopped` in `src/hooks/llm-stream.ts` for the control tool's
@@ -1030,6 +1099,9 @@ async function statusCommand(deps: BoostDeps): Promise<BoostResult<BoostStatus>>
     shadow: read.doc.shadow,
     projection: read.doc.projection,
     saved,
+    // Read at status time, so the process's latest request is what is shown.
+    cache_hit_ratio: cacheHitRatioOf(deps.usage),
+    prefix_drops: prefixDropsOf(deps.usage),
     counts: totals.counts,
     degraded,
     fixedOverheadTokens: fixedOverhead === 'unknown' ? 'unknown' : fixedOverhead.totalTokens,
