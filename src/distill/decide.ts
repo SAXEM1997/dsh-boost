@@ -38,6 +38,8 @@
  * @module dsh-boost/distill/decide
  */
 import { renderHeadLine, truncate } from '../projection/truncate.js'
+import type { Truncation } from '../projection/truncate.js'
+import { signalSuffix } from '../projection/apply.js'
 import type { FormatFooter, SpillBackend } from '../projection/apply.js'
 import type { BoostConfig, ToolFamily } from '../types.js'
 import { keyOf, questionKeyOf, questionOf, receiptKeyOf, TIMEOUT, versionOf, withTimeout } from './pin.js'
@@ -61,6 +63,15 @@ export type DistillRejectReason = 'empty' | 'not-smaller' | 'not-worth-it' | 'un
  * pinned as tombstones, otherwise every replay of the same receipt pays for the
  * same refusal.
  */
+/** Every reason a tombstone may legitimately carry. */
+const REJECT_REASONS: ReadonlySet<string> = new Set<string>([
+  'empty',
+  'not-smaller',
+  'not-worth-it',
+  'timeout',
+  'unverifiable',
+])
+
 const PINNED_REJECTIONS: ReadonlySet<DistillRejectReason> = new Set<DistillRejectReason>([
   'empty',
   'unverifiable',
@@ -198,10 +209,15 @@ function triggerOf(cfg: BoostConfig, family: ToolFamily): number | null {
   return params === undefined ? null : params.triggerChars
 }
 
-/** The empty locator used for the first render, whose only job is to measure the footer. */
-
-/** The rendered truncation view: marker, head, footer, tail, then preserved signals. */
-function truncationViewText(truncation: { head: string; tail: string; signals?: readonly string[] } & Parameters<typeof renderHeadLine>[0], footer: string): string {
+/**
+ * The rendered truncation view: marker, head, footer, tail, then preserved signals.
+ *
+ * One renderer for every caller that needs to price or compare a truncation
+ * view — the byte gate, the payback gate and the adopted receipt's baseline.
+ * The signals are part of the view (design §5.4-4), so a renderer that drops
+ * them understates every view that has one.
+ */
+function truncationViewText(truncation: Truncation, footer: string): string {
   const view = `${renderHeadLine(truncation)}\n${truncation.head}\n${footer}\n${truncation.tail}`
   const signals = truncation.signals ?? []
   return signals.length === 0 ? view : `${view}\n${signals.join('\n')}`
@@ -278,8 +294,8 @@ function priced(estimate: (text: string) => number, text: string): number | unde
  *
  * The most a distillation can save is `truncation view − footer` per replay —
  * an empty body plus a footer is the smallest view any answer can produce — and
- * a receipt is replayed `max(1, remainingSteps)` times: once for the request
- * that carries it, then once per remaining step. The call costs at least the
+ * a receipt is replayed `1 + remainingSteps` times: once for the request that
+ * carries it, then once per remaining step. The call costs at least the
  * receipt as input plus the output budget. When the best case does not cover
  * the cost, no answer pays back, so the call is skipped instead of paid for.
  *
@@ -316,7 +332,7 @@ function payback(
   // A view no smaller than its own footer leaves nothing to save; that is a
   // byte-gate matter, not an economic one.
   if (bestSaving <= 0) return 'unknown'
-  const replays = Math.max(1, Math.floor(remainingSteps))
+  const replays = 1 + Math.max(0, Math.floor(remainingSteps))
   return bestSaving * replays > costTokens + maxOutputTokens ? 'worth' : 'not-worth'
 }
 
@@ -396,7 +412,13 @@ async function adopt(
     const bodyBytes = Buffer.byteLength(answer.text, 'utf8')
     const omittedBytes = Buffer.byteLength(text, 'utf8') - bodyBytes
     const footer = formatFooter({ kind: 'exact', count: omittedBytes }, ref)
-    composed = distilledView(answer.text, text, question, footer)
+    // Signals appended exactly as the projection path appends them: a receipt
+    // whose cut middle held `[exit code: 1]` keeps it under either transform, so
+    // turning projection on or off never changes what the model can see.
+    const window = cfg.projection[family]
+    const truncation = window === undefined ? null : truncate(text, window)
+    const signals = truncation === null ? '' : signalSuffix(truncation)
+    composed = `${distilledView(answer.text, text, question, footer)}${signals}`
     truncationBytes = truncationViewBytes(text, cfg, family, formatFooter, ref.locator)
   } catch {
     return { content: null, code: 'distill-failed', mode: 'fallback', evidence: { ...evidence, adopted: false } }
@@ -468,6 +490,11 @@ export async function decide(input: DecideInput): Promise<DistillOutcome | null>
   if (pinned !== undefined && typeof pinned.rejected === 'string') {
     // A pinned refusal: the answer arrived and was refused, so the replay reads
     // the tombstone instead of paying for the same call.
+    // A tombstone is a file: it can be edited, truncated or written by an older
+    // build. An unknown reason is a miss, never a receipt code — otherwise a
+    // hand-written file puts `distill-rejected:<anything>` into history and the
+    // receipt-code table stops being the authority.
+    if (!REJECT_REASONS.has(pinned.rejected)) return null
     const reason = pinned.rejected as DistillRejectReason
     return {
       content: null,

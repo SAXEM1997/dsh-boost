@@ -8,6 +8,24 @@ This file records user-visible changes. Format follows Keep a Changelog; version
 Design rationale lives in `docs/superpowers/specs/`; the release-acceptance procedure is in
 `docs/RELEASE.md`.
 
+## [0.3.5] - 2026-11-24
+
+### 修复
+
+- **回本预判的回放次数改回 `1 + 剩余步数`**（0.3.4 一度写成 `max(1, 剩余步数)`）：`DecideInput.remainingSteps`
+  的契约是「不含本次请求的后续回放次数」，账本对采用收据也按 `saved × (1 + horizon)` 计，两者必须同口径。
+  旧的写法在 `h ≥ 2` 时少算一次回放，把赚得回的调用判成 `not-worth-it`。新增 `h=1 拒 / h=2 放行` 的边界用例。
+- **采用路径保留 §5.4-4 信号行**：被切断的中段里的 `[exit code: N]` 等信号，投影会附在页脚之后，
+  蒸馏此前会静默丢掉。现在两条路径用同一个 `signalSuffix()`，`truncationViewOf` 的定价基线也补上它。
+- **墓碑的 `rejected` 校验已知集合**：产物是文件，可被手改或由旧构建写入；未知原因当未命中，
+  不再让任意字符串变成 `distill-rejected:<anything>`。
+- **字节上限不再滞后**：触发条件加上「刚写的产物本身超过 4 KiB 的假设」，此前 9 个 12 KiB 产物能到 2.7× 上限。
+- **裁剪失败即停**：`unlink` 失败时不再继续按失真的总量删下去；顺带清理崩溃残留的 `*.tmp`。
+- **收窄守卫不再写收据**：采用路径里那个「不可达」分支原来会 `appendReceipt`，多一个调用点就多一条假 skip。
+- 文档：`how-it-works` 的「净赚门不看调用成本」改为两道门；`RELEASE`/`operating` 的安装规格统一 `^0.3.4`；
+  版本记录条数改正；`verifyQuotes` 的 JSDoc 与实现对齐（零引用是 unverifiable，不是通过）；`store.ts` 的
+  Contract 段删掉已不存在的 `clearSession`。
+
 ## [0.3.4] - 2026-11-24
 
 ### 变更
@@ -16,7 +34,7 @@ Design rationale lives in `docs/superpowers/specs/`; the release-acceptance proc
   回执；删掉等于让操作者再付一次调用，而且没有任何信号（收据码仍是 `projected`，`calls` 只多 1）。
   目录改为按上限自我裁剪：超过 5,000 个文件或 16 MiB 时从最旧的开始删，刚写的那条永不被裁；
   字节上限按每个产物约 4 KiB 估过之后才跑全量 `stat`，否则只做一次 `readdir`。要一次性清空就删整个目录。
-- **新增回本预判**：调模型之前先算 `最乐观节省（截断视图 − 页脚，含保留的信号行）× max(1, 剩余步数)`
+- **新增回本预判**：调模型之前先算 `最乐观节省（截断视图 − 页脚，含保留的信号行）×（1 + 剩余步数）`
   是否大于 `回执输入 + 输出预算`，不大于就不调（`distill-rejected:not-worth-it`）。此前只有「每次重放
   是否更小」这一道门，它不回答「这次调用能不能赚回来」——剩余步数很少的会话末段必然净亏，现在不会
   被蒸。三种情况这道门弃权（照常调用）：宿主缺估算器、缺可用的剩余步数、估算器答不出价格（抛错或

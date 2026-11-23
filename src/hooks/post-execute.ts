@@ -91,7 +91,7 @@ import type { Candidate, Guard, Plan } from '../gate/plan.js'
 import { isPosixOnly } from '../host/platform.js'
 import type { ProjectionCounters } from '../projection/counters.js'
 import { PROTOCOL_NAME, PROTOCOL_ORDER, PROTOCOL_TEXT } from '../prompt/protocol.js'
-import { projectApply, projectShadow } from '../projection/apply.js'
+import { projectApply, projectShadow, signalSuffix } from '../projection/apply.js'
 import { renderHeadLine, truncate } from '../projection/truncate.js'
 import type { FormatFooter, ProjectionMode, SpillBackend, SpillHandle } from '../projection/apply.js'
 import { canonicalise } from '../projection/canonicalise.js'
@@ -2121,6 +2121,9 @@ async function distillDecision(
     // adopting bytes that would be lost.
     return { content: null, code: 'distill-failed', mode: 'fallback', evidence: { called: false, adopted: false } }
   }
+  // Read once: two calls would be two try/catch rounds around a seam that is
+  // allowed to change between them.
+  const liveHorizon = liveHorizonOf(deps, ctx.sessionId)
   try {
     return await decideDistill({
       text: target,
@@ -2141,9 +2144,7 @@ async function distillDecision(
       ...(deps.estimateText === undefined
         ? {}
         : { estimate: deps.estimateText }),
-      ...(liveHorizonOf(deps, ctx.sessionId) === undefined
-        ? {}
-        : { remainingSteps: liveHorizonOf(deps, ctx.sessionId) as number }),
+      ...(liveHorizon === undefined ? {} : { remainingSteps: liveHorizon }),
       ...(deps.distillAttempts === undefined ? {} : { park: (options, settled) => deps.distillAttempts?.park(options, settled) }),
       ...(deps.distillRequestOptions === undefined || deps.distillAttempts === undefined
         ? {}
@@ -2176,12 +2177,10 @@ async function finishDistillDecision(
   estimate: ((text: string) => number) | undefined,
 ): Promise<PostExecuteDecision> {
   if (outcome.content === null || outcome.mode !== 'adopted') {
-    // Unreachable: the caller records a refusal and falls through to the
-    // ordinary projection. Kept as a type-narrowing guard.
-    await appendReceipt(
-      deps,
-      ledgerEntry(ctx, 'skip', distillReceiptCode(outcome), distillEvidence(outcome)),
-    )
+    // Unreachable by construction: the caller records a refusal and falls
+    // through to the ordinary projection before it gets here. Kept as a pure
+    // type-narrowing guard — a guard that wrote a receipt would double-count
+    // the day a second caller reached it.
     return decision
   }
   // The locator the distilled footer names is the same registered retrieval
@@ -2213,13 +2212,20 @@ async function finishDistillDecision(
   return { ...decision, content: [{ type: 'text', text: outcome.content }] }
 }
 
-/** The truncation view's rendered bytes, for pricing a distillation against it. */
+/**
+ * The truncation view's rendered bytes, for pricing a distillation against it.
+ *
+ * Carries the preserved signals, like every other renderer of this view: a
+ * baseline that dropped them would make the distill receipt's `before` smaller
+ * than the same receipt's projection receipt, and the two would stop being
+ * comparable in `boost status`.
+ */
 function truncationViewOf(text: string, cfg: BoostConfig, family: ToolFamily): string | undefined {
   const params = cfg.projection[family]
   if (params === undefined) return undefined
   const truncation = truncate(text, params)
   if (truncation === null) return undefined
-  return `${renderHeadLine(truncation)}\n${truncation.head}\n${truncation.tail}`
+  return `${renderHeadLine(truncation)}\n${truncation.head}\n${truncation.tail}${signalSuffix(truncation)}`
 }
 
 /**

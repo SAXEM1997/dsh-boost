@@ -2102,6 +2102,21 @@ test('#10 回本预判接进生产装配：horizon 为 0 时不调模型，记 n
   assert.ok(res.content[0].text.startsWith('[output '), res.content[0].text.slice(0, 40))
 })
 
+test('#10 没有 horizonFor 时回本预判弃权：不拿配置 horizon 顶替', async () => {
+  // The gate must abstain when the host cannot say how many replays are left.
+  // Feeding it `config.horizonSteps` instead would make every receipt look
+  // worth distilling — a guess dressed as evidence. Distinguishable from the
+  // horizon-0 case only when no `horizonFor` is wired at all.
+  const env = await distillSetup()
+  assert.equal(env.deps.horizonFor, undefined)
+  const res = await runBash(env.host, bashReceipt(), { arguments: { command: 'npm test' } })
+
+  assert.equal(env.seam.calls.length, 1, 'gate abstains, so the call runs')
+  const codes = env.receipts.map((r: Any) => r.code)
+  assert.equal(codes.includes('distill-rejected:not-worth-it'), false)
+  assert.ok(res.content[0].text.startsWith('[distilled from '), res.content[0].text.slice(0, 40))
+})
+
 test('#10 超阈值 bash 回执：历史里是蒸馏正文 + 页脚，spill 里是原文，收据 distill 与页脚字节自洽', async () => {
   const env = await distillSetup()
   const text = bashReceipt()

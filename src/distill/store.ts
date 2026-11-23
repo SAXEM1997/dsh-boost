@@ -24,12 +24,10 @@
  *   forked session replays the same receipts). Deleting there made the promise
  *   depend on process lifetime and charged the operator a second call with no
  *   signal. The store bounds itself instead: `write` prunes the oldest files
- *   once the directory passes `maxFiles` or `maxBytes`.
- * - `clearSession` still removes the products this process wrote for one
- *   session, and touches nothing else: a file this process did not write (a
- *   foreign or hand-made one) is not ours to delete. It exists for tests and
- *   for an operator who wants one session's evidence gone; production no
- *   longer calls it on session dispose.
+ *   once the directory passes `maxFiles`, or once the byte cap looks reachable
+ *   from the file count and the size just written.
+ * - There is no per-session delete. A product is not evidence for a session,
+ *   it is evidence for a receipt, and the receipt outlives the session.
  *
  * The store knows no host services; the caller resolves the root.
  *
@@ -162,13 +160,11 @@ export class DistillStore {
    * rename means a reader never observes the temp file's name.
    */
   /**
-   * Write one product.
+   * Write one product, then keep the directory inside its caps.
    *
-   * `_sessionId` is retained for call-site symmetry with the receipt stores and
-   * for audit value in stack traces; products are keyed by receipt, question and
-   * distiller version only, because they outlive the session that produced them
-   * (ADR 0001). Nothing indexes by session any more — that index is what used to
-   * make a session's products deletable.
+   * `_sessionId` is retained so every caller keeps the same signature; products
+   * are keyed by receipt, question and distiller version only, because they
+   * outlive the session that produced them (ADR 0001).
    */
   async write(
     _sessionId: string,
@@ -202,7 +198,7 @@ export class DistillStore {
     // to render these bytes, so the product just written must survive even when
     // it alone exceeds the byte cap. A pruning failure is not a write failure —
     // the product is already on disk and correct.
-    await this.prune(target).catch(() => undefined)
+    await this.prune(target, Buffer.byteLength(json, 'utf8')).catch(() => undefined)
   }
 
   /**
@@ -223,7 +219,7 @@ export class DistillStore {
    * assumption can therefore carry the directory past the byte cap between
    * checks; the file cap still bounds it and the next write reclaims.
    */
-  private async prune(keep: string): Promise<void> {
+  private async prune(keep: string, written: number): Promise<void> {
     const dir = this.dir()
     let names: string[]
     try {
@@ -232,7 +228,16 @@ export class DistillStore {
       return
     }
     const files = names.filter((name) => name.endsWith('.json'))
-    const maybeOverBytes = files.length * ASSUMED_PRODUCT_BYTES > this.limits.maxBytes
+    // A killed process leaves `<name>.json.<pid>.tmp` behind: never counted by
+    // the caps, so nothing would ever reclaim it.
+    for (const name of names) {
+      if (!name.endsWith('.tmp')) continue
+      await unlink(join(dir, name)).catch(() => {})
+    }
+    // A product larger than the assumption is itself evidence that the count
+    // estimate is too optimistic, so it forces the measured pass.
+    const maybeOverBytes =
+      files.length * ASSUMED_PRODUCT_BYTES > this.limits.maxBytes || written > ASSUMED_PRODUCT_BYTES
     if (files.length <= this.limits.maxFiles && !maybeOverBytes) return
     const stats: { name: string; mtimeMs: number; size: number }[] = []
     let count = 0
@@ -257,7 +262,10 @@ export class DistillStore {
         count -= 1
         bytes -= entry.size
       } catch {
-        // Already gone; the caps are re-checked on the next write.
+        // Stop rather than carry on with a total that no longer matches the
+        // directory: continuing would delete every remaining product while the
+        // caps still read as over.
+        return
       }
     }
   }

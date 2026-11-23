@@ -357,7 +357,7 @@ tarball 会拉进 `dsh-spill-policy@rc.5` 并 `ERESOLVE`（当时实测 exit 1�
   **`0.2.3-rc.4` / `0.2.3-rc.5` / `0.2.3` 都在区间外**：它们会告警一次，但仍照常加载——`0.2.3-rc.5`
   与本插件触及的九个包逐字节相同（见 §6），所以那条告警说的是「没验证过」，不是「会坏」。
 
-安装规格：**`dsh-boost@^0.3.4`**。registry 上有十七条版本记录，其中一条是占位版本，不要把它当成
+安装规格：**`dsh-boost@^0.3.4`**。registry 上有十九条版本记录（含 `0.0.0-stage` 占位），其中一条是占位版本，不要把它当成
 “更早的 API”：
 
 - `0.3.4` — 当前 `latest`；蒸馏产物跨会话保留（按文件数/字节自我裁剪）、新增回本预判
@@ -520,7 +520,7 @@ JSON 体返回一个码，页面据码决定说什么。`ERR_CLIENT_*` 是页面
 | `distill-rejected:timeout` | 超过 `distillation.timeoutMs` 没有回答。这次调用**不钉墓碑**——迟到的答案仍会落盘（`llm/stream` 观察到**已放弃**（parked）的那次调用，而不是「已登记」的那次：登记发生在请求之前，拿它当判据会把还在等答案的调用一起抽干，0.3.2 修的正是这条），落盘之后重放才不再计费；答案始终没来（路由挂死、进程退出）时，同一回执下次仍会重新调用一次。晚到的调用另写一条 `code: distill-late` / `mode: late` 的收据，只把它的 `distill_tokens` 与 `distill_input_chars` 加进 `status.distill`——`calls` 与结局计数留在超时那条上，不重复 | 偶尔出现是正常；持续出现说明 `timeoutMs` 对当前路由太短，或路由挂了 |
 | `distill-rejected:empty` | 答案正文为空（或只有空白）。空正文能通过其余每一道门——它平凡地是原文的子串，而 marker + 页脚远短于截断视图——所以单独拒绝，且在落盘原文之前拒绝 | 模型没按 JSON 契约给正文。看 `distill_tokens`；必要时收紧 `maxOutputTokens` 或换 `distillation.route` |
 | `distill-rejected:unverifiable` | 答案没给出任何引用，或给出的引用不是原文的非空子串（伪造），或落盘产物被改过 | 模型在编引用。对比同一模型的 `adopted` 与 `distill_tokens`（注意 `adopted` 含重放采用，可能多于 `calls`）；必要时换 `distillation.route` |
-| `distill-rejected:not-worth-it` | 回本预判否决：`最乐观节省（截断视图 − 页脚，含被保留的信号行）× max(1, 剩余步数)` 不大于 `回执输入 + 输出预算`。这条回执无论蒸成什么样都赚不回那次调用（典型是剩余步数很少的会话末段）。回执没有可比的截断视图（未过窗口、超 256 KiB、或窗口不会缩短它）或估算器答不出价格时，这道门**弃权**，不会记成本码 | 预期行为。**不钉墓碑**：视界随会话增长，下次同一回执会重新判断。只在宿主同时提供估算器与剩余步数时生效，两者缺一则这道门关闭 |
+| `distill-rejected:not-worth-it` | 回本预判否决：`最乐观节省（截断视图 − 页脚，含被保留的信号行）×（1 + 剩余步数）` 不大于 `回执输入 + 输出预算`。这条回执无论蒸成什么样都赚不回那次调用（典型是剩余步数很少的会话末段）。回执没有可比的截断视图（未过窗口、超 256 KiB、或窗口不会缩短它）或估算器答不出价格时，这道门**弃权**，不会记成本码 | 预期行为。**不钉墓碑**：视界随会话增长，下次同一回执会重新判断。只在宿主同时提供估算器与剩余步数时生效，两者缺一则这道门关闭 |
 | `distill-rejected:not-smaller` | 蒸馏正文 + 页脚按 UTF-8 字节不短于同回执的截断视图，净赚为负，不采用 | 正常门；持续出现说明该族的正文太长（`maxOutputTokens` 没约束住），收紧它 |
 
 | `distill`（采用） | 采用时写入的是 `kind:'projection'`、`code:'projected'` 的收据，`mode:'adopted'`，带 `distill_calls`/`distill_tokens`/`distill_omitted_bytes`/`distill_bytes`/`distill_saved_tokens` | 无需处置；`boost status` 的 `distill.calls/tokens/adopted` 由它汇总。`adopted` 数的是**采用次数**（含读表重放，那时 `distill_calls` 为 `0`），所以它可能大于 `calls`——`calls` 只数真花掉的调用 |
@@ -751,7 +751,7 @@ DSH 宿主后的行为、§3 的 20 任务回退流程（人工）、§5 的统�
 - [ ] 两条降级路径都保留 status/收据证据；验收中出现的每个稳定码都按 §2.5 的矩阵处置并留证（含 `ERR_HOST_NO_SPILL_NOTICE` / `ERR_HOST_VERSION_MISMATCH` / `ERR_BOOST_SECTION_REGISTER_FAILED`，以及已有的 `ERR_RECEIPTS_UNREADABLE` / `ERR_RECEIPTS_TRUNCATED` / `ERR_HOST_COMPLETE_SECTION` / `ERR_SCOPE_ABORTED` / `ERR_HOST_SPILL_FAILING` / `ERR_BOOST_PARTIAL_MOUNT`）；同时确认 `status.data.receipts_stopped` 为 `false`（为 `true` 表示收据已连续写失败 3 次、替换被整体拒绝）
 - [ ] 第一次开启替换的真实回合检查 `content[].thinking` 400（不是影子周）；若有，替换在该路由关闭
 - [ ] `npm run --silent stats` 在干净 clone 上可复算 §5.2 的聚合（口径对应设计稿 §2.1）
-- [ ] 发布侧：`npm publish` 走 `publishConfig.registry`（registry.npmjs.org、public）；用 `npm view dsh-boost dist-tags --registry=https://registry.npmjs.org/` 确认 `latest` 是 `package.json` 里的版本（registry 上另有 npm 自动创建的 `0.0.0-stage` 占位版本，见 §2.4）；**必须带 `--registry`**，否则读到的是镜像的旧 `latest`；安装规格是 `dsh-boost@^0.3.2`
+- [ ] 发布侧：`npm publish` 走 `publishConfig.registry`（registry.npmjs.org、public）；用 `npm view dsh-boost dist-tags --registry=https://registry.npmjs.org/` 确认 `latest` 是 `package.json` 里的版本（registry 上另有 npm 自动创建的 `0.0.0-stage` 占位版本，见 §2.4）；**必须带 `--registry`**，否则读到的是镜像的旧 `latest`；安装规格是 `dsh-boost@^0.3.4`
 
 **未交付、因此不在上表可勾选范围：§3 的 20 任务门，以及同一节里的取回完整性检查。**
 `test/regression/` 只有 `.gitkeep`——本仓库不附带任务集，也不提供 `test/regression/run.mjs`

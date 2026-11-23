@@ -150,7 +150,7 @@ function projectedText(truncation: Truncation): string {
  * the tail so the model still sees an exit code or error flag that would
  * otherwise be lost (design §5.4-4). Empty for the overwhelming majority.
  */
-function signalSuffix(truncation: Truncation): string {
+export function signalSuffix(truncation: Truncation): string {
   const signals = truncation.signals ?? []
   return signals.length === 0 ? '' : `\n${signals.join('\n')}`
 }

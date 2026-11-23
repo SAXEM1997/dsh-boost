@@ -627,8 +627,43 @@ test('回本预判：截断视图里带保留信号时照常预判并采用', as
   ].join('\n')
   const fake = fakeFn(async (request) => goodAnswer(request.text))
   const r = await decide(baseInput(store, { text: body, distill: fake.fn, remainingSteps: 20, estimate }))
-  assert.equal(fake.calls.length, 1, `code=${r?.code} reason=${r?.evidence.reason}`)
+  assert.equal(fake.calls.length, 1)
   assert.equal(r?.mode, 'adopted')
+  // §5.4-4: a signal in the cut middle survives the transform. Adopting must not
+  // be the one path that silently drops it.
+  assert.ok(r?.content?.includes('[exit code: 1]'), 'the adopted view keeps the preserved signal')
+})
+
+test('墓碑写了未知原因时当作未命中，不把任意字符串变成收据码', async () => {
+  const store = await makeStore()
+  const key = { file: 'forged-v1' }
+  await store.write('s1', key, { model: 'deepseek-flash', rejected: 'not-a-known-reason' })
+  // The file is data: it can be hand-edited or written by an older build. An
+  // unknown reason must not reach history as `distill-rejected:<anything>`.
+  const fake = fakeFn(async (request) => goodAnswer(request.text))
+  const r = await decide(baseInput(store, { distill: fake.fn }))
+  assert.notEqual(r?.code, 'distill-rejected:not-a-known-reason')
+  assert.equal(fake.calls.length, 1, 'unknown tombstone is a miss: the call runs')
+})
+
+test('回本预判的回放次数是 1 + 剩余步数：同一回执 h=1 拒、h=2 放行', async () => {
+  // Tokens = characters, so the arithmetic is exact and the test is about the
+  // replay count rather than about the estimator: saving per replay is one
+  // window (~2,500), the call costs the receipt (~5,200) plus 256. Two replays
+  // fall short, three cover it — the one-step gap that separates `1 + h` from
+  // `max(1, h)`, under which these two horizons would agree.
+  const estimate = (text: string) => text.length
+  const lines = Array.from({ length: 400 }, (_, i) => `line ${i} ${'x'.repeat(4)}`)
+  lines[200] = 'npm ERR! Test failed: expected 3 got 4'
+  const text = lines.join('\n')
+  const first = fakeFn(async (request) => goodAnswer(request.text))
+  const atOne = await decide(baseInput(await makeStore(), { text, distill: first.fn, remainingSteps: 1, estimate }))
+  assert.equal(first.calls.length, 0, 'two replays do not cover the call')
+  assert.equal(atOne?.code, 'distill-rejected:not-worth-it')
+  const second = fakeFn(async (request) => goodAnswer(request.text))
+  const atTwo = await decide(baseInput(await makeStore(), { text, distill: second.fn, remainingSteps: 2, estimate }))
+  assert.equal(second.calls.length, 1, 'three replays do cover it')
+  assert.equal(atTwo?.mode, 'adopted')
 })
 
 test('回本预判的拒绝不钉墓碑：视界变大后同一回执仍会重新尝试', async () => {
