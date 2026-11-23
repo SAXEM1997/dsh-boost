@@ -6,86 +6,156 @@
  * every button in the host UI — a plugin must not do that. Every top-level
  * selector in this file is therefore rooted at a plugin-owned class in the
  * `boost-` namespace.
+ *
+ * THEME-AWARE BY CONSTRUCTION: colours come from the host's custom properties
+ * with a fallback, and every rule that paints a surface also works on a dark
+ * host (the screenshots this layout was rebuilt from are dark). Nothing here
+ * assumes a light background, and no rule sets a text colour without also
+ * setting the surface it was chosen for.
  */
 .boost-settings {
   display: flex;
   flex-direction: column;
-  gap: 20px;
-  padding: 16px;
+  gap: 16px;
+  padding: 4px 0 24px;
   color: inherit;
   font-size: 13px;
   line-height: 1.6;
+  --boost-line: color-mix(in srgb, currentColor 12%, transparent);
+  --boost-line-strong: color-mix(in srgb, currentColor 22%, transparent);
+  --boost-muted: var(--dsh-text-secondary, #8b8b90);
+  --boost-surface: color-mix(in srgb, currentColor 4%, transparent);
+  --boost-surface-strong: color-mix(in srgb, currentColor 7%, transparent);
+  --boost-accent: var(--dsh-accent, #4c8dff);
+  --boost-warning: var(--dsh-warning-border, #d9a441);
+  --boost-danger: var(--dsh-danger, #d0574b);
+}
+
+/* ---------------------------------------------------------------- header */
+
+.boost-settings__header {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
 }
 
 .boost-settings h2 {
   margin: 0;
-  font-size: 16px;
+  font-size: 15px;
+  font-weight: 600;
+  letter-spacing: 0.01em;
 }
 
 .boost-settings__intro {
-  margin: 0 0 1rem;
-  color: var(--dsh-text-secondary, #5a5a5f);
-  line-height: 1.6;
+  margin: 0;
+  max-width: 68ch;
+  color: var(--boost-muted);
+  font-size: 12px;
+  line-height: 1.65;
 }
 
-.boost-settings__section {
-  margin: 0 0 1.25rem;
+/* ----------------------------------------------------------------- cards */
+
+.boost-settings__card {
+  border: 1px solid var(--boost-line);
+  border-radius: 8px;
+  background: var(--boost-surface);
+  overflow: hidden;
 }
 
-.boost-settings__section h3 {
-  margin: 0 0 0.5rem;
-  font-size: 0.95rem;
+.boost-settings__card-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--boost-line);
+  background: var(--boost-surface-strong);
+}
+
+.boost-settings__card-head h3 {
+  margin: 0;
+  font-size: 12px;
   font-weight: 600;
+  letter-spacing: 0.02em;
+  text-transform: none;
 }
+
+.boost-settings__card-body {
+  padding: 8px 12px 10px;
+}
+
+.boost-settings__card-body > dl {
+  margin: 0;
+}
+
+.boost-settings__subhead {
+  margin: 12px 0 4px;
+  color: var(--boost-muted);
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.boost-settings__card-body > .boost-settings__subhead:first-child {
+  margin-top: 4px;
+}
+
+.boost-settings__meta {
+  color: var(--boost-muted);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+/* ------------------------------------------------------------------ rows */
 
 .boost-settings__row {
   display: grid;
-  grid-template-columns: minmax(8rem, 14rem) 1fr;
-  gap: 0.5rem 1rem;
-  padding: 0.25rem 0;
-  border-bottom: 1px solid var(--dsh-border, #e6e6e8);
+  grid-template-columns: minmax(9rem, 13rem) minmax(0, 1fr);
+  gap: 0 16px;
+  padding: 5px 0;
+  border-top: 1px solid var(--boost-line);
+}
+
+.boost-settings__row:first-of-type {
+  border-top: none;
 }
 
 .boost-settings__row dt {
-  color: var(--dsh-text-secondary, #5a5a5f);
+  color: var(--boost-muted);
+  font-size: 12px;
+  overflow-wrap: anywhere;
 }
 
 .boost-settings__row dd {
   margin: 0;
+  min-width: 0;
+}
+
+.boost-settings__value {
   font-variant-numeric: tabular-nums;
+  font-weight: 600;
 }
 
 .boost-settings__hint {
   display: block;
-  margin-top: 0.25rem;
-  font-size: 0.85rem;
-  color: var(--dsh-text-secondary, #5a5a5f);
+  margin-top: 2px;
+  color: var(--boost-muted);
+  font-size: 11px;
+  line-height: 1.55;
   font-variant-numeric: normal;
+  font-weight: 400;
+  max-width: 62ch;
 }
 
-.boost-settings__note {
-  margin: 0.75rem 0;
-  padding: 0.6rem 0.75rem;
-  border-left: 3px solid var(--dsh-warning-border, #d9a441);
-  background: var(--dsh-warning-surface, #fdf6e7);
-  border-radius: 0.25rem;
-  font-size: 0.9rem;
-}
+/* -------------------------------------------------------- code-list blocks */
 
-.boost-settings__note p {
-  margin: 0 0 0.4rem;
-}
-
-.boost-settings__note p:last-child {
-  margin-bottom: 0;
-}
-
-.boost-settings__ok,
-.boost-settings__muted {
-  color: var(--dsh-text-secondary, #5a5a5f);
-}
-
-.boost-settings__codes {
+.boost-settings__codes,
+.boost-settings__counts,
+.boost-settings__workspaces,
+.boost-settings__blockers {
   margin: 0;
   padding: 0;
   list-style: none;
@@ -94,46 +164,280 @@
 .boost-settings__codes li {
   display: flex;
   flex-direction: column;
-  gap: 0.15rem;
-  padding: 0.4rem 0;
-  border-bottom: 1px solid var(--dsh-border, #e6e6e8);
+  gap: 1px;
+  padding: 5px 0;
+  border-top: 1px solid var(--boost-line);
 }
 
-.boost-settings__error {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 0.5rem;
-  padding: 0.6rem 0.75rem;
-  border: 1px solid var(--dsh-danger, #c0392b);
-  border-radius: 6px;
+.boost-settings__codes li:first-child {
+  border-top: none;
 }
 
-.boost-settings__workspaces {
-  margin: 0;
-  padding: 0;
-  list-style: none;
-}
-
-.boost-settings__workspaces li {
-  display: flex;
-  gap: 0.75rem;
-  padding: 0.3rem 0;
-}
-
-.boost-settings__workspaces li.is-selected {
+.boost-settings__codes li > code {
+  font-size: 12px;
   font-weight: 600;
 }
 
-.boost-settings__config {
-  width: 100%;
-  border-collapse: collapse;
+.boost-settings__codes li > span {
+  color: var(--boost-muted);
+  font-size: 11px;
+  line-height: 1.55;
+  max-width: 62ch;
 }
 
-.boost-settings__config th,
-.boost-settings__config td {
-  text-align: left;
-  padding: 0.25rem 0.5rem 0.25rem 0;
-  border-bottom: 1px solid var(--dsh-border, #e6e6e8);
+/* Counts are a dense two-column grid: a list of full-width rows made the one
+   big number look like a section of its own. */
+.boost-settings__counts {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(15rem, 1fr));
+  gap: 0 16px;
+}
+
+.boost-settings__counts li {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 3px 0;
+  border-top: 1px solid var(--boost-line);
+}
+
+.boost-settings__counts li > code {
+  font-size: 12px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.boost-settings__counts li > span {
   font-variant-numeric: tabular-nums;
+  font-weight: 600;
+}
+
+/* ------------------------------------------------------------- workspaces */
+
+/* A bounded, scrollable list: the host can register dozens of workspaces and
+   an inline flow of checkboxes pushes everything else off the page. */
+.boost-settings__workspaces {
+  max-height: 13rem;
+  overflow-y: auto;
+  border: 1px solid var(--boost-line);
+  border-radius: 6px;
+  padding: 2px 0;
+}
+
+.boost-settings__workspaces li {
+  border-top: 1px solid var(--boost-line);
+}
+
+.boost-settings__workspaces li:first-child {
+  border-top: none;
+}
+
+.boost-settings__workspaces label {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 5px 10px;
+  cursor: pointer;
+}
+
+.boost-settings__workspaces label:hover {
+  background: var(--boost-surface-strong);
+}
+
+.boost-settings__workspaces input {
+  margin: 2px 0 0;
+  flex: none;
+}
+
+.boost-settings__workspace-name {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  min-width: 0;
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+
+.boost-settings__workspace-path {
+  color: var(--boost-muted);
+  font-size: 11px;
+  overflow-wrap: anywhere;
+}
+
+/* --------------------------------------------------------------- fieldsets */
+
+.boost-settings__field {
+  margin: 0 0 12px;
+  padding: 8px 10px 10px;
+  border: 1px solid var(--boost-line);
+  border-radius: 6px;
+}
+
+.boost-settings__field:last-of-type {
+  margin-bottom: 0;
+}
+
+.boost-settings__field > legend {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  padding: 0 4px;
+  color: var(--boost-muted);
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+}
+
+.boost-settings__field > label {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  padding: 2px 0;
+  cursor: pointer;
+}
+
+.boost-settings__field > label > input {
+  margin: 0;
+  flex: none;
+}
+
+.boost-settings__field[disabled] {
+  opacity: 0.5;
+}
+
+/* ---------------------------------------------------------- notices & alerts */
+
+.boost-settings__notice,
+.boost-settings__diagnostic {
+  margin: 10px 0 0;
+  padding: 8px 10px;
+  border-left: 3px solid var(--boost-warning);
+  background: color-mix(in srgb, var(--boost-warning) 10%, transparent);
+  border-radius: 0 4px 4px 0;
+  font-size: 12px;
+}
+
+.boost-settings__notice > p,
+.boost-settings__diagnostic > h4 {
+  margin: 0 0 4px;
+  font-size: 12px;
+}
+
+.boost-settings__notice > p:last-child,
+.boost-settings__diagnostic > ul:last-child {
+  margin-bottom: 0;
+}
+
+.boost-settings__notice ul,
+.boost-settings__diagnostic ul {
+  margin: 0 0 4px;
+  padding-left: 1.1rem;
+}
+
+.boost-settings__notice li,
+.boost-settings__diagnostic li {
+  margin: 2px 0;
+}
+
+.boost-settings__diagnostic li {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.boost-settings__blockers {
+  margin: 10px 0 0;
+  padding: 0 0 0 1.1rem;
+  list-style: disc;
+  color: var(--boost-muted);
+  font-size: 11px;
+}
+
+.boost-settings__error,
+.boost-settings__failure {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin: 0 0 12px;
+  padding: 8px 10px;
+  border: 1px solid var(--boost-danger);
+  border-radius: 6px;
+  font-size: 12px;
+}
+
+.boost-settings__failure {
+  flex-direction: column;
+  align-items: flex-start;
+}
+
+.boost-settings__failure > p {
+  margin: 0;
+}
+
+.boost-settings__warn {
+  margin: 0;
+  color: var(--boost-warning);
+  font-size: 12px;
+}
+
+.boost-settings__ok,
+.boost-settings__muted {
+  margin: 0;
+  color: var(--boost-muted);
+  font-size: 12px;
+}
+
+/* --------------------------------------------------------------- actions */
+
+.boost-settings__actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+  margin-top: 12px;
+  padding-top: 10px;
+  border-top: 1px solid var(--boost-line);
+}
+
+.boost-settings__actions button {
+  padding: 4px 12px;
+  border: 1px solid var(--boost-line-strong);
+  border-radius: 6px;
+  background: var(--boost-surface-strong);
+  color: inherit;
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.boost-settings__actions button:hover:not(:disabled) {
+  border-color: var(--boost-accent);
+}
+
+.boost-settings__actions button:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+
+.boost-settings__badge {
+  padding: 1px 7px;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--boost-accent) 18%, transparent);
+  color: var(--boost-accent);
+  font-size: 11px;
+  font-weight: 600;
+}
+
+/* ----------------------------------------------------------------- config */
+
+.boost-settings__config-group + .boost-settings__config-group {
+  margin-top: 4px;
+}
+
+.boost-settings__card-body code {
+  font-size: 11.5px;
+  overflow-wrap: anywhere;
 }

@@ -133,19 +133,26 @@ export function ScopeForm({ payload, scopeCode, hasSpill, onReload }: ScopeFormP
 
   if (draft === undefined || seed === undefined) {
     return (
-      <section className="boost-settings__section">
-        <h3>{c.SECTION_SCOPE}</h3>
+      <section className="boost-settings__card">
+        <div className="boost-settings__card-head">
+          <h3>{c.SECTION_SCOPE}</h3>
+        </div>
+        <div className="boost-settings__card-body">
         <p className="boost-settings__muted" data-code={scopeCode ?? ''}>
           {scopeCode === undefined ? c.UNAVAILABLE_REGISTRY : adviceFor(t, scopeCode)}
         </p>
         <BlockedBy reasons={reasons} />
+        </div>
       </section>
     )
   }
 
   return (
-    <section className="boost-settings__section">
-      <h3>{c.SECTION_SCOPE}</h3>
+    <section className="boost-settings__card">
+      <div className="boost-settings__card-head">
+        <h3>{c.SECTION_SCOPE}</h3>
+      </div>
+      <div className="boost-settings__card-body">
 
       <fieldset className="boost-settings__field">
         <legend>{c.LABEL_MODE}</legend>
@@ -175,7 +182,16 @@ export function ScopeForm({ payload, scopeCode, hasSpill, onReload }: ScopeFormP
       </fieldset>
 
       <fieldset className="boost-settings__field" disabled={draft.mode === MODE_VALUE_GLOBAL}>
-        <legend>{c.LABEL_WORKSPACES}</legend>
+        <legend>
+          {c.LABEL_WORKSPACES}
+          {entries.length === 0 ? null : (
+            <span className="boost-settings__meta">
+              {t('LABEL_WORKSPACE_COUNT')
+                .replace('{selected}', String(draft.workspaceIds.length))
+                .replace('{total}', String(entries.length))}
+            </span>
+          )}
+        </legend>
         {workspaces?.available === false ? (
           <p className="boost-settings__muted" data-code={workspaces.code}>
             {adviceFor(t, workspaces.code)}
@@ -183,16 +199,25 @@ export function ScopeForm({ payload, scopeCode, hasSpill, onReload }: ScopeFormP
         ) : entries.length === 0 ? (
           <p className="boost-settings__muted">{c.HINT_NO_WORKSPACES_TO_PICK}</p>
         ) : (
-          entries.map(entry => (
-            <label key={entry.id} className="boost-settings__workspace">
-              <input
-                type="checkbox"
-                checked={isTicked(draft, entry)}
-                onChange={() => toggleWorkspace(entry)}
-              />
-              <span>{entry.title === undefined ? entry.path : `${entry.title} — ${entry.path}`}</span>
-            </label>
-          ))
+          <ul className="boost-settings__workspaces">
+            {entries.map(entry => (
+              <li key={entry.id}>
+                <label>
+                  <input
+                    type="checkbox"
+                    checked={isTicked(draft, entry)}
+                    onChange={() => toggleWorkspace(entry)}
+                  />
+                  <span className="boost-settings__workspace-name">
+                    {entry.title ?? entry.path}
+                    {entry.title === undefined ? null : (
+                      <code className="boost-settings__workspace-path">{entry.path}</code>
+                    )}
+                  </span>
+                </label>
+              </li>
+            ))}
+          </ul>
         )}
       </fieldset>
 
@@ -302,6 +327,7 @@ export function ScopeForm({ payload, scopeCode, hasSpill, onReload }: ScopeFormP
           {dirty ? c.HINT_DIRTY : c.SAVED}
         </span>
         {dirty ? <span className="boost-settings__badge">{c.LABEL_DIRTY}</span> : null}
+      </div>
       </div>
     </section>
   )

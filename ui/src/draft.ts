@@ -7,6 +7,7 @@
  */
 import type { Envelope, WorkspaceEntry, WorkspaceListing } from '../../src/shared/api-types.js'
 import type { BoostStatus } from '../../src/tools/boost.js'
+import type { BoostConfig } from '../../src/types.js'
 
 /** The four fields the page may write. */
 export interface ScopeDraft {
@@ -198,4 +199,24 @@ export type StatusRead =
 export function envelopeOf(value: Envelope<BoostStatus> | undefined): StatusRead {
   if (value === undefined) return { ok: false }
   return value.ok ? { ok: true, data: value.data } : { ok: false, code: value.code }
+}
+
+/**
+ * The effective config, from either shape the wire can carry.
+ *
+ * A host whose server half predates the typed envelope sends the config object
+ * itself, and a page that only understood `{ ok, data }` read that as "no
+ * config at all" — every field then said "not measured" while the config was
+ * right there in the payload. Accepting the bare object costs one shape check
+ * and keeps the panel honest across a host restart.
+ */
+export function configOf(value: unknown): { config?: BoostConfig; code?: string } {
+  if (value === null || typeof value !== 'object') return {}
+  const maybe = value as { ok?: unknown; data?: unknown; code?: unknown }
+  if (maybe.ok === true) {
+    return typeof maybe.data === 'object' && maybe.data !== null ? { config: maybe.data as BoostConfig } : {}
+  }
+  if (maybe.ok === false) return typeof maybe.code === 'string' ? { code: maybe.code } : {}
+  // No `ok` at all: the pre-envelope shape.
+  return { config: value as BoostConfig }
 }

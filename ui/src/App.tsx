@@ -6,10 +6,12 @@
  * could not be measured turns "I don't know" into "nothing happened", and the
  * operator's next decision is based on a fact that was never observed. So every
  * unmeasured field says so, and a missing workspace list disables saving rather
- * than showing none.
+ * than showing none. The same rule covers a whole section whose source failed:
+ * it says why, with the code, instead of showing a default that reads as a
+ * measurement.
  */
 import { copyOf, adviceFor, type Copy } from './copy'
-import { envelopeOf } from './draft'
+import { configOf, envelopeOf } from './draft'
 import { useT } from './i18n'
 import { useCallback, useEffect, useState, type ReactNode } from 'react'
 import { fetchState, type StateResult } from './api'
@@ -41,23 +43,56 @@ function flatten(source: unknown, prefix = ''): [string, string][] {
   return rows
 }
 
+/** `a.b.c` → `['a', 'b.c']`; a top-level scalar keeps its own name as group. */
+function splitKey(key: string): [string, string] {
+  const at = key.indexOf('.')
+  return at === -1 ? [key, ''] : [key.slice(0, at), key.slice(at + 1)]
+}
+
+/** The leaf rows grouped by their top-level key, in first-seen order. */
+function grouped(rows: readonly [string, string][]): [string, [string, string][]][] {
+  const out: [string, [string, string][]][] = []
+  for (const [key, value] of rows) {
+    const [group, leaf] = splitKey(key)
+    const last = out.at(-1)
+    if (last !== undefined && last[0] === group) last[1].push([leaf, value])
+    else out.push([group, [[leaf, value]]])
+  }
+  return out
+}
+
 function Row({ label, value, hint }: { label: string; value: string; hint?: string }) {
   return (
     <div className="boost-settings__row">
       <dt>{label}</dt>
       <dd>
-        {value}
+        <span className="boost-settings__value">{value}</span>
         {hint === undefined ? null : <span className="boost-settings__hint">{hint}</span>}
       </dd>
     </div>
   )
 }
 
-function Section({ title, children, rows = true }: { title: string; children: ReactNode; rows?: boolean }) {
+/**
+ * One bordered card. Every panel on this page is a card, so the eye can tell
+ * where a group of numbers ends without reading the headings.
+ */
+function Card({
+  title,
+  meta,
+  children,
+}: {
+  title: string
+  meta?: string | undefined
+  children: ReactNode
+}) {
   return (
-    <section className="boost-settings__section">
-      <h3>{title}</h3>
-      {rows ? <dl>{children}</dl> : children}
+    <section className="boost-settings__card">
+      <div className="boost-settings__card-head">
+        <h3>{title}</h3>
+        {meta === undefined ? null : <span className="boost-settings__meta">{meta}</span>}
+      </div>
+      <div className="boost-settings__card-body">{children}</div>
     </section>
   )
 }
@@ -116,8 +151,12 @@ export function App() {
   // Both are `runBoost` envelopes: the payload is read from `data`, and the
   // failure branch keeps its `code` readable for the panels below.
   const scope = result?.ok === true ? result.data.scope : undefined
-  const configRead = result?.ok === true ? result.data.config : undefined
-  const config = configRead?.ok === true ? configRead.data : undefined
+  const configRead = configOf(result?.ok === true ? result.data.config : undefined)
+  const config = configRead.config
+  // A config that failed to read is a fact about this page, not a blank: the
+  // sections that read from it say so with the code instead of rendering
+  // defaults that would read as measurements.
+  const configCode = configRead.code
 
   // A failed status read must not read as health: without this the panels below
   // would say "no degraded items" and "no receipts yet" — a confident wrong
@@ -141,14 +180,18 @@ export function App() {
   const countRows: [string, number][] = Object.entries(counts)
     .filter(([, count]) => typeof count === 'number' && Number.isFinite(count))
     .sort(([, left], [, right]) => right - left)
-  const configRows = flatten(config)
+  const configGroups = grouped(flatten(config))
   const distill = config?.distillation
   const distillStatus = status?.distill
+  const distillKnown = distill !== undefined
+  const distillOn = distill?.enabled === true
 
   return (
     <div className="boost-settings">
-      <h2>{c.TITLE}</h2>
-      <p className="boost-settings__intro">{c.INTRO}</p>
+      <header className="boost-settings__header">
+        <h2>{c.TITLE}</h2>
+        <p className="boost-settings__intro">{c.INTRO}</p>
+      </header>
 
       {pending && result === undefined ? <p className="boost-settings__muted">{c.LOADING}</p> : null}
 
@@ -164,113 +207,67 @@ export function App() {
 
       {result !== undefined && result.ok ? (
         <>
-          <Section title={c.SECTION_STATUS}>
-            <Row label={c.LABEL_SAVED_LOWER} value={tokens(c, saved?.substitution_avoided)} hint={c.HINT_SAVED_LOWER} />
-            <Row label={c.LABEL_SAVED_UPPER} value={tokens(c, saved?.substitution)} hint={c.HINT_SAVED_UPPER} />
-            <Row label={c.LABEL_PROJECTION_GROSS} value={tokens(c, status?.projection_gross_tokens)} />
-            <Row
-              label={c.LABEL_PROJECTION_GROSS_REPLAY}
-              value={tokens(c, saved?.projectionGross)}
-              hint={c.HINT_PROJECTION_GROSS_REPLAY}
-            />
-            <Row label={c.LABEL_PROJECTION_NET} value={tokens(c, saved?.projectionNet)} hint={c.HINT_PROJECTION_NET} />
-            <Row label={c.LABEL_RETRIEVALS} value={tokens(c, saved?.retrievals)} />
-            <Row label={c.LABEL_OVERHEAD} value={tokens(c, status?.fixedOverheadTokens)} hint={c.HINT_OVERHEAD} />
-            <Row
-              label={c.LABEL_ESTIMATE}
-              value={status?.estimate_kind === 'host' ? c.ESTIMATE_HOST : c.UNKNOWN}
-            />
-            <Row
-              label={c.LABEL_CACHE_HIT_RATIO}
-              value={
-                typeof status?.cache_hit_ratio === 'number'
-                  ? `${(status.cache_hit_ratio * 100).toFixed(2)}%`
-                  : c.UNKNOWN
-              }
-              hint={c.HINT_CACHE_HIT_RATIO}
-            />
-            <Row
-              label={c.LABEL_PREFIX_DROPS}
-              value={
-                status?.prefix_drops === undefined
-                  ? c.UNKNOWN
-                  : `${status.prefix_drops.count} / ${status.prefix_drops.tokens.toLocaleString()}`
-              }
-              hint={c.HINT_PREFIX_DROPS}
-            />
-          </Section>
-
-          <Section title={c.SECTION_DISTILL}>
-            <Row
-              label={c.LABEL_DISTILL_ENABLED}
-              value={distill?.enabled === true ? c.DISTILL_ON : c.DISTILL_OFF}
-            />
-            <Row
-              label={c.LABEL_DISTILL_FAMILIES}
-              value={Array.isArray(distill?.families) ? distill.families.join(', ') : c.UNKNOWN}
-            />
-            <Row
-              label={c.LABEL_DISTILL_TRIGGER}
-              value={
-                typeof distill?.triggerChars === 'number' && Number.isFinite(distill.triggerChars)
-                  ? distill.triggerChars.toLocaleString()
-                  : c.DISTILL_TRIGGER_FAMILY
-              }
-            />
-            <Row label={c.LABEL_DISTILL_MAX_OUTPUT} value={tokens(c, distill?.maxOutputTokens)} />
-            <Row label={c.LABEL_DISTILL_TIMEOUT} value={tokens(c, distill?.timeoutMs)} />
-            <Row
-              label={c.LABEL_DISTILL_ROUTE}
-              value={
-                distill?.route === null || distill?.route === undefined
-                  ? c.DISTILL_ROUTE_BOUNDARY
-                  : `${String((distill.route as { provider?: unknown }).provider ?? '')} / ${String((distill.route as { model?: unknown }).model ?? '')}`
-              }
-            />
-            <Row label={c.LABEL_DISTILL_CALLS} value={tokens(c, distillStatus?.calls)} />
-            <Row label={c.LABEL_DISTILL_TOKENS} value={tokens(c, distillStatus?.tokens)} />
-            <Row label={c.LABEL_DISTILL_ADOPTED} value={tokens(c, distillStatus?.adopted)} />
-            <Row label={c.LABEL_DISTILL_REJECTED} value={tokens(c, distillStatus?.rejected)} />
-            <Row label={c.LABEL_DISTILL_FALLBACK} value={tokens(c, distillStatus?.fallback)} />
-            <Row label={c.LABEL_DISTILL_INPUT_CHARS} value={tokens(c, distillStatus?.input_chars)} />
-          </Section>
-
-          {distill?.enabled === true ? (
-            <div className="boost-settings__note" role="note">
-              <p>{c.HINT_DISTILL_CALLS}</p>
-              <p>{c.HINT_DISTILL_PINNED}</p>
-              <p>{c.HINT_DISTILL_ROLLBACK}</p>
-            </div>
-          ) : null}
-
-          {result.ok === true ? (
-            <ScopeForm
-              payload={result.data}
-              scopeCode={scope === undefined || scope.ok ? undefined : scope.code}
-              hasSpill={status?.hasSpill}
-              onReload={() => load()}
-            />
-          ) : null}
-
-          <Section title={c.LABEL_DEGRADED} rows={false}>
+          <Card title={c.LABEL_DEGRADED}>
             <Degraded codes={codes} unavailable={statusCode} />
-          </Section>
+          </Card>
 
-          {status !== undefined && status.projection_horizon_reestimated > 0 ? (
-            <Section title={c.SECTION_STATUS} rows={false}>
+          <Card title={c.SECTION_STATUS}>
+            <dl>
+              <Row label={c.LABEL_SAVED_LOWER} value={tokens(c, saved?.substitution_avoided)} hint={c.HINT_SAVED_LOWER} />
+              <Row label={c.LABEL_SAVED_UPPER} value={tokens(c, saved?.substitution)} hint={c.HINT_SAVED_UPPER} />
+              <Row label={c.LABEL_PROJECTION_GROSS} value={tokens(c, status?.projection_gross_tokens)} />
+              <Row
+                label={c.LABEL_PROJECTION_GROSS_REPLAY}
+                value={tokens(c, saved?.projectionGross)}
+                hint={c.HINT_PROJECTION_GROSS_REPLAY}
+              />
+              <Row label={c.LABEL_PROJECTION_NET} value={tokens(c, saved?.projectionNet)} hint={c.HINT_PROJECTION_NET} />
+              <Row label={c.LABEL_RETRIEVALS} value={tokens(c, saved?.retrievals)} />
+              <Row label={c.LABEL_OVERHEAD} value={tokens(c, status?.fixedOverheadTokens)} hint={c.HINT_OVERHEAD} />
+              <Row
+                label={c.LABEL_ESTIMATE}
+                value={status?.estimate_kind === 'host' ? c.ESTIMATE_HOST : c.UNKNOWN}
+              />
+              <Row
+                label={c.LABEL_CACHE_HIT_RATIO}
+                value={
+                  typeof status?.cache_hit_ratio === 'number'
+                    ? `${(status.cache_hit_ratio * 100).toFixed(2)}%`
+                    : c.UNKNOWN
+                }
+                hint={c.HINT_CACHE_HIT_RATIO}
+              />
+              <Row
+                label={c.LABEL_PREFIX_DROPS}
+                value={
+                  status?.prefix_drops === undefined
+                    ? c.UNKNOWN
+                    : `${status.prefix_drops.count} / ${status.prefix_drops.tokens.toLocaleString()}`
+                }
+                hint={c.HINT_PREFIX_DROPS}
+              />
+            </dl>
+            {status !== undefined && status.projection_horizon_reestimated > 0 ? (
               <p className="boost-settings__muted">
                 {c.LABEL_HORIZON_REESTIMATED}: <code>{String(status.projection_horizon_reestimated)}</code>
               </p>
-            </Section>
-          ) : null}
+            ) : null}
+          </Card>
 
-          <Section title={c.SECTION_COUNTS} rows={false}>
+          <ScopeForm
+            payload={result.data}
+            scopeCode={scope === undefined || scope.ok ? undefined : scope.code}
+            hasSpill={status?.hasSpill}
+            onReload={() => load()}
+          />
+
+          <Card title={c.SECTION_COUNTS}>
             {countRows.length === 0 ? (
               <p className="boost-settings__muted">
                 {statusCode === undefined ? c.NO_RECEIPTS : c.STATUS_UNAVAILABLE}
               </p>
             ) : (
-              <ul className="boost-settings__codes">
+              <ul className="boost-settings__counts">
                 {countRows.map(([code, count]) => (
                   <li key={code}>
                     <code>{code}</code>
@@ -279,34 +276,84 @@ export function App() {
                 ))}
               </ul>
             )}
-          </Section>
+          </Card>
 
-
-          <Section title={c.SECTION_CONFIG} rows={false}>
-            <p className="boost-settings__hint">{c.CONFIG_READONLY}</p>
-            {configRows.length === 0 ? (
-              <p className="boost-settings__muted">{c.CONFIG_UNAVAILABLE}</p>
-            ) : (
-            <table className="boost-settings__config">
-              <thead>
-                <tr>
-                  <th scope="col">{c.LABEL_CONFIG_KEY}</th>
-                  <th scope="col">{c.LABEL_CONFIG_VALUE}</th>
-                </tr>
-              </thead>
-              <tbody>
-                {configRows.map(([key, value]) => (
-                  <tr key={key}>
-                    <td>
-                      <code>{key}</code>
-                    </td>
-                    <td>{value}</td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
+          <Card title={c.SECTION_DISTILL} meta={distillKnown ? (distillOn ? c.DISTILL_ON : c.DISTILL_OFF) : undefined}>
+            {distillKnown ? null : (
+              <p className="boost-settings__muted">
+                {c.CONFIG_UNAVAILABLE_CODE} <code>{configCode ?? ''}</code>
+              </p>
             )}
-          </Section>
+            {distillKnown ? (
+              <>
+                <dl>
+                  <Row label={c.LABEL_DISTILL_ENABLED} value={distillOn ? c.DISTILL_ON : c.DISTILL_OFF} />
+                  <Row
+                    label={c.LABEL_DISTILL_FAMILIES}
+                    value={Array.isArray(distill.families) ? distill.families.join(', ') : c.UNKNOWN}
+                  />
+                  <Row
+                    label={c.LABEL_DISTILL_TRIGGER}
+                    value={
+                      typeof distill.triggerChars === 'number' && Number.isFinite(distill.triggerChars)
+                        ? distill.triggerChars.toLocaleString()
+                        : c.DISTILL_TRIGGER_FAMILY
+                    }
+                  />
+                  <Row label={c.LABEL_DISTILL_MAX_OUTPUT} value={tokens(c, distill.maxOutputTokens)} />
+                  <Row label={c.LABEL_DISTILL_TIMEOUT} value={tokens(c, distill.timeoutMs)} />
+                  <Row
+                    label={c.LABEL_DISTILL_ROUTE}
+                    value={
+                      distill.route === null || distill.route === undefined
+                        ? c.DISTILL_ROUTE_BOUNDARY
+                        : `${String((distill.route as { provider?: unknown }).provider ?? '')} / ${String((distill.route as { model?: unknown }).model ?? '')}`
+                    }
+                  />
+                </dl>
+                {distillOn ? (
+                  <>
+                    <h4 className="boost-settings__subhead">{c.LABEL_DISTILL_RUNTIME}</h4>
+                    <dl>
+                      <Row label={c.LABEL_DISTILL_CALLS} value={tokens(c, distillStatus?.calls)} />
+                      <Row label={c.LABEL_DISTILL_TOKENS} value={tokens(c, distillStatus?.tokens)} />
+                      <Row label={c.LABEL_DISTILL_INPUT_CHARS} value={tokens(c, distillStatus?.input_chars)} />
+                      <Row label={c.LABEL_DISTILL_ADOPTED} value={tokens(c, distillStatus?.adopted)} />
+                      <Row label={c.LABEL_DISTILL_REJECTED} value={tokens(c, distillStatus?.rejected)} />
+                      <Row label={c.LABEL_DISTILL_FALLBACK} value={tokens(c, distillStatus?.fallback)} />
+                    </dl>
+                    <div className="boost-settings__notice" role="note">
+                      <p>{c.HINT_DISTILL_CALLS}</p>
+                      <p>{c.HINT_DISTILL_PINNED}</p>
+                      <p>{c.HINT_DISTILL_ROLLBACK}</p>
+                    </div>
+                  </>
+                ) : (
+                  <p className="boost-settings__muted">{c.HINT_DISTILL_OFF}</p>
+                )}
+              </>
+            ) : null}
+          </Card>
+
+          <Card title={c.SECTION_CONFIG}>
+            <p className="boost-settings__hint">{c.CONFIG_READONLY}</p>
+            {configGroups.length === 0 ? (
+              <p className="boost-settings__muted">
+                {c.CONFIG_UNAVAILABLE_CODE} <code>{configCode ?? ''}</code>
+              </p>
+            ) : (
+              configGroups.map(([group, rows]) => (
+                <div key={group} className="boost-settings__config-group">
+                  <h4 className="boost-settings__subhead">{group}</h4>
+                  <dl>
+                    {rows.map(([leaf, value]) => (
+                      <Row key={`${group}.${leaf}`} label={leaf === '' ? group : leaf} value={value} />
+                    ))}
+                  </dl>
+                </div>
+              ))
+            )}
+          </Card>
         </>
       ) : null}
     </div>

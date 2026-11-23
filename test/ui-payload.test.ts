@@ -15,7 +15,7 @@ import { buildStatePayload, type StateDeps } from '../src/http/state.ts'
 import type { ScopeDoc } from '../src/scope/doc.ts'
 import type { Envelope } from '../src/shared/api-types.ts'
 import type { BoostStatus } from '../src/tools/boost.ts'
-import { envelopeOf } from '../ui/src/draft.ts'
+import { configOf, envelopeOf } from '../ui/src/draft.ts'
 
 /** A complete `BoostStatus`: the route's deps are typed against the real shape. */
 function statusData(over: Partial<BoostStatus> = {}): BoostStatus {
@@ -160,4 +160,18 @@ test('degraded 不是数组时页面不崩，按「没有降级项」之外的�
   assert.equal(read.ok, true)
   const degraded = (read.data as { degraded: unknown }).degraded
   assert.equal(Array.isArray(degraded), false, 'the fixture is the shape the guard has to survive')
+})
+
+test('configOf 接受两种线上形状：信封与信封之前那个裸对象', () => {
+  // A host whose server half predates the typed envelope sends the config
+  // object itself. Reading only `{ ok, data }` turned that into "no config",
+  // and the whole 蒸馏/生效配置 panel said "not measured" with the config
+  // sitting in the same payload.
+  const bare = { projection: { read: { triggerChars: 3000 } }, distillation: { enabled: true } }
+  assert.deepEqual(configOf(bare), { config: bare })
+  assert.deepEqual(configOf({ ok: true, data: bare }), { config: bare })
+  assert.deepEqual(configOf({ ok: false, code: 'ERR_BOOST_INTERNAL' }), { code: 'ERR_BOOST_INTERNAL' })
+  assert.deepEqual(configOf(undefined), {})
+  assert.deepEqual(configOf('nope'), {})
+  assert.deepEqual(configOf({ ok: true, data: null }), {})
 })

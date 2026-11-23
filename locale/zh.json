@@ -126,5 +126,9 @@
   "LABEL_DISTILL_FALLBACK": "回退",
   "HINT_DISTILL_CALLS": "每条超过阈值的回执会多一次模型调用；它是辅助请求，不进用量账本，所以省下的与花掉的要分开看。",
   "HINT_DISTILL_PINNED": "产物按（回执, 问题, 版本）钉住：换模型或改问题文本只影响新回执，已经钉住的不动。",
-  "HINT_DISTILL_ROLLBACK": "关掉只影响之后的回执，已经进入历史的字节不会回滚；要让某条回执重新尝试，删掉 <dshHome>/boost/distilled/ 下对应的文件。"
+  "HINT_DISTILL_ROLLBACK": "关掉只影响之后的回执，已经进入历史的字节不会回滚；要让某条回执重新尝试，删掉 <dshHome>/boost/distilled/ 下对应的文件。",
+  "CONFIG_UNAVAILABLE_CODE": "读不到生效配置：`/state` 的 config 返回了 {code}。",
+  "LABEL_DISTILL_RUNTIME": "运行态",
+  "HINT_DISTILL_OFF": "蒸馏关闭时不产生这些数字：没有调用，也没有产物。",
+  "LABEL_WORKSPACE_COUNT": "已选 {selected} / 共 {total}"
 }

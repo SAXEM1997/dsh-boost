@@ -126,5 +126,9 @@
   "LABEL_DISTILL_FALLBACK": "Fallback",
   "HINT_DISTILL_CALLS": "Every receipt over the trigger costs one extra model call. It is an auxiliary request, so it never enters the usage ledger — the saving and the spend have to be read separately.",
   "HINT_DISTILL_PINNED": "A product is pinned by (receipt, question, version): changing the model or the question text affects only new receipts, never the pinned ones.",
-  "HINT_DISTILL_ROLLBACK": "Turning it off affects only later receipts; bytes already in history do not roll back. To retry one receipt, delete its file under <dshHome>/boost/distilled/."
+  "HINT_DISTILL_ROLLBACK": "Turning it off affects only later receipts; bytes already in history do not roll back. To retry one receipt, delete its file under <dshHome>/boost/distilled/.",
+  "CONFIG_UNAVAILABLE_CODE": "The effective config could not be read: `/state` returned {code} for it.",
+  "LABEL_DISTILL_RUNTIME": "Runtime",
+  "HINT_DISTILL_OFF": "Distillation is off, so none of these numbers exist: no calls, no products.",
+  "LABEL_WORKSPACE_COUNT": "{selected} of {total} selected"
 }
