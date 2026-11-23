@@ -240,6 +240,19 @@ for (const [id, w] of Object.entries(s.tables.workspaces)) console.log(id, w.pat
 3. 在页面上把「作用范围」改成「所有工作区」并保存，然后 `boost status` 的 `scope.mode` 应当立刻是 `global`。
 4. 制造一次冲突：页面不重读，另外用工具跑一次 `scope-set`，再在页面上保存——应当拿到 `ERR_SCOPE_REVISION_CONFLICT` 与一个显式的「重新读取」按钮，**草稿不被覆盖**。
 
+### 2.0.2 蒸馏：页面只显示，开关在 patch 文件里
+
+`0.3.0` 起设置页多一节「蒸馏」。它**只读**：`distillation.*` 在 profile 的 `cordis.patch.yml` 里，不在 `scope.json`，而页面按 D1 只写 `scope.json` 的四个字段。
+
+验证顺序：
+
+1. `curl -s http://127.0.0.1:<port>/dsh-boost/api/state` 的 `config.data.distillation` 应当有六个键（`enabled`、`families`、`triggerChars`、`maxOutputTokens`、`timeoutMs`、`route`）。
+2. 页面那一节渲染六行 + 六行运行态（`calls`/`tokens`/`adopted`/`rejected`/`fallback`/送去蒸馏的字符数）。
+3. `enabled` 为 `false` 时**不渲染**危险提示——它只在真开着时出现，避免「它现在是开的」的错觉。
+4. 把 `enabled` 改成 `true` 后重启宿主，提示出现；`status.distill.calls` 随超阈值回执增长。
+
+`tokens` 只含 **completion**：辅助请求不进用量账本，所以同一行旁边有「送去蒸馏的字符数合计」——提示词是回执正文，成本主体在那一半。两者要分开读，不能相加成一个「净收益」。
+
 **`^0.1.4` 的用户要显式升到 `0.2.0`**：`^0.1.4` 不会跨大版本，`npm install dsh-boost` 拿到的仍是 `0.1.4`。设置页是新增对外面（`dsh.client`、`./client`、HTTP 路由、客户端产物），按 SemVer 走次版本。
 
 ### 2.1 降级门：宿主缺 `tokenMeter`（先验健康，再验降级）
@@ -344,10 +357,11 @@ tarball 会拉进 `dsh-spill-policy@rc.5` 并 `ERESOLVE`（当时实测 exit 1�
   **`0.2.3-rc.4` / `0.2.3-rc.5` / `0.2.3` 都在区间外**：它们会告警一次，但仍照常加载——`0.2.3-rc.5`
   与本插件触及的九个包逐字节相同（见 §6），所以那条告警说的是「没验证过」，不是「会坏」。
 
-安装规格：**`dsh-boost@^0.2.7`**。registry 上有十四条版本记录，其中一条是占位版本，不要把它当成
+安装规格：**`dsh-boost@^0.3.0`**。registry 上有十五条版本记录，其中一条是占位版本，不要把它当成
 “更早的 API”：
 
-- `0.2.7` — 当前 `latest`；缓存护栏（`cache_hit_ratio`、`prefix_drops` 两个字段并上设置页）、投影确定性测试、RELEASE 版本线回到 0.2.x 现状；
+- `0.3.0` — 当前 `latest`；回执蒸馏（ADR 0001）、设置页「蒸馏」一节、迟到答案记账；
+- `0.2.7` — 缓存护栏（`cache_hit_ratio`、`prefix_drops` 两个字段并上设置页）、投影确定性测试、RELEASE 版本线回到 0.2.x 现状；
 - `0.2.6` — 修掉 0.2.5 引入的「`degraded` 不是数组时整页崩」，并补 `boost status` 的两个缓存护栏字段（`cache_hit_ratio`、`prefix_drops`）；
 - `0.2.5` — 失效工作区标签措辞、`NO_DEGRADED` 改为只陈述观测、渲染视界重算计数；
 - `0.2.4` — 修 0.2.3 引入的「状态面板永远显示读不到」，spill 提示区分存在与可用；

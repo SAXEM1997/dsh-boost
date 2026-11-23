@@ -142,6 +142,8 @@ export function App() {
     .filter(([, count]) => typeof count === 'number' && Number.isFinite(count))
     .sort(([, left], [, right]) => right - left)
   const configRows = flatten(config)
+  const distill = config?.distillation
+  const distillStatus = status?.distill
 
   return (
     <div className="boost-settings">
@@ -197,6 +199,49 @@ export function App() {
               hint={c.HINT_PREFIX_DROPS}
             />
           </Section>
+
+          <Section title={c.SECTION_DISTILL}>
+            <Row
+              label={c.LABEL_DISTILL_ENABLED}
+              value={distill?.enabled === true ? c.DISTILL_ON : c.DISTILL_OFF}
+            />
+            <Row
+              label={c.LABEL_DISTILL_FAMILIES}
+              value={Array.isArray(distill?.families) ? distill.families.join(', ') : c.UNKNOWN}
+            />
+            <Row
+              label={c.LABEL_DISTILL_TRIGGER}
+              value={
+                typeof distill?.triggerChars === 'number' && Number.isFinite(distill.triggerChars)
+                  ? distill.triggerChars.toLocaleString()
+                  : c.DISTILL_TRIGGER_FAMILY
+              }
+            />
+            <Row label={c.LABEL_DISTILL_MAX_OUTPUT} value={tokens(c, distill?.maxOutputTokens)} />
+            <Row label={c.LABEL_DISTILL_TIMEOUT} value={tokens(c, distill?.timeoutMs)} />
+            <Row
+              label={c.LABEL_DISTILL_ROUTE}
+              value={
+                distill?.route === null || distill?.route === undefined
+                  ? c.DISTILL_ROUTE_BOUNDARY
+                  : `${String((distill.route as { provider?: unknown }).provider ?? '')} / ${String((distill.route as { model?: unknown }).model ?? '')}`
+              }
+            />
+            <Row label={c.LABEL_DISTILL_CALLS} value={tokens(c, distillStatus?.calls)} />
+            <Row label={c.LABEL_DISTILL_TOKENS} value={tokens(c, distillStatus?.tokens)} />
+            <Row label={c.LABEL_DISTILL_ADOPTED} value={tokens(c, distillStatus?.adopted)} />
+            <Row label={c.LABEL_DISTILL_REJECTED} value={tokens(c, distillStatus?.rejected)} />
+            <Row label={c.LABEL_DISTILL_FALLBACK} value={tokens(c, distillStatus?.fallback)} />
+            <Row label={c.LABEL_DISTILL_INPUT_CHARS} value={tokens(c, distillStatus?.input_chars)} />
+          </Section>
+
+          {distill?.enabled === true ? (
+            <div className="boost-settings__note" role="note">
+              <p>{c.HINT_DISTILL_CALLS}</p>
+              <p>{c.HINT_DISTILL_PINNED}</p>
+              <p>{c.HINT_DISTILL_ROLLBACK}</p>
+            </div>
+          ) : null}
 
           {result.ok === true ? (
             <ScopeForm

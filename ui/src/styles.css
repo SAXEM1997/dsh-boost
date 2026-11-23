@@ -63,6 +63,23 @@
   font-variant-numeric: normal;
 }
 
+.boost-settings__note {
+  margin: 0.75rem 0;
+  padding: 0.6rem 0.75rem;
+  border-left: 3px solid var(--dsh-warning-border, #d9a441);
+  background: var(--dsh-warning-surface, #fdf6e7);
+  border-radius: 0.25rem;
+  font-size: 0.9rem;
+}
+
+.boost-settings__note p {
+  margin: 0 0 0.4rem;
+}
+
+.boost-settings__note p:last-child {
+  margin-bottom: 0;
+}
+
 .boost-settings__ok,
 .boost-settings__muted {
   color: var(--dsh-text-secondary, #5a5a5f);

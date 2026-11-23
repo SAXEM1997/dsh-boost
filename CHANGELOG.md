@@ -8,13 +8,25 @@ This file records user-visible changes. Format follows Keep a Changelog; version
 Design rationale lives in `docs/superpowers/specs/`; the release-acceptance procedure is in
 `docs/RELEASE.md`.
 
-## [Unreleased]
+## [0.3.0] - 2026-11-23
 
 ### 新增
 
 - 回执蒸馏（ADR 0001，issue #10）：投影前对超过族触发阈值的 `bash`/`ssh` 回执问一个固定问题，用一次有超时的模型调用（`purpose: 'boost-distill'`，不进观测、不结算）得到蒸馏正文。产物按 `(receipt_hash, question_hash, distiller_version)` 存到 `<dshHome>/boost/distilled/`，重放只查表不再调模型；引用必须逐字出现在原文里、且正文按 UTF-8 字节严格短于同一回执的截断视图才采用。默认关（`distillation.enabled: false`），关着时投影路径与 0.2.7 逐字节相同。
-- `boost status` 增加 `distill`：`{calls, tokens, adopted, rejected, fallback}`，无样本为 0。
-- 新收据码 `distill-failed`、`distill-rejected:{timeout,unverifiable,not-smaller}`；采用时仍写 `projected` 收据，带 `mode` 与 `distill_*` 字段。三处码表（`README.md`、`README.en.md`、`docs/RELEASE.md`）已同步。
+- `boost status` 增加 `distill`：`{calls, tokens, adopted, rejected, fallback, input_chars}`，无样本为 0。
+- 设置页新增「蒸馏」一节（只读）：六个生效值 + 六行运行态；`enabled` 为真时多一块三句的危险提示（多一次调用、产物钉住、关掉只影响之后）。
+- 新收据码 `distill-failed`、`distill-rejected:{empty,timeout,unverifiable,not-smaller}`、`distill-late`；采用时仍写 `projected` 收据，带 `mode` 与 `distill_*` 字段。三处码表（`README.md`、`README.en.md`、`docs/RELEASE.md`）已同步。
+
+### 修复
+
+- 影子模式不再蒸馏：原来判定跑在 `mode === 'shadow'` 分支之前，默认的影子周里每条超阈值回执都会调一次模型、spill 原文、写产物，却不写任何收据。
+- 重放不再产生第二份 spill 文件：产物钉住 `{locator, retrievalHint}`，而宿主后端用 `randomBytes(6)` 命名——重新落盘会让页脚（模型读到的那一半）与进历史时的字节不同。
+- 被拒的结果也钉墓碑（`empty`/`unverifiable`/`not-smaller`），重放读它而不重新调模型；`timeout` 不钉，好让迟到的答案仍能落地。
+- 蒸馏产物的查找与写入统一用请求的模型名：模型自报别的名字时 pin 永不命中。
+- 空正文不再被采用（它会通过其余每一道门，然后用一行 marker 替换整条回执）。
+- `MAX_ANSWER_CHARS` 成为真上限：夹住单个 delta，不再让一块巨大的增量整块通过。
+- 每次调用只注册一个请求对象：原来注册两个，其中一个永不清理，会把还没回答的挂起调用挤出 `MAX_PARKED`。
+- 迟到答案的调用成本进 `status.distill.tokens`（另写一条 `mode: 'late'` 收据，只加 token，不加 `calls`）。
 
 ## [0.2.7] - 2026-11-23
 

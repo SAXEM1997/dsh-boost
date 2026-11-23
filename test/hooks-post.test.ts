@@ -2305,13 +2305,16 @@ test('#10 蒸馏收据带 distill_mode，status 据此计 calls/tokens/adopted/r
   })
   assert.equal(result.ok, true)
   const status = (result as Any).data
-  assert.deepEqual(Object.keys(status.distill).sort(), ['adopted', 'calls', 'fallback', 'rejected', 'tokens'])
+  assert.deepEqual(Object.keys(status.distill).sort(), ['adopted', 'calls', 'fallback', 'input_chars', 'rejected', 'tokens'])
   // Two receipts: each called the model (a different receipt is a different
   // pinned product) and each was adopted. `calls` counts the model calls;
   // `adopted` counts the decisions; `tokens` sums only what the model reported.
   assert.equal(status.distill.calls, 2)
   assert.equal(status.distill.adopted, 2)
   assert.equal(status.distill.tokens, 60)
+  // The prompt is the receipt body, and an auxiliary request never enters the
+  // usage ledger — this sum is the only record of that half of the cost.
+  assert.ok(status.distill.input_chars > 0)
   assert.equal(status.distill.rejected, 0)
   assert.equal(status.distill.fallback, 0)
 })

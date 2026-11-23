@@ -504,7 +504,21 @@ export interface BoostStatus {
    * Sweeps rebuild this on every `status`, so it spans every shard a whole-store
    * scan reads.
    */
-  distill: { calls: number; tokens: number; adopted: number; rejected: number; fallback: number }
+  distill: {
+    calls: number
+    tokens: number
+    adopted: number
+    rejected: number
+    fallback: number
+    /**
+     * Code points of the receipt bodies the calls read, summed.
+     *
+     * The completion tokens above are only half the cost: the prompt is the
+     * receipt, and an auxiliary request is never observed by the usage ledger.
+     * This is the only honest record of that half, so the page shows both.
+     */
+    input_chars: number
+  }
   /** Receipt count per `code`, over every shard (including the empty session id). */
   counts: Record<string, number>
   /** Stable degradation codes actually observed. */
@@ -706,7 +720,7 @@ async function aggregate(
   let unpricedRetrievals = 0
   let legacyRetrievals = 0
   let legacyRetrievalCost = 0
-  const distill = { calls: 0, tokens: 0, adopted: 0, rejected: 0, fallback: 0 }
+  const distill = { calls: 0, tokens: 0, adopted: 0, rejected: 0, fallback: 0, input_chars: 0 }
 
   for await (const receipt of receipts.scan()) {
     // A receipt is untrusted text from a file: `counts` has no prototype so a
@@ -727,6 +741,10 @@ async function aggregate(
       if (typeof lateTokens === 'number' && Number.isFinite(lateTokens) && lateTokens >= 0) {
         distill.tokens += lateTokens
       }
+      const lateChars = receipt.distill_input_chars
+      if (typeof lateChars === 'number' && Number.isFinite(lateChars) && lateChars >= 0) {
+        distill.input_chars += lateChars
+      }
     } else if (receipt.mode === 'adopted' || receipt.mode === 'rejected' || receipt.mode === 'fallback') {
       if (receipt.mode === 'adopted') distill.adopted += 1
       else if (receipt.mode === 'rejected') distill.rejected += 1
@@ -734,6 +752,8 @@ async function aggregate(
       if (receipt.distill_calls === 1) distill.calls += 1
       const tokens = receipt.distill_tokens
       if (typeof tokens === 'number' && Number.isFinite(tokens) && tokens >= 0) distill.tokens += tokens
+      const chars = receipt.distill_input_chars
+      if (typeof chars === 'number' && Number.isFinite(chars) && chars >= 0) distill.input_chars += chars
     }
 
     // Only the settled line carries a measured saving; the synth-time line is

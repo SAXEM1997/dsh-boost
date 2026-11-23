@@ -25,7 +25,7 @@ function statusData(over: Partial<BoostStatus> = {}): BoostStatus {
     projection: 'shadow',
     saved: { substitution: 12, projectionGross: 40, projectionNet: 7, retrievals: 0 },
     counts: { projection: 3 },
-    distill: { calls: 2, tokens: 512, adopted: 1, rejected: 1, fallback: 0 },
+    distill: { calls: 2, tokens: 512, adopted: 1, rejected: 1, fallback: 0, input_chars: 9_000 },
     degraded: ['ERR_HOST_NO_SPILL'],
     cache_hit_ratio: null,
     prefix_drops: { count: 0, tokens: 0 },
