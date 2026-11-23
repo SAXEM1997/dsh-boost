@@ -37,6 +37,9 @@ import { resolveConfig } from './config.js'
 import { AnchorStore } from './gate/invalidate.js'
 import type { Plan } from './gate/plan.js'
 import { resolveBoostRoot } from './host/root.js'
+import { DistillAttempts } from './distill/attempt.js'
+import { createLlmDistiller, distillRequestOptions } from './distill/llm.js'
+import { DistillStore } from './distill/store.js'
 import { clearSession, SessionRuntime } from './hooks/llm-stream.js'
 import { TurnClock } from './hooks/clock.js'
 import { PendingQueue } from './hooks/pending.js'
@@ -1151,6 +1154,9 @@ function wireSessionEvents(
     preStepSeen.delete(sessionId)
     horizon.clear(sessionId)
     scope.forget(sessionId)
+    // A distillation product belongs to the round that produced it: the
+    // session end removes the ones this process wrote (ADR 0001).
+    void deps.distillStore?.clearSession(sessionId).catch(() => undefined)
     // Flush this session's buffered lines before evicting its state, then make
     // every later hook for the id a no-op.
     try {
@@ -1397,6 +1403,11 @@ export function apply(ctx: PluginContext, config: unknown): void {
     const sessions = new DisposalAwareSessionRuntime(cfg.stepsPerTurn)
     const horizon = new RuntimeStepHorizon(cfg.horizonSteps, cfg.historyTurns)
     const retrievals = new RetrievalLedger()
+    // Distillation (ticket #10): the pinned products, and the registry that
+    // persists a timed-out call's answer when it lands. Both are inert while
+    // `distillation.enabled` is false, which is the default.
+    const distillStore = new DistillStore(root)
+    const distillAttempts = new DistillAttempts(distillStore)
     /** Session id → workspace id, populated by the visibility warm. */
     const workspaces = new Map<string, string>()
     /** Session id → the route the selector call inherits. */
@@ -1519,6 +1530,7 @@ export function apply(ctx: PluginContext, config: unknown): void {
       registry.reset()
       spillService.reset()
       llm.reset()
+      distillAttempts.clear()
     })
 
     const meter = meterSeamOf(ctx)
@@ -1632,6 +1644,32 @@ export function apply(ctx: PluginContext, config: unknown): void {
         return llmBackend()
       },
       selectorRoute: (sessionId) => routes.get(sessionId),
+      // The distiller is built per call over the live LLM seam: a provider that
+      // is replaced after one successful call is picked up on the next one, and
+      // a host without `llm` records `distill-failed` without a new code.
+      get distill() {
+        const backend = llmBackend()
+        if (backend === undefined) return undefined
+        return createLlmDistiller(backend, (request) => {
+          const options = { ...distillRequestOptions(request) }
+          distillAttempts.register(options, request)
+          return options
+        })
+      },
+      distillRoute: (sessionId) => {
+        const pinned = cfg.distillation.route
+        if (pinned !== null) return { provider: pinned.provider, model: pinned.model }
+        // `null` reuses the boundary route the selector inherits; without one
+        // there is no model to ask, and `decide` records `distill-failed`.
+        return routes.get(sessionId)
+      },
+      distillStore,
+      distillAttempts,
+      distillRequestOptions: () => (request) => {
+        const options = { ...distillRequestOptions(request) }
+        distillAttempts.register(options, request)
+        return options
+      },
     }
     // The section mount is the first thing `registerHooks` touches. Only the
     // host's genuine duplicate error means a previous apply already owns the

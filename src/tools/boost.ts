@@ -492,6 +492,19 @@ export interface BoostStatus {
    * with no samples is `0`; it is a count, not a measurement.
    */
   prefix_drops: { count: number; tokens: number }
+  /**
+   * Receipt distillation (ADR 0001, ticket #10), over every receipt that
+   * carries a `mode` field.
+   *
+   * `calls` counts receipts whose own decision invoked the model
+   * (`distill_calls: 1`); `tokens` sums the reported `distill_tokens`. `adopted`,
+   * `rejected` and `fallback` split the decisions. All five are **counts**, not
+   * measurements: with no sample they are `0`, and `tokens` is the model's own
+   * report — it is `0` when the model reported nothing, never an estimate.
+   * Sweeps rebuild this on every `status`, so it spans every shard a whole-store
+   * scan reads.
+   */
+  distill: { calls: number; tokens: number; adopted: number; rejected: number; fallback: number }
   /** Receipt count per `code`, over every shard (including the empty session id). */
   counts: Record<string, number>
   /** Stable degradation codes actually observed. */
@@ -674,6 +687,7 @@ async function aggregate(
   unpricedRetrievals: number
   legacyRetrievals: number
   legacyRetrievalCost: number
+  distill: BoostStatus['distill']
   degraded: string[]
 }> {
   const counts: Record<string, number> = Object.create(null)
@@ -692,6 +706,7 @@ async function aggregate(
   let unpricedRetrievals = 0
   let legacyRetrievals = 0
   let legacyRetrievalCost = 0
+  const distill = { calls: 0, tokens: 0, adopted: 0, rejected: 0, fallback: 0 }
 
   for await (const receipt of receipts.scan()) {
     // A receipt is untrusted text from a file: `counts` has no prototype so a
@@ -699,6 +714,18 @@ async function aggregate(
     // string concatenation and never a dropped assignment.
     if (typeof receipt.code === 'string') {
       counts[receipt.code] = (counts[receipt.code] ?? 0) + 1
+    }
+
+    // A distillation decision is the receipt's own `mode`: `adopted` when its
+    // body is in history, `rejected` when a named gate refused it, `fallback`
+    // when nothing usable came back (no model, a throw, a failed write).
+    if (receipt.mode === 'adopted' || receipt.mode === 'rejected' || receipt.mode === 'fallback') {
+      if (receipt.mode === 'adopted') distill.adopted += 1
+      else if (receipt.mode === 'rejected') distill.rejected += 1
+      else distill.fallback += 1
+      if (receipt.distill_calls === 1) distill.calls += 1
+      const tokens = receipt.distill_tokens
+      if (typeof tokens === 'number' && Number.isFinite(tokens) && tokens >= 0) distill.tokens += tokens
     }
 
     // Only the settled line carries a measured saving; the synth-time line is
@@ -818,6 +845,7 @@ async function aggregate(
     unpricedRetrievals,
     legacyRetrievals,
     legacyRetrievalCost,
+    distill,
     degraded,
   }
 }
@@ -1106,6 +1134,7 @@ async function statusCommand(deps: BoostDeps): Promise<BoostResult<BoostStatus>>
     cache_hit_ratio: cacheHitRatioOf(deps.usage),
     prefix_drops: prefixDropsOf(deps.usage),
     counts: totals.counts,
+    distill: totals.distill,
     degraded,
     fixedOverheadTokens: fixedOverhead === 'unknown' ? 'unknown' : fixedOverhead.totalTokens,
     fixedOverhead,

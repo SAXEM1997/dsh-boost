@@ -1502,3 +1502,52 @@ test('qr3#3: 没有接缝时销毁不抛错（测试与 embedder 的常见形态
   const { clearSession } = await import('../src/hooks/llm-stream.ts')
   assert.doesNotThrow(() => clearSession(deps, SESSION))
 })
+
+// ---------------------------------------------------------------------------
+// Ticket #10: a distilled view is our own projection, not a lost anchor
+// ---------------------------------------------------------------------------
+
+test('#10 蒸馏视图 + 锚点 → 不触发 compaction-reset，决策照常合成', async () => {
+  const env = setup()
+  // The anchor is a `bash` receipt projected by distillation: the new head
+  // marker names its length, the body replaces the middle, and the host footer
+  // follows. Neither window survives, so only the marker can identify it.
+  const anchor = bashAnchor()
+  const view = distilledViewOf(anchor)
+  seedAnchored(env, anchor)
+
+  const chunks = await streamOnce(env, { messages: messagesWith(view) })
+
+  assert.equal(env.receipts.find((r) => r.kind === 'reset'), undefined, 'a distilled view is still the anchor')
+  // The synthesis did not abandon the entry: `peek` keeps it for
+  // `tools/execute`, and a taken step stays spent.
+  assert.equal(env.queue.peek(SESSION)?.callId, 'seeded-call')
+  assert.equal(chunks.some((c) => c.type === 'tool-call-delta'), true)
+})
+
+/** A `bash` receipt long enough for the projection windows and a real middle. */
+function bashAnchor(): string {
+  const line = (index: number) => `./step-${index}.sh: running checks (ok ok ok ok)\n`
+  return `${Array.from({ length: 40 }, (_, i) => line(i)).join('')}npm ERR! boom\n${Array.from({ length: 40 }, (_, i) => line(100 + i)).join('')}`
+}
+
+/** The distilled replacement of `anchor`, byte for byte the shape `decide` renders. */
+function distilledViewOf(anchor: string, name = 'bash'): string {
+  return [
+    `[distilled from ${Array.from(anchor).length} chars; ${name}]`,
+    '`npm test` failed at the assertion; the full receipt is in the spill store.',
+    '',
+    '(Omitted 1,700 bytes. Full formatted result stored at: /spill/bash-1.txt. Read the full result.)',
+  ].join('\n')
+}
+
+test('#10 蒸馏标记的字符数与锚点不符 → 仍是 compaction-reset（标记不是万能通行证）', async () => {
+  const env = setup()
+  const anchor = `${'H'.repeat(120)}${'M'.repeat(60)}${'T'.repeat(120)}`
+  const view = distilledViewOf(`${anchor}x`)
+  seedAnchored(env, anchor)
+
+  await streamOnce(env, { messages: messagesWith(view) })
+
+  assert.equal(env.receipts.find((r) => r.kind === 'reset')?.code, 'compaction-reset')
+})

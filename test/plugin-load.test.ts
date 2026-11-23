@@ -10,6 +10,7 @@ import { ReceiptStore } from '../src/receipts/store.ts'
 import { ScopeStore } from '../src/scope/store.ts'
 import { fakeHost } from './fakes/host.ts'
 import type { PluginContext } from '../src/types.ts'
+import { DEFAULT_CONFIG } from '../src/config.ts'
 
 test('插件导出 cordis 需要的元数据', () => {
   assert.equal(plugin.name, 'dsh-boost')
@@ -962,4 +963,17 @@ test('row 32: a second apply over a foreign-section host does not double-mount',
 
   assert.equal(app.host.hookCount('tools/post-execute'), hooksBefore)
   assert.equal(app.host.tools.definitions.length, toolsBefore)
+})
+
+test('cordis.patch.yml 的 distillation 段与 DEFAULT_CONFIG 逐键一致（票面三处同步）', async () => {
+  const yaml = (await import(/* @vite-ignore */ 'js-yaml' as string)) as {
+    default?: { load(text: string): unknown }
+    load?: (text: string) => unknown
+  }
+  const load = yaml.load ?? yaml.default?.load
+  assert.equal(typeof load, 'function')
+  const yml = await readFile(new URL('../cordis.patch.yml', import.meta.url), 'utf8')
+  const document = load?.(yml) as Array<{ insert: Array<{ config: Record<string, unknown> }> }>
+  const config = document[0]?.insert[0]?.config
+  assert.deepEqual(config?.distillation, DEFAULT_CONFIG.distillation)
 })

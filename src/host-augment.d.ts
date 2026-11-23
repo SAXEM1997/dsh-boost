@@ -1,5 +1,9 @@
 /**
- * The selector's auxiliary request purpose, declared on the host's open map.
+ * The plugin's auxiliary request purposes, declared on the host's open map.
+ *
+ * `boost-selector` is the selector; `boost-distill` is receipt distillation
+ * (ticket #10). Both are auxiliary calls, so the `llm/stream` hook passes them
+ * through without observing or settling them.
  *
  * `GenerateOptions.purpose` is typed as `keyof LlmRequestPurposeMap`, so a
  * producer package adds its key by module augmentation. This file is an
@@ -18,5 +22,6 @@ export {}
 declare module '@deepseek-ai/dsh-llm/types' {
   interface LlmRequestPurposeMap {
     'boost-selector': true
+    'boost-distill': true
   }
 }

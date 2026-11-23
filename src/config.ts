@@ -22,7 +22,13 @@
  *
  * @module dsh-boost/config
  */
-import type { BoostConfig, ProjectionParams, ToolFamily } from './types.js'
+import type {
+  BoostConfig,
+  DistillConfig,
+  DistillRoute,
+  ProjectionParams,
+  ToolFamily,
+} from './types.js'
 
 /** Families with projection windows, in the order defaults are declared. */
 const FAMILIES: readonly ToolFamily[] = ['read', 'grep', 'glob', 'bash', 'ssh']
@@ -38,6 +44,16 @@ export const DEFAULT_CONFIG: BoostConfig = {
   },
   admission: { thresholdTokens: 1024 },
   selector: { maxTokens: 512 },
+  // Distillation is off by default: with it off the projection path is byte
+  // for byte the 0.2.7 path (ticket #10).
+  distillation: {
+    enabled: false,
+    families: ['bash', 'ssh'],
+    triggerChars: null,
+    maxOutputTokens: 256,
+    timeoutMs: 3000,
+    route: null,
+  },
   stepsPerTurn: 8,
   horizonSteps: 20,
   historyTurns: 5,
@@ -75,6 +91,131 @@ function integerAtLeast(
     repair(`dsh-boost: ignoring config ${label}=${String(value)}; using ${fallback}`)
     return fallback
   }
+  if (clamped !== value) {
+    repair(`dsh-boost: clamping config ${label}=${String(value)} to ${clamped}`)
+  }
+  return clamped
+}
+
+/** Whether `value` is a usable family name. */
+function isFamily(value: unknown): value is ToolFamily {
+  return typeof value === 'string' && (FAMILIES as readonly string[]).includes(value)
+}
+
+/** One `{ provider, model }` pair, or `undefined` when the value is not one. */
+function pickRoute(value: unknown): DistillRoute | undefined {
+  const route = section(value)
+  if (route === undefined) return undefined
+  const { provider, model } = route
+  if (typeof provider !== 'string' || provider === '') return undefined
+  if (typeof model !== 'string' || model === '') return undefined
+  return { provider, model }
+}
+
+/**
+ * Resolve the distillation section key by key.
+ *
+ * A malformed key falls back to its own default and is reported, exactly like
+ * every other section. `families` keeps only known family names, deduplicated
+ * and in the configured order; an empty list is kept (it means "distil
+ * nothing") rather than silently restoring the default pair. The two numeric
+ * ranges are clamped, never rejected: an out-of-range budget is a value the
+ * operator can see repaired, while a rejected one would silently restore a
+ * default they did not choose.
+ */
+function pickDistillation(raw: unknown, fallback: DistillConfig, repair: ConfigRepair): DistillConfig {
+  const source = section(raw)
+  if (source === undefined) return fallback
+
+  let families = fallback.families
+  if (source.families !== undefined) {
+    if (Array.isArray(source.families)) {
+      const seen = new Set<ToolFamily>()
+      const picked: ToolFamily[] = []
+      for (const entry of source.families) {
+        if (!isFamily(entry)) {
+          repair(`dsh-boost: ignoring config distillation.families entry ${String(entry)}`)
+          continue
+        }
+        if (seen.has(entry)) continue
+        seen.add(entry)
+        picked.push(entry)
+      }
+      families = picked
+    } else {
+      repair(`dsh-boost: ignoring config distillation.families=${String(source.families)}; using ${fallback.families.join(',')}`)
+    }
+  }
+
+  let triggerChars = fallback.triggerChars
+  if (source.triggerChars !== undefined && source.triggerChars !== null) {
+    if (typeof source.triggerChars === 'number' && Number.isFinite(source.triggerChars) && source.triggerChars >= 0) {
+      triggerChars = integerAtLeast(source.triggerChars, 0, 0, 'distillation.triggerChars', repair)
+    } else {
+      // `null` keeps "use the family's trigger"; a malformed value is reported
+      // and also keeps it, rather than inventing a threshold of its own.
+      repair(`dsh-boost: ignoring config distillation.triggerChars=${String(source.triggerChars)}; using each family's projection trigger`)
+    }
+  }
+
+  let route = fallback.route
+  if (source.route !== undefined && source.route !== null) {
+    const picked = pickRoute(source.route)
+    if (picked === undefined) {
+      repair(`dsh-boost: ignoring config distillation.route (expected { provider, model }); using the boundary route`)
+    }
+    route = picked ?? null
+  }
+
+  if (source.enabled !== undefined && typeof source.enabled !== 'boolean') {
+    repair(`dsh-boost: ignoring config distillation.enabled=${String(source.enabled)}; using ${fallback.enabled}`)
+  }
+
+  return {
+    enabled: typeof source.enabled === 'boolean' ? source.enabled : fallback.enabled,
+    families,
+    triggerChars,
+    maxOutputTokens: clampInteger(
+      source.maxOutputTokens,
+      fallback.maxOutputTokens,
+      1,
+      4096,
+      'distillation.maxOutputTokens',
+      repair,
+    ),
+    timeoutMs: clampInteger(
+      source.timeoutMs,
+      fallback.timeoutMs,
+      100,
+      30_000,
+      'distillation.timeoutMs',
+      repair,
+    ),
+    route,
+  }
+}
+
+/** A finite integer clamped into `[min, max]`; anything unusable takes `fallback`. */
+function clampInteger(
+  value: unknown,
+  fallback: number,
+  min: number,
+  max: number,
+  label: string,
+  repair: ConfigRepair,
+): number {
+  if (typeof value !== 'number' || !Number.isFinite(value)) {
+    if (value !== undefined) {
+      repair(`dsh-boost: ignoring config ${label}=${String(value)}; using ${fallback}`)
+    }
+    return fallback
+  }
+  const floored = Math.floor(value)
+  if (!Number.isSafeInteger(floored)) {
+    repair(`dsh-boost: ignoring config ${label}=${String(value)}; using ${fallback}`)
+    return fallback
+  }
+  const clamped = Math.min(max, Math.max(min, floored))
   if (clamped !== value) {
     repair(`dsh-boost: clamping config ${label}=${String(value)} to ${clamped}`)
   }
@@ -179,6 +320,8 @@ function resolveConfigUnchecked(raw: unknown, onRepair: ConfigRepair): BoostConf
     'selector.maxTokens',
     onRepair,
   )
+
+  cfg.distillation = pickDistillation(root.distillation, cfg.distillation, onRepair)
 
   cfg.stepsPerTurn = integerAtLeast(root.stepsPerTurn, cfg.stepsPerTurn, 0, 'stepsPerTurn', onRepair)
   cfg.horizonSteps = integerAtLeast(root.horizonSteps, cfg.horizonSteps, 0, 'horizonSteps', onRepair)

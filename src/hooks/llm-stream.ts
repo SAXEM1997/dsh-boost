@@ -16,7 +16,10 @@
  *
  * 1. `purpose` set -> raw `next()`. The appendix sets `purpose` **only** for
  *    auxiliary calls, and the host issues several on the same session id: the
- *    plugin's selector (`boost-selector`), `dsh-compaction-basic`
+ *    plugin's selector (`boost-selector`), receipt distillation
+ *    (`boost-distill`, ticket #10 — a timed-out distillation is persisted from
+ *    this branch through `attempts`, without touching observation or
+ *    settlement), `dsh-compaction-basic`
  *    (`compaction`) and the session-title model (`session-title`). None is a
  *    conversation step, so all pass through untouched: never substituted,
  *    never observed into `usage.request()`, never settling a mark. Observing
@@ -181,6 +184,7 @@
  */
 import type { GenerateOptions, StreamChunk, TokenUsage } from '@deepseek-ai/dsh-llm'
 import { StepBudget } from '../admission/ledger.js'
+import { DISTILL_PURPOSE } from '../distill/llm.js'
 import { UsageLedger } from '../admission/usage.js'
 import { DEFAULT_CONFIG } from '../config.js'
 import { looksPruned, PRUNE_MARKER } from '../gate/invalidate.js'
@@ -617,6 +621,14 @@ function anchorProbe(deps: HookDeps): { head: number; tail: number } {
  */
 const PROJECTION_HEADER = /^\[output ([\d,]+) chars; showing first ([\d,]+) and last ([\d,]+)\]$/
 
+/**
+ * The head line a distilled replacement writes: `[distilled from N chars; Q]`,
+ * where `N` is the anchor's length in code points and `Q` the family's short
+ * question name. A distilled view has no windows to compare (it is not a
+ * cut), so the count is its whole identity evidence.
+ */
+const DISTILLED_HEADER = /^\[distilled from ([\d,]+) chars; [A-Za-z0-9_-]+\]$/
+
 /** One `en-US`-formatted count from a projection head line. */
 function headerCount(raw: string | undefined): number | undefined {
   if (raw === undefined) return undefined
@@ -639,7 +651,14 @@ function ownProjectionCarries(body: string, anchor: string): boolean {
   const newline = body.indexOf('\n')
   if (newline === -1) return false
   const match = PROJECTION_HEADER.exec(body.slice(0, newline))
-  if (match === null) return false
+  // The distillation marker (ticket #10) is the head line of a receipt replaced
+  // by its distilled body. It names the anchor's total length — the identity
+  // evidence — but no windows, so the content check below does not apply.
+  if (match === null) {
+    const distilled = DISTILLED_HEADER.exec(body.slice(0, newline))
+    const output = distilled === null ? undefined : headerCount(distilled[1])
+    return output !== undefined && output === Array.from(anchor).length
+  }
   const output = headerCount(match[1])
   const headLen = headerCount(match[2])
   const tailLen = headerCount(match[3])
@@ -662,6 +681,38 @@ function ownProjectionCarries(body: string, anchor: string): boolean {
   const rest = body.slice(tailAt + 1 + tail.length)
   if (rest === '') return true
   return rest.startsWith('\n') && PRESERVED_SIGNAL_LINE.test(rest)
+}
+
+/**
+ * The host footer shape a distilled replacement must carry.
+ *
+ * Anchored at the end of the text it is applied to: the notice names a byte
+ * count and a locator, exactly the `(Omitted N bytes. … stored at: …)` shape
+ * `dsh-spill-policy` renders.
+ */
+const DISTILLED_FOOTER = /\n\n\([^)]*\d[\d,]*\s*bytes[^)]* stored at: [^)]+\)$/
+
+/**
+ * Whether `body` is our own **distilled** replacement of `anchor`.
+ *
+ * A distilled view is `[distilled from N chars; Q]` + the distilled body + the
+ * host footer, and keeps no windows of the anchor. Its identity evidence is the
+ * marker naming the anchor's exact length **plus** a footer — the marker alone
+ * would turn any body into a carrier, which is the failure mode
+ * `prunedCarries` exists to avoid. The two parts can arrive together (the
+ * caller passed the whole body) or split (the caller stripped the trailing
+ * footer and passed the head): both are checked here.
+ *
+ * The body text itself cannot be verified from a rendered history; that is
+ * what the quote check did when the product was accepted.
+ */
+function distilledCarries(body: string, anchor: string, footerStripped = false): boolean {
+  const newline = body.indexOf('\n')
+  if (newline === -1) return false
+  const match = DISTILLED_HEADER.exec(body.slice(0, newline))
+  const output = match === null ? undefined : headerCount(match[1])
+  if (output === undefined || output !== Array.from(anchor).length) return false
+  return footerStripped || DISTILLED_FOOTER.test(body)
 }
 
 /** One rescued marker line, or several of them, each on its own line. */
@@ -817,6 +868,17 @@ function carriesAnchor(
   probe: { head: number; tail: number },
 ): boolean {
   if (body.includes(anchor)) return true
+  // A distilled replacement (ticket #10) keeps neither window, so it is
+  // recognised before the probe rejects it. Its identity evidence is the
+  // marker naming the anchor's exact length plus a host footer, checked in
+  // `distilledCarries`; it never passes for an arbitrary body without them.
+  const footerStart = trailingSpillFooterStart(body)
+  if (
+    distilledCarries(body, anchor) ||
+    (footerStart !== -1 && distilledCarries(body.slice(0, footerStart), anchor, true))
+  ) {
+    return true
+  }
   const points = Array.from(anchor)
   const headLen = Math.min(probe.head, points.length)
   const tailLen = Math.min(probe.tail, points.length)
@@ -833,7 +895,6 @@ function carriesAnchor(
   // ends with the notice rather than with the anchor's tail. Verify the same
   // body with that notice removed; without one, the in-middle footer shape is
   // checked instead.
-  const footerStart = trailingSpillFooterStart(body)
   const core = footerStart === -1 ? body : body.slice(0, footerStart)
   if (footerStart !== -1 && ownProjectionCarries(core, anchor)) return true
   return foreignShaperCarries(core, anchor, head, tail, footerStart !== -1)
@@ -1517,6 +1578,24 @@ function observedPass(
 }
 
 /**
+ * Drain a registered distillation stream; its value is unused here.
+ *
+ * The product is written by the attempts registry from `decide`'s own promise,
+ * so this only has to keep the stream flowing — including one whose caller
+ * already timed out, which would otherwise leave the provider request half-read
+ * and the late answer never observed.
+ */
+function drainForLateDistill(upstream: AsyncIterable<StreamChunk>): AsyncIterable<StreamChunk> {
+  return (async function* (): AsyncGenerator<StreamChunk> {
+    for await (const chunk of upstream) {
+      // Nothing here may change the request's semantics: no usage observation,
+      // no settlement, no plan rollover.
+      void chunk
+    }
+  })()
+}
+
+/**
  * Build the `llm/stream` listener.
  *
  * Returns a **synchronous** function returning an `AsyncIterable`; see the
@@ -1540,7 +1619,20 @@ export function streamHook(
     // compaction summarizer, the session-title model. They share the session
     // id but are not conversation steps, so they pass through raw: no
     // substitution, no usage observation, no settlement, no plan rollover.
-    if (options?.purpose !== undefined) return next()
+    if (options?.purpose !== undefined) {
+      const upstream = next()
+      // A timed-out distillation (ticket #10) is parked in `deps.distillAttempts`.
+      // Its answer arrived after the caller stopped waiting; draining this
+      // stream is what observes it, and the registry persists it so the next
+      // render of the same receipt finds a pinned product instead of paying
+      // again. Nothing else here changes: no usage, no settlement, no plan.
+      // `next()` was still called exactly once, so a host whose terminal throws
+      // on this request keeps throwing it.
+      if (options.purpose === DISTILL_PURPOSE && deps.distillAttempts?.owns(options) === true) {
+        return drainForLateDistill(upstream)
+      }
+      return upstream
+    }
 
     const sessionId = sessionIdOf(options)
     if (sessionId !== undefined) {

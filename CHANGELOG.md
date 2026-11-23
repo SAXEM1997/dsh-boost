@@ -10,6 +10,12 @@ Design rationale lives in `docs/superpowers/specs/`; the release-acceptance proc
 
 ## [Unreleased]
 
+### 新增
+
+- 回执蒸馏（ADR 0001，issue #10）：投影前对超过族触发阈值的 `bash`/`ssh` 回执问一个固定问题，用一次有超时的模型调用（`purpose: 'boost-distill'`，不进观测、不结算）得到蒸馏正文。产物按 `(receipt_hash, question_hash, distiller_version)` 存到 `<dshHome>/boost/distilled/`，重放只查表不再调模型；引用必须逐字出现在原文里、且正文按 UTF-8 字节严格短于同一回执的截断视图才采用。默认关（`distillation.enabled: false`），关着时投影路径与 0.2.7 逐字节相同。
+- `boost status` 增加 `distill`：`{calls, tokens, adopted, rejected, fallback}`，无样本为 0。
+- 新收据码 `distill-failed`、`distill-rejected:{timeout,unverifiable,not-smaller}`；采用时仍写 `projected` 收据，带 `mode` 与 `distill_*` 字段。三处码表（`README.md`、`README.en.md`、`docs/RELEASE.md`）已同步。
+
 ## [0.2.7] - 2026-11-23
 
 ### 新增

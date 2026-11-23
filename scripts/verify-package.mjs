@@ -111,7 +111,7 @@ const REQUIRED_LOCALES = ['en.json', 'zh.json']
  * `skipLibCheck: false` typecheck depend on a host tree this package does not
  * declare. `package.json` `files` excludes them and re-includes these two.
  */
-const PUBLIC_DECLARATIONS = new Set(['index', 'types'])
+const PUBLIC_DECLARATIONS = new Set(['index', 'types', 'distill/types'])
 
 /**
  * Root files `npm publish` must upload. `README.en.md` and `README.md` are

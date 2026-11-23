@@ -121,11 +121,41 @@ export interface ProjectionParams {
   tailChars: number
 }
 
+/** A provider/model pair, used only as the distillation override (ticket #10). */
+export interface DistillRoute {
+  provider: string
+  model: string
+}
+
+/**
+ * Receipt distillation: answer one fixed question about a long receipt with a
+ * fast model, keep the answer only if it is verifiable and strictly shorter
+ * than the truncation view it replaces (ADR 0001, ticket #10).
+ *
+ * `enabled: false` (the default) makes the whole path unreachable, and the
+ * projection behaves exactly as it did before distillation existed.
+ */
+export interface DistillConfig {
+  /** Master switch; off by default. */
+  enabled: boolean
+  /** The families that may be distilled. `read`/`grep`/`glob` are structural and stay truncated. */
+  families: ToolFamily[]
+  /** The pre-gate length in code points; `null` means the family's `projection.triggerChars`. */
+  triggerChars: number | null
+  /** Output cap for one distillation call, clamped to 1..4096. */
+  maxOutputTokens: number
+  /** Wall-clock bound for one call, clamped to 100..30000; a timeout falls back to truncation. */
+  timeoutMs: number
+  /** `null` reuses the boundary route the selector inherits; set to pin a cheaper model. */
+  route: DistillRoute | null
+}
+
 /** Plugin configuration surface; every key falls back to its design default when absent. */
 export interface BoostConfig {
   projection: Record<ToolFamily, ProjectionParams>
   admission: { thresholdTokens: number }
   selector: { maxTokens: number }
+  distillation: DistillConfig
   stepsPerTurn: number
   horizonSteps: number
   historyTurns: number

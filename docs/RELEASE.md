@@ -491,6 +491,11 @@ JSON 体返回一个码，页面据码决定说什么。`ERR_CLIENT_*` 是页面
 | `tool-not-whitelisted` | 计划里有候选，但没有一个在 read/grep/glob 白名单内 | 模型计划用了不可替换的工具；不需要处置 |
 | `selector-error` | 选择器调用失败（派发错误）而弃权 | 查 LLM 路由与日志；与“选择器正常但没标签”区分 |
 | `selector-abstain` | 选择器没给出标签或超时，不是调用失败 | 正常弃权；多候选时替换不提交 |
+| `distill-failed` | 蒸馏没产出可用结果：宿主没有 `ctx.llm`、没有路由（`route: null` 且没有边界路由）、调用抛错、解析不出 JSON、产物落盘失败或页脚/ spill 拼不出来。回执 `mode:'fallback'`；历史里仍是投影（或不投影）的原文 | 看 `distill_calls`：`1` 说明模型被调过、失败在解析或落盘；`0` 说明根本没调（缺服务/路由）。不映射到新的 `degraded` 码，宿主缺 `llm` 就是 `ERR_HOST_SELECTOR_UNAVAILABLE` 那条路 |
+| `distill-rejected:timeout` | 超过 `distillation.timeoutMs` 没有回答；迟到的答案仍会落盘（`llm/stream` 观察到被登记的那次调用），所以重放不会重复计费 | 偶尔出现是正常；持续出现说明 `timeoutMs` 对当前路由太短，或路由挂了 |
+| `distill-rejected:unverifiable` | 答案里有引用不是原文的非空子串（伪造），或落盘产物被改过 | 模型在编引用。看同一模型的 `distill_tokens` 与 `adopted` 比例；必要时换 `distillation.route` |
+| `distill-rejected:not-smaller` | 蒸馏正文 + 页脚按 UTF-8 字节不短于同回执的截断视图，净赚为负，不采用 | 正常门；持续出现说明该族的正文太长（`maxOutputTokens` 没约束住），收紧它 |
+| `distill`（采用） | 采用时写入的是 `kind:'projection'`、`code:'projected'` 的收据，`mode:'adopted'`，带 `distill_calls`/`distill_tokens`/`distill_omitted_bytes`/`distill_bytes`/`distill_saved_tokens` | 无需处置；`boost status` 的 `distill.calls/tokens/adopted` 由它汇总 |
 | `dispatch-rejected` | 合成派发的工具名/参数与决定不符（防篡改检查），该次派发被拒、队列已清 | 到达的调用不是插件决定的那一个；查是否有别的写入者或中间层改了参数 |
 | `pruned-reset` / `compaction-reset` | `llm/stream` 或 `tools/post-execute` 时锚点无法验证：历史被 pruner 裁掉（`pruned-reset`），或锚定回执已不在/被压缩替换（`compaction-reset`）；写一条 `kind:'reset'` 收据，队列与锚点清空后放行 | 压缩/裁剪后的预期重置；替换在下一回合重新开始 |
 | `projection-skipped:no-owner` | **hook 不可达**：`projectApply` 的直接调用契约在 session id 为空时返回它（`src/projection/apply.ts` 的 `!sessionId` 分支），但 `tools/post-execute` 在无 agent / 无 session id 时更早返回并记 `skip:no-scope`，生产调用总是传字符串（设计 §5.4 已记为不可达） | 无需处置。若真看到它，来源是直接调用 `projectApply` 的代码路径（测试或未来调用方），不是宿主漏传 session |

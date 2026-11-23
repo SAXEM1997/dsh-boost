@@ -49,6 +49,7 @@ test('畸形值与未知键逐键回落，不抛错', () => {
     'projection',
     'admission',
     'selector',
+    'distillation',
     'stepsPerTurn',
     'horizonSteps',
     'historyTurns',
@@ -172,4 +173,84 @@ test('onRepair 抛错也不冒出 resolveConfig', () => {
     }),
     DEFAULT_CONFIG,
   )
+})
+
+// ---------------------------------------------------------------------------
+// Ticket #10: the distillation section
+// ---------------------------------------------------------------------------
+
+test('distillation 默认值逐字符合票面：关、bash+ssh、null 触发与路由、256/3000', () => {
+  assert.deepEqual(DEFAULT_CONFIG.distillation, {
+    enabled: false,
+    families: ['bash', 'ssh'],
+    triggerChars: null,
+    maxOutputTokens: 256,
+    timeoutMs: 3000,
+    route: null,
+  })
+  // Off by default: a host that never configures it behaves exactly like 0.2.7.
+  assert.equal(resolveConfig({}).distillation.enabled, false)
+})
+
+test('distillation 逐键合并，并按族顺序、去重、过滤未知族', () => {
+  const c = resolveConfig({
+    distillation: { enabled: true, families: ['ssh', 'read', 'bash', 'ssh', 'nope'] },
+  })
+  assert.equal(c.distillation.enabled, true)
+  assert.deepEqual(c.distillation.families, ['ssh', 'read', 'bash'])
+  assert.equal(c.distillation.maxOutputTokens, 256)
+})
+
+test('distillation 数值 clamp：maxOutputTokens 1..4096、timeoutMs 100..30000，并上报修复', () => {
+  const repairs: string[] = []
+  const c = resolveConfig(
+    { distillation: { maxOutputTokens: 0, timeoutMs: 5 } },
+    (message) => repairs.push(message),
+  )
+  assert.equal(c.distillation.maxOutputTokens, 1)
+  assert.equal(c.distillation.timeoutMs, 100)
+  assert.ok(repairs.some((m) => m.includes('distillation.maxOutputTokens')))
+  assert.ok(repairs.some((m) => m.includes('distillation.timeoutMs')))
+
+  const high = resolveConfig({ distillation: { maxOutputTokens: 99_999, timeoutMs: 1e9 } })
+  assert.equal(high.distillation.maxOutputTokens, 4096)
+  assert.equal(high.distillation.timeoutMs, 30_000)
+
+  const fractional = resolveConfig({ distillation: { maxOutputTokens: 100.7 } })
+  assert.equal(fractional.distillation.maxOutputTokens, 100)
+})
+
+test('distillation 畸形值逐键回落：enabled 非布尔、families 非数组、route 缺字段、trigger 负数', () => {
+  const repairs: string[] = []
+  const c = resolveConfig(
+    {
+      distillation: {
+        enabled: 'yes',
+        families: 'bash',
+        triggerChars: -5,
+        route: { provider: 'p' },
+        maxOutputTokens: Number.NaN,
+      },
+    },
+    (message) => repairs.push(message),
+  )
+  assert.equal(c.distillation.enabled, false)
+  assert.deepEqual(c.distillation.families, ['bash', 'ssh'])
+  assert.equal(c.distillation.triggerChars, null)
+  assert.equal(c.distillation.route, null)
+  assert.equal(c.distillation.maxOutputTokens, 256)
+  assert.ok(repairs.length >= 4, repairs.join('\n'))
+})
+
+test('distillation.route 只保留 provider/model 两个字符串', () => {
+  const c = resolveConfig({ distillation: { route: { provider: 'deepseek', model: 'deepseek-flash', extra: 1 } } })
+  assert.deepEqual(c.distillation.route, { provider: 'deepseek', model: 'deepseek-flash' })
+})
+
+test('distillation 返回深拷贝，不污染默认值', () => {
+  const c = resolveConfig(undefined)
+  c.distillation.families.push('read')
+  c.distillation.enabled = true
+  assert.deepEqual(DEFAULT_CONFIG.distillation.families, ['bash', 'ssh'])
+  assert.equal(DEFAULT_CONFIG.distillation.enabled, false)
 })

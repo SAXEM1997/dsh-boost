@@ -1994,3 +1994,319 @@ test('qr5#3 an accept carrying its own content does not commit a substitution', 
 
   assert.equal(env.queue.peek(SESSION), undefined, 'a rewritten accept must not enqueue')
 })
+
+// ---------------------------------------------------------------------------
+// Ticket #10: distillation in the projection path
+// ---------------------------------------------------------------------------
+
+/** A long bash receipt whose useful line is in the middle the windows cut. */
+function bashReceipt(tag = ''): string {
+  const line = (index: number) => `${tag}./step-${index}.sh: running checks (${'ok '.repeat(60)})\n`
+  const head = Array.from({ length: 20 }, (_, i) => line(i)).join('')
+  const tail = Array.from({ length: 20 }, (_, i) => line(100 + i)).join('')
+  return `${head}npm ERR! Test failed: expected 3 got 4\nexit code 1\n${tail}`
+}
+
+/** A distillation config switched on for bash. */
+function distillConfig(over: Partial<Any> = {}): Any {
+  return {
+    ...DEFAULT_CONFIG,
+    distillation: { ...DEFAULT_CONFIG.distillation, enabled: true, ...over },
+  }
+}
+
+/**
+ * The recording `DistillFn`.
+ *
+ * It answers with a short body quoting the real error line, and counts its
+ * calls: "the table won" is proven by the counter not moving.
+ */
+function distillSeam() {
+  const calls: Any[] = []
+  const answer = (request: Any) => ({
+    text: '`npm test` failed on the assertion:\nnpm ERR! Test failed: expected 3 got 4',
+    quotes: ['npm ERR! Test failed: expected 3 got 4'],
+    model: request.model,
+    tokens: 30,
+  })
+  return {
+    calls,
+    distill: {
+      async call(request: Any) {
+        calls.push(request)
+        return answer(request)
+      },
+    },
+    answer,
+  }
+}
+
+/** One bash post-execute with apply projection, a spill recorder and the fake LLM. */
+async function distillSetup(over: { cfg?: Any; doc?: Any; deps?: Record<string, unknown> } = {}) {
+  const { DistillStore } = await import('../src/distill/store.ts')
+  const { mkdtemp } = await import('node:fs/promises')
+  const { tmpdir } = await import('node:os')
+  const { join } = await import('node:path')
+  const saved: Any[] = []
+  const seam = distillSeam()
+  const env = setup({
+    doc: doc({ projection: 'on', ...(over.doc ?? {}) }),
+    deps: {
+      estimateText: (text: string) => Math.ceil(text.length / 4),
+      spill: {
+        saveText: async (input: Any) => {
+          saved.push(input)
+          return { locator: '/spill/bash-1.txt', retrievalHint: 'read the full result' }
+        },
+      },
+      formatFooter: (omitted: Any, ref: Any) =>
+        `(Omitted ${omitted.count} bytes. Full formatted result stored at: ${ref.locator}. ${ref.retrievalHint}.)`,
+      hasSpillNotice: () => false,
+      distill: seam.distill,
+      distillRoute: () => ({ provider: 'deepseek', model: 'deepseek-flash' }),
+      distillStore: new DistillStore(await mkdtemp(join(tmpdir(), 'dsh-distill-post-'))),
+      config: over.cfg ?? distillConfig(),
+      ...over.deps,
+    },
+  })
+  return { ...env, saved, seam }
+}
+
+const runBash = (host: Any, text: string, execOver: Record<string, unknown> = {}) =>
+  host.callHook(
+    'tools/post-execute',
+    [
+      { name: 'bash', callId: 'bash-call-1', agent, toolSet: toolSetOf(), ...execOver },
+      { content: [{ type: 'text', text }] },
+    ],
+    async () => ({ kind: 'accept' }),
+  )
+
+test('#10 超阈值 bash 回执：历史里是蒸馏正文 + 页脚，spill 里是原文，收据 distill 与页脚字节自洽', async () => {
+  const env = await distillSetup()
+  const text = bashReceipt()
+  const res = await runBash(env.host, text, { arguments: { command: 'npm test' } })
+
+  const body = res.content[0].text
+  const total = Array.from(text).length
+  assert.ok(body.startsWith(`[distilled from ${total} chars; bash]\n`), body.slice(0, 80))
+  assert.ok(body.includes('npm ERR! Test failed: expected 3 got 4'))
+  assert.ok(body.includes('(Omitted '))
+  assert.ok(body.includes('Full formatted result stored at: /spill/bash-1.txt'))
+  assert.equal(env.saved.length, 1, 'the original is spilled')
+  assert.equal(env.saved[0].content, text, 'the spill artifact is the original, never the distillation')
+  assert.equal(env.saved[0].source.toolName, 'bash')
+
+  const receipt = env.receipts.find((r) => r.code === 'projected')
+  assert.ok(receipt, JSON.stringify(env.receipts.map((r) => r.code)))
+  assert.equal(receipt.kind, 'projection')
+  assert.equal(receipt.mode, 'adopted')
+  assert.equal(receipt.distill_tokens, 30)
+  assert.equal(receipt.distill_calls, 1)
+  // The footer's byte count is the receipt's: original − distilled body.
+  const distilled = env.seam.answer({ model: 'x' }).text
+  const omitted = Buffer.byteLength(text, 'utf8') - Buffer.byteLength(distilled, 'utf8')
+  assert.equal(receipt.omitted_bytes, omitted)
+  assert.equal(receipt.distill_omitted_bytes, omitted)
+  assert.ok(body.includes(`(Omitted ${omitted} bytes.`), 'the footer names the same byte count')
+  assert.equal(receipt.distill_bytes, Buffer.byteLength(distilled, 'utf8'))
+  assert.equal(omitted + receipt.distill_bytes, Buffer.byteLength(text, 'utf8'), 'the two halves close the byte account')
+  // `saved_projection_tokens` is the meter's `before − after` over the pair the
+  // projection always prices: the original and the receipt that enters
+  // history. The pairing matches every other projection receipt (`before` =
+  // estimator, `after` = code-point length). `distill_saved_tokens` is the
+  // distillation's own pair, against the truncation view it replaced.
+  // (The receipt deliberately pairs the estimator's `before` with the
+  // code-point `after`, exactly as the pre-#10 projection does; the sum is the
+  // field, not a recomputation.)
+  assert.equal(typeof receipt.before, 'number')
+  assert.equal(typeof receipt.after, 'number')
+  assert.ok(typeof receipt.distill_saved_tokens === 'number' && receipt.distill_saved_tokens > 0)
+
+})
+
+test('#10 同一回执重放两次：字节相同、数值相同，假 DistillFn 只被调用一次', async () => {
+  const env = await distillSetup()
+  const text = bashReceipt()
+  const first = await runBash(env.host, text, { arguments: { command: 'npm test' } })
+  const second = await runBash(env.host, text, { arguments: { command: 'npm test' } })
+  assert.equal(first.content[0].text, second.content[0].text, 'same receipt → same bytes')
+  assert.equal(env.seam.calls.length, 1, 'the pinned product replaces the second call')
+
+  const adopted = env.receipts.filter((r) => r.code === 'projected')
+  assert.equal(adopted.length, 2)
+  assert.equal(adopted[0].omitted_bytes, adopted[1].omitted_bytes)
+  assert.equal(adopted[1].distill_calls, 0, 'a hit is charged nothing')
+  assert.equal(adopted[1].distill_tokens, undefined)
+  assert.equal(adopted[0].saved_projection_tokens, adopted[1].saved_projection_tokens)
+})
+
+test('#10 伪造引用 → distill-rejected:unverifiable，历史里是截断视图', async () => {
+  const env = await distillSetup({
+    deps: {
+      distill: {
+        async call() {
+          return { text: 'made up', quotes: ['this line never existed'], model: 'm' }
+        },
+      },
+    },
+  })
+  const text = bashReceipt()
+  const res = await runBash(env.host, text)
+  // Not adopted: the decision is untouched by the distill path, and in
+  // production the next shaper (the host spill policy) then truncates it. Here
+  // `formatFooter` is a test seam the host never reads, so the assertion is
+  // that the plugin handed over no distilled body.
+  assert.equal(res?.content, undefined, 'the distill path did not accept the receipt')
+  const receipt = env.receipts.find((r) => r.code === 'distill-rejected:unverifiable')
+  assert.ok(receipt, JSON.stringify(env.receipts.map((r) => r.code)))
+  assert.equal(receipt.kind, 'skip')
+  // This fake reports no token count, so none is claimed.
+  assert.equal(receipt.distill_tokens, undefined)
+  assert.equal(receipt.mode, 'rejected')
+  assert.equal(env.receipts.some((r) => r.code === 'distilled'), false)
+})
+
+test('#10 蒸馏比截断长 → distill-rejected:not-smaller', async () => {
+  const env = await distillSetup({
+    deps: {
+      distill: {
+        async call(request: Any) {
+          // A "summary" as long as the receipt itself, quoting a real line.
+          return {
+            text: request.text,
+            quotes: ['npm ERR! Test failed: expected 3 got 4'],
+            model: 'm',
+          }
+        },
+      },
+    },
+  })
+  const text = bashReceipt()
+  const res = await runBash(env.host, text)
+  assert.equal(res?.content, undefined)
+  const receipt = env.receipts.find((r) => r.code === 'distill-rejected:not-smaller')
+  assert.ok(receipt)
+  assert.equal(receipt.mode, 'rejected')
+  assert.equal(receipt.reason, 'not-smaller')
+})
+
+test('#10 挂起超过 timeoutMs → distill-rejected:timeout，不抛', async () => {
+  const env = await distillSetup({
+    cfg: distillConfig({ timeoutMs: 100 }),
+    deps: {
+      distill: {
+        call: () => new Promise(() => {}),
+      },
+    },
+  })
+  const text = bashReceipt()
+  const res = await runBash(env.host, text)
+  assert.equal(res?.content, undefined, 'no exception, no replacement')
+  const receipt = env.receipts.find((r) => r.code === 'distill-rejected:timeout')
+  assert.ok(receipt)
+  assert.equal(receipt.distill_calls, 1)
+  // The model never answered and nothing was pinned: a replay may try again.
+  assert.equal(env.saved.length, 0)
+})
+
+test('#10 DistillFn 抛错 → distill-failed，返回正常', async () => {
+  const env = await distillSetup({
+    deps: {
+      distill: {
+        async call() {
+          throw new Error('provider exploded')
+        },
+      },
+    },
+  })
+  const res = await runBash(env.host, bashReceipt())
+  assert.equal(res?.content, undefined)
+  assert.ok(env.receipts.some((r) => r.code === 'distill-failed' && r.kind === 'skip'))
+})
+
+test('#10 没有 LLM 或没有路由 → distill-failed（不报新的降级码）', async () => {
+  for (const deps of [{ distill: undefined }, { distillRoute: () => undefined }]) {
+    const env = await distillSetup({ deps })
+    const res = await runBash(env.host, bashReceipt())
+    assert.equal(res?.content, undefined)
+    const receipt = env.receipts.find((r) => r.code === 'distill-failed')
+    assert.ok(receipt)
+    assert.equal(receipt.distill_calls, 0)
+    assert.equal(receipt.mode, 'fallback')
+  }
+})
+
+test('#10 enabled:false 或族不在列表 → 与 0.2.7 完全一致：不调模型、无 distill 收据、字节相同', async () => {
+  const text = bashReceipt()
+  const baseline = await (async () => {
+    const env = await distillSetup({ deps: { distill: undefined }, cfg: { ...DEFAULT_CONFIG, distillation: { ...DEFAULT_CONFIG.distillation, enabled: false } } })
+    const res = await runBash(env.host, text)
+    return { body: res.content[0].text, receipts: env.receipts.map((r) => r.code) }
+  })()
+  assert.ok(baseline.receipts.includes('projected'))
+
+  for (const cfg of [distillConfig({ enabled: false }), distillConfig({ families: ['ssh'] })]) {
+    const env = await distillSetup({ cfg })
+    const res = await runBash(env.host, text)
+    assert.equal(res.content[0].text, baseline.body, 'byte-identical to the 0.2.7 projection')
+    assert.equal(env.seam.calls.length, 0, 'the model is never called')
+    assert.deepEqual(env.receipts.map((r) => r.code), baseline.receipts)
+  }
+})
+
+test('#10 ssh 族同样可蒸馏；read 族永不蒸馏', async () => {
+  const env = await distillSetup({ cfg: distillConfig({ families: ['bash', 'ssh'] }) })
+  const text = bashReceipt()
+  const res = await env.host.callHook(
+    'tools/post-execute',
+    [{ name: 'ssh', callId: 'ssh-1', agent, toolSet: toolSetOf() }, { content: [{ type: 'text', text }] }],
+    async () => ({ kind: 'accept' }),
+  )
+  assert.match(res.content[0].text, /\[distilled from [\d,]+ chars; ssh\]/)
+
+  const readEnv = await distillSetup({ cfg: distillConfig({ families: ['bash', 'ssh', 'read'] }) })
+  const big = 'r'.repeat(9000)
+  const readRes = await runPost(readEnv.host, big)
+  assert.match(readRes.content[0].text, /^\[output /)
+  assert.ok(readEnv.receipts.some((r) => r.code === 'projected' && r.mode === undefined), 'an ordinary projection')
+  assert.equal(readEnv.seam.calls.length, 0)
+})
+
+test('#10 投影 shadow 模式不蒸馏：只记 projection-shadow', async () => {
+  const env = await distillSetup({ doc: doc({ projection: 'shadow' }) })
+  const res = await runBash(env.host, bashReceipt())
+  assert.equal(res?.content, undefined, 'shadow writes nothing the model sees')
+  assert.ok(env.receipts.some((r) => r.code === 'projection-shadow'))
+  assert.equal(env.receipts.some((r) => r.mode !== undefined), false, 'no distillation receipt in shadow mode')
+})
+
+test('#10 蒸馏收据带 distill_mode，status 据此计 calls/tokens/adopted/rejected/fallback', async () => {
+  const { runBoost } = await import('../src/tools/boost.ts')
+  const env = await distillSetup()
+  await runBash(env.host, bashReceipt('a'))
+  await runBash(env.host, bashReceipt('b'))
+  const result = await runBoost({
+    args: { cmd: 'status' },
+    scope: env.deps.scope,
+    receipts: {
+      scan: async function* () {
+        yield* env.receipts as Any[]
+      },
+      readErrors: () => 0,
+      scanTruncated: () => false,
+      stopped: () => false,
+    } as Any,
+  })
+  assert.equal(result.ok, true)
+  const status = (result as Any).data
+  assert.deepEqual(Object.keys(status.distill).sort(), ['adopted', 'calls', 'fallback', 'rejected', 'tokens'])
+  // Two receipts: each called the model (a different receipt is a different
+  // pinned product) and each was adopted. `calls` counts the model calls;
+  // `adopted` counts the decisions; `tokens` sums only what the model reported.
+  assert.equal(status.distill.calls, 2)
+  assert.equal(status.distill.adopted, 2)
+  assert.equal(status.distill.tokens, 60)
+  assert.equal(status.distill.rejected, 0)
+  assert.equal(status.distill.fallback, 0)
+})

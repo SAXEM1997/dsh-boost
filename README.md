@@ -100,6 +100,11 @@ workspace UUID，不是路径；找不到时单用户机器可以用 `"mode": "g
 | 看 | 降级码与处置、替换节省的上下界、投影毛额/净额、取回次数、收据计数、常驻开销、生效配置（只读） |
 | 写 | `<dshHome>/boost/scope.json` 的四个字段：`mode`、`workspaceIds`、`shadow`、`projection` |
 
+蒸馏（receipt distillation，ADR 0001）用的收据码：`distill`（采用；以 `projected` 收据承载）、
+`distill-failed`、`distill-rejected:timeout`、`distill-rejected:unverifiable`、
+`distill-rejected:not-smaller`。逐条含义与处置见 [发布说明](docs/RELEASE.md) 的「收据 `code`：
+跳过与重置」一节。
+
 写入与 `boost` 工具的 `scope-set` 走**同一个** CAS，所以两边改都不会互相覆盖；别人先改了，
 页面会给出 `ERR_SCOPE_REVISION_CONFLICT` 并保留你的草稿。逐字段、逐码的细节见
 [运维](docs/operating.md#降级码与错误码)。

@@ -86,6 +86,7 @@
     "!dist/**/*.d.ts",
     "dist/index.d.ts",
     "dist/types.d.ts",
+    "dist/distill/types.d.ts",
     "locale",
     "static",
     "cordis.patch.yml",

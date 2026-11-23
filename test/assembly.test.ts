@@ -31,6 +31,7 @@ import * as plugin from '../src/index.ts'
 import { callIdFor } from '../src/hooks/pending.ts'
 import { ReceiptStore } from '../src/receipts/store.ts'
 import { SELECTOR_PURPOSE } from '../src/selector/jev.ts'
+import { DISTILL_PURPOSE } from '../src/distill/llm.ts'
 import { fakeHost } from './fakes/host.ts'
 
 const SESSION = 's1'
@@ -874,3 +875,63 @@ test('real apply prefers the host token meter and labels its receipt host', asyn
   assert.ok(projection, 'apply mode must write a projection receipt')
   assert.equal(projection.estimate, 'host', 'the host estimator must be labelled as such')
 })
+
+test('#10 装配后蒸馏走 ctx.llm：purpose=boost-distill，随后同一回执命中钉住产物', async (t) => {
+  const spill = recordingSpill()
+  const a = await createAssembly({ spill, config: { distillation: { enabled: true } } })
+  t.after(() => a.dispose())
+  await a.setScope({ ...scopeDoc(1), mode: 'global', projection: 'on' })
+  await agentRequest(a.host, 1, 0)
+
+  const big = bashReceiptForAssembly()
+  const requests: GenerateOptions[] = []
+  a.host.llm.stream = function (options: GenerateOptions): AsyncIterable<StreamChunk> {
+    if (options.purpose === DISTILL_PURPOSE) {
+      requests.push(options)
+      return streamOf([
+        {
+          type: 'text-delta',
+          index: 0,
+          text: JSON.stringify({
+            text: '`npm test` failed:\nnpm ERR! Test failed: expected 3 got 4',
+            quotes: ['npm ERR! Test failed: expected 3 got 4'],
+          }),
+        },
+      ])
+    }
+    return streamOf([])
+  }
+  // `apply` captured the service by `ctx.get` at load; the fake host's `get`
+  // returns `host[name]`, so the replacement above is the live service. The
+  // bound thunk reads through `llmBackend()`, which re-reads it per call.
+
+  const first = await runBashPost(a.host, big)
+  assert.equal(requests.length, 1, 'the model was called once')
+  assert.equal(requests[0]?.purpose, DISTILL_PURPOSE)
+  // `route: null` inherits the boundary route `agent/request` resolved.
+  assert.equal(requests[0]?.provider, ROUTE.provider)
+  assert.equal(requests[0]?.model, ROUTE.model)
+  assert.match(first.content?.[0]?.text ?? '', /^\[distilled from /)
+  assert.equal(spill.saved.at(-1)?.content, big, 'the original is what the footer locator names')
+
+  const second = await runBashPost(a.host, big)
+  assert.equal(requests.length, 1, 'the second decision read the pinned product')
+  assert.equal(second.content?.[0]?.text, first.content?.[0]?.text, 'same bytes')
+})
+
+/** A `bash` receipt above the family trigger whose error line sits in the middle. */
+function bashReceiptForAssembly(): string {
+  const line = (index: number) => `./step-${index}.sh: running checks (${'ok '.repeat(80)})\n`
+  const head = Array.from({ length: 17 }, (_, i) => line(i)).join('')
+  const tail = Array.from({ length: 17 }, (_, i) => line(100 + i)).join('')
+  return `${head}npm ERR! Test failed: expected 3 got 4\n${tail}`
+}
+
+/** One `bash` call through the real `tools/post-execute` mount. */
+function runBashPost(host: Any, text: string): Promise<Any> {
+  return host.callHook(
+    'tools/post-execute',
+    [{ name: 'bash', callId: 'bash-1', agent }, { content: [{ type: 'text', text }] }],
+    async () => ({ kind: 'accept' }),
+  )
+}

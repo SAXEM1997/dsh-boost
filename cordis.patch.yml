@@ -35,6 +35,18 @@
           ssh:   { triggerChars: 2000, headChars: 1200, tailChars: 300 }
         admission: { thresholdTokens: 1024 }
         selector:  { maxTokens: 512 }
+        # Receipt distillation (ADR 0001, ticket #10) is off by default: with it
+        # off the projection path is byte for byte the 0.2.7 path. `triggerChars:
+        # null` uses each family's projection trigger; `route: null` reuses the
+        # boundary route the selector inherits (a strong, slow model may be the
+        # boundary model, so pin a cheaper one here if that matters).
+        distillation:
+          enabled: false
+          families: ['bash', 'ssh']
+          triggerChars: null
+          maxOutputTokens: 256
+          timeoutMs: 3000
+          route: null
         stepsPerTurn: 8
         horizonSteps: 20
         historyTurns: 5

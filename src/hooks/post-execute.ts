@@ -81,6 +81,9 @@ import type { StepBudget } from '../admission/ledger.js'
 import type { RetrievalLedger } from '../admission/retrieval.js'
 import type { UsageLedger } from '../admission/usage.js'
 import { DEFAULT_CONFIG } from '../config.js'
+import { decide as decideDistill } from '../distill/decide.js'
+import type { DistillAttempts } from '../distill/attempt.js'
+import type { DistillOutcome } from '../distill/decide.js'
 import { decide } from '../gate/decide.js'
 import { alreadySpilled, looksPruned } from '../gate/invalidate.js'
 import type { AnchorStore, ReceiptAnchors } from '../gate/invalidate.js'
@@ -89,6 +92,7 @@ import { isPosixOnly } from '../host/platform.js'
 import type { ProjectionCounters } from '../projection/counters.js'
 import { PROTOCOL_NAME, PROTOCOL_ORDER, PROTOCOL_TEXT } from '../prompt/protocol.js'
 import { projectApply, projectShadow } from '../projection/apply.js'
+import { renderHeadLine, truncate } from '../projection/truncate.js'
 import type { FormatFooter, ProjectionMode, SpillBackend, SpillHandle } from '../projection/apply.js'
 import { canonicalise } from '../projection/canonicalise.js'
 import type { CanonicalReceipt } from '../projection/canonicalise.js'
@@ -96,6 +100,8 @@ import type { ReceiptStore } from '../receipts/store.js'
 import { DEFAULT_SCOPE, isVisible } from '../scope/doc.js'
 import type { ScopeDoc } from '../scope/doc.js'
 import type { ScopeStore } from '../scope/store.js'
+import type { DistillStore } from '../distill/store.js'
+import type { DistillFn, DistillRequest } from '../distill/types.js'
 import { SELECTOR_SYSTEM_PROMPT, choose, selectorPromptText } from '../selector/jev.js'
 import type { LlmLike } from '../selector/jev.js'
 import { familyOf } from '../tools/family.js'
@@ -105,6 +111,7 @@ import type {
   BoostConfig,
   PluginContext,
   ResolvedToolSet,
+  ToolFamily,
 } from '../types.js'
 import type { TurnClock } from './clock.js'
 import { rejectIfTampered } from './execute.js'
@@ -230,6 +237,35 @@ export interface HookDeps {
    * lets through untouched (Task 23c-2).
    */
   llm?: LlmLike
+  /**
+   * Receipt distillation (ADR 0001, ticket #10): the one model call that
+   * answers a family's fixed question about a long `bash`/`ssh` receipt.
+   *
+   * Absent, or absent with `distillation.enabled: false` (the default), leaves
+   * the projection path exactly as it was before distillation existed. The
+   * call carries `purpose: 'boost-distill'`, which the stream hook passes
+   * through untouched.
+   */
+  distill?: DistillFn
+  /**
+   * The route a distillation call uses: `distillation.route` when configured,
+   * else the boundary route the selector inherits. `undefined` records
+   * `distill-failed` without calling anything.
+   */
+  distillRoute?: (sessionId: string) => SelectorRoute | undefined
+  /** Shared read/write handle to the pinned products under `<root>/distilled/`. */
+  distillStore?: DistillStore
+  /** A store bound lazily (production binds it to the resolved root); used when `distillStore` is absent. */
+  distillStoreOf?: () => DistillStore | undefined
+  /** The parked timed-out calls, so a late answer is persisted (see `distill/attempt.ts`). */
+  distillAttempts?: DistillAttempts
+  /**
+   * The request constructor the distiller uses, given the attempts registry it
+   * registers each request with. `decide` passes the same constructor through
+   * its parking seam, so the request the hook drains is the one the timed-out
+   * decision identifies.
+   */
+  distillRequestOptions?: (attempts: DistillAttempts) => (request: DistillRequest) => object
   /**
    * The effective provider/model of the session's latest model request.
    *
@@ -1981,6 +2017,174 @@ function projectionSkipCode(reason: string): string {
 }
 
 /**
+ * The stable receipt code for a distillation that was not adopted.
+ *
+ * An adopted distillation shares the projection's code and kind (`projected`),
+ * because to every consumer that reads the ledger it *is* the projection of
+ * this receipt; the `mode: 'adopted'` field and the `distill_*` fields say
+ * where the body came from. A rejection is the code the ticket names
+ * (`distill-rejected:<reason>`), and a failure is `distill-failed`.
+ */
+function distillReceiptCode(outcome: DistillOutcome): string {
+  return outcome.mode === 'adopted' ? 'projected' : outcome.code
+}
+
+/**
+ * The evidence fields a distillation receipt carries beyond the projection's.
+ *
+ * `mode` (adopted/rejected/fallback) and `reason` are what `status.distill`
+ * counts; `distill_calls` is `1` only when this invocation called the model, so
+ * a table hit is visible as a product that was adopted but not paid for;
+ * `distill_tokens` and `distill_saved_tokens` are omitted — never zeroed —
+ * when the model or the meter did not report a number.
+ */
+function distillEvidence(outcome: DistillOutcome, omittedCodePoints?: number): Record<string, unknown> {
+  const e = outcome.evidence
+  return {
+    mode: outcome.mode === 'adopted' ? 'adopted' : e.reason !== undefined ? 'rejected' : 'fallback',
+    distill_calls: e.called ? 1 : 0,
+    ...(e.tokens === undefined ? {} : { distill_tokens: e.tokens }),
+    ...(outcome.omittedBytes === undefined ? {} : { distill_omitted_bytes: outcome.omittedBytes }),
+    ...(outcome.distillBytes === undefined ? {} : { distill_bytes: outcome.distillBytes }),
+    ...(omittedCodePoints === undefined ? {} : { distill_omitted_code_points: omittedCodePoints }),
+    ...(e.reason === undefined ? {} : { reason: e.reason }),
+  }
+}
+
+/**
+ * Try distillation for this receipt, or `null` when it is not a candidate.
+ *
+ * The decision reads no host state beyond its inputs: it checks the family's
+ * pre-gate, looks the product up under `(receipt, question, version)`, calls
+ * the bounded model only on a miss, verifies the quotes, compares the view
+ * against the truncation view in bytes, and spills the original before either
+ * outcome. Never throws: a broken store, route or store write is the
+ * `distill-failed` fallback.
+ */
+async function distillDecision(
+  deps: HookDeps,
+  ctx: DecisionContext,
+  family: ToolFamily,
+  target: string,
+): Promise<DistillOutcome | null> {
+  // Enabled, listed families and the enabled fallback for everything else:
+  // with distillation off (the default) this returns before touching any host
+  // service, so the projection path is exactly the 0.2.7 path.
+  const distillation = deps.config?.distillation
+  if (distillation === undefined || distillation.enabled !== true) return null
+  if (!Array.isArray(distillation.families) || !distillation.families.includes(family)) return null
+  // A plugin wired without a store still distils, but cannot pin the answer.
+  // `distillStoreOf` lets a caller bind the root lazily; a store with no root
+  // is `undefined`, and that records `distill-failed` rather than adopting
+  // bytes nothing persists (ADR 0001).
+  let store: DistillStore | undefined
+  try {
+    store = deps.distillStore ?? deps.distillStoreOf?.()
+  } catch {
+    store = undefined
+  }
+  const routeOf = deps.distillRoute
+  let route: SelectorRoute | undefined
+  try {
+    route = routeOf?.(ctx.sessionId)
+  } catch {
+    route = undefined
+  }
+  if (store === undefined) {
+    // Enabled, but nothing can pin the answer: record the failure instead of
+    // adopting bytes that would be lost.
+    return { content: null, code: 'distill-failed', mode: 'fallback', evidence: { called: false, adopted: false } }
+  }
+  try {
+    return await decideDistill({
+      text: target,
+      family,
+      cfg: deps.config,
+      sessionId: ctx.sessionId,
+      store,
+      distill: deps.distill,
+      route,
+      formatFooter: await resolveFooterFormatter(deps),
+      spill: deps.spill,
+      toolName: ctx.exec.name,
+      ...(typeof ctx.exec.callId === 'string' ? { callId: ctx.exec.callId } : {}),
+      ...(deps.distillAttempts === undefined ? {} : { park: (options, settled) => deps.distillAttempts?.park(options, settled) }),
+      ...(deps.distillRequestOptions === undefined || deps.distillAttempts === undefined
+        ? {}
+        : { requestOptions: deps.distillRequestOptions(deps.distillAttempts) }),
+    })
+  } catch {
+    return { content: null, code: 'distill-failed', mode: 'fallback', evidence: { called: false, adopted: false } }
+  }
+}
+
+/**
+ * Write the receipt for a distillation that was attempted, and replace the
+ * content only when it was adopted.
+ *
+ * An adopted body replaces the receipt through the same `accept` shape an
+ * applied projection uses, and it is priced against the truncated view
+ * (`projection[family].trigger` windows) rather than against the original: the
+ * distillation's job is to beat the fallback it would otherwise have paid for,
+ * and that pair is what `saved_projection_tokens` records. A rejected attempt
+ * leaves the decision to the ordinary truncation below, so a reject never
+ * grows what the model sees.
+ */
+async function finishDistillDecision(
+  deps: HookDeps,
+  ctx: DecisionContext,
+  decision: PostExecuteDecision,
+  family: ToolFamily,
+  target: string,
+  outcome: DistillOutcome,
+  estimate: ((text: string) => number) | undefined,
+): Promise<PostExecuteDecision> {
+  if (outcome.content === null || outcome.mode !== 'adopted') {
+    await appendReceipt(
+      deps,
+      ledgerEntry(ctx, 'skip', distillReceiptCode(outcome), distillEvidence(outcome)),
+    )
+    return decision
+  }
+  // The locator the distilled footer names is the same registered retrieval
+  // site an applied projection uses, so a later read of it is charged the
+  // same way.
+  if (outcome.locator !== undefined) deps.retrievals?.record(ctx.sessionId, outcome.locator)
+
+  const view = truncationViewOf(target, deps.config, family)
+  const priced = view === undefined || estimate === undefined
+    ? { before: undefined, after: undefined }
+    : { before: safeEstimate(estimate, view), after: safeEstimate(estimate, outcome.content) }
+  const distillSaved =
+    priced.before !== undefined && priced.after !== undefined ? priced.before - priced.after : undefined
+  await appendReceipt(
+    deps,
+    ledgerEntry(ctx, 'projection', 'projected', {
+      unit: 'raw',
+      horizon_steps: projectionHorizonOf(deps, ctx.sessionId),
+      ...(ctx.retrievalCall === true ? { call_was_retrieval: true } : {}),
+      ...(priced.before !== undefined && priced.after !== undefined
+        ? { before: priced.before, after: priced.after, saved_projection_tokens: priced.before - priced.after }
+        : {}),
+      ...(outcome.omittedBytes === undefined ? {} : { omitted_bytes: outcome.omittedBytes }),
+      estimate: priced.before !== undefined ? (deps.estimateKind ?? 'unknown') : 'unknown',
+      ...distillEvidence(outcome),
+      ...(distillSaved === undefined ? {} : { distill_saved_tokens: distillSaved }),
+    }),
+  )
+  return { ...decision, content: [{ type: 'text', text: outcome.content }] }
+}
+
+/** The truncation view's rendered bytes, for pricing a distillation against it. */
+function truncationViewOf(text: string, cfg: BoostConfig, family: ToolFamily): string | undefined {
+  const params = cfg.projection[family]
+  if (params === undefined) return undefined
+  const truncation = truncate(text, params)
+  if (truncation === null) return undefined
+  return `${renderHeadLine(truncation)}\n${truncation.head}\n${truncation.tail}`
+}
+
+/**
  * Project the receipt that will enter history.
  *
  * Shadow mode only prices the receipt: it writes a `{kind:'shadow'}` record and
@@ -2033,6 +2237,11 @@ async function projectDecision(
   // carry `estimate:'unknown'` and no fabricated numbers.
   const estimate = estimatorOf(deps)
 
+  // Ticket #10: a family the configuration lists may try distillation first.
+  // `null` means "not a candidate" — the whole path below is exactly the
+  // pre-distillation projection, byte for byte.
+  const distillation = await distillDecision(deps, ctx, family, target)
+
   try {
     if (mode === 'shadow') {
       const outcome = await projectShadow({
@@ -2072,6 +2281,13 @@ async function projectDecision(
         )
       }
       return decision
+    }
+
+    if (distillation !== null) {
+      // `distillDecision` already spilled the original and wrote the product:
+      // an adopted body replaces the receipt here, and anything else falls
+      // through to the ordinary truncation below with its reason recorded.
+      return await finishDistillDecision(deps, ctx, decision, family, target, distillation, estimate)
     }
 
     const { content, outcome } = await projectApply({
@@ -2136,6 +2352,8 @@ async function projectDecision(
           }),
         )
       }
+      // Every other path is untouched by distillation; only this one can hand
+      // it a different body.
       return { ...decision, content: [{ type: 'text', text: content }] }
     }
 
