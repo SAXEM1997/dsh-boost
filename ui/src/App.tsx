@@ -317,6 +317,12 @@ export function App() {
                     // `skip` is the one group whose size is usually a single code
                     // firing thousands of times (`skip:no-scope`); leaving it open
                     // buries every group an operator can act on.
+                    //
+                    // `other` is collapsed for the opposite reason: it holds the
+                    // policy codes (`no-candidate`, `guard-trivial`) whose counts
+                    // are only meaningful next to the total. Failure-class codes
+                    // are surfaced through `status.degraded` above, not here, so
+                    // collapsing this group hides no alarm.
                     open={group.key !== 'skip' && group.key !== 'other'}
                   >
                     <summary>

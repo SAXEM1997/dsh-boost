@@ -16,6 +16,7 @@
  */
 import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
+import { receipt } from './fixture.ts'
 import { checkIntegrity } from './integrity.ts'
 
 const here = import.meta.dirname
@@ -28,7 +29,7 @@ const tasks = readFileSync(join(here, 'tasks.jsonl'), 'utf8')
 let failed = 0
 for (const task of tasks) {
   try {
-    const report = await checkIntegrity(task.family, receiptFor(task.lines))
+    const report = await checkIntegrity(task.family, receipt(task.lines))
     // Every declared expectation is asserted, not just `applied`: a field that
     // the runner ignores would let the task file claim coverage it does not have.
     if (task.expect.applied && !report.applied) throw new Error('expected a projection, got a skip')
@@ -45,11 +46,6 @@ for (const task of tasks) {
     failed += 1
     console.error(`FAIL ${task.id.padEnd(20)} ${error instanceof Error ? error.message : String(error)}`)
   }
-}
-
-function receiptFor(lines) {
-  const row = (index) => `./step-${index}.sh: running checks (${'ok '.repeat(30)})\n`
-  return Array.from({ length: lines }, (_, index) => row(index)).join('') + 'ERROR: build failed at src/x.ts:12\nexit code 1\n'
 }
 
 console.log(`\n${tasks.length - failed}/${tasks.length} tasks passed`)

@@ -2302,7 +2302,7 @@ git commit -m "feat: host capability probes, family mapping, fixed-cost measurem
 
 **Files:**
 - Create: `scripts/shadow-report.mjs`, `scripts/session-stats.mjs`, `scripts/session-snapshot.json`, `test/scripts.test.ts`, `docs/RELEASE.md`
-- **未交付**：`test/regression/tasks.jsonl` 与 `test/regression/run.mjs`（冒烟 runner），以及取回完整性检查。2026-11-18 裁决（m00234）的"不搭回放集"**只免除语料**；这两项都不需要语料，不能据此豁免（见设计稿 §6.1/§6.2）。T26 实际只交付了 `scripts/` 下的三个文件、`test/scripts.test.ts` 与 `docs/RELEASE.md`；`test/regression/` 仅有 `.gitkeep`，也没有 locator 取回核对测试。
+- **未交付（此条已过时：0.3.11 已交付，见 `docs/RELEASE.md` §7 与 `test/regression/`）**：`test/regression/tasks.jsonl` 与 `test/regression/run.mjs`（冒烟 runner），以及取回完整性检查。2026-11-18 裁决（m00234）的"不搭回放集"**只免除语料**；这两项都不需要语料，不能据此豁免（见设计稿 §6.1/§6.2）。T26 实际只交付了 `scripts/` 下的三个文件、`test/scripts.test.ts` 与 `docs/RELEASE.md`；`test/regression/` 仅有 `.gitkeep`，也没有 locator 取回核对测试。
 
 **Interfaces:**
 - Consumes: 收据格式（T7）、`boost status`（T19/T25）
@@ -2331,7 +2331,7 @@ Expected: FAIL，脚本不存在
 
 `shadow-report.mjs` 扫 `receipts/*.jsonl`，输出四个键：`saveableRatio`（白名单可实现的替换决定占比）、`byFamily`（按族的 commits / decisions）、`candidateRecall`（候选集召回）、`retrievalUpperBound`（`取回调用数 / 已应用投影回执数`，**只在 `projection:'on'` 时有值**，影子期结构上恒 0）。它**不输出净节省率**，也没有总 token 分母；A4 裁决不由这个脚本承担（设计稿 §6.1）。
 `session-stats.mjs` 按 `session-snapshot.json` 复算 §2.1 全部统计。
-`test/regression/run.mjs`（**未交付**）原计划读 `tasks.jsonl`（20 条，每条 `{ id, prompt, expect }`），pass 谓词按设计稿 §6.1：`两轮都完成且 isError=false 的任务数 ≥ 19 ∧ 每条被投影回执可取回且字节数 = count + 保留窗口字节数`。2026-11-18 裁决的"不搭回放集"只免除语料，**不免除这个冒烟 runner 与取回完整性检查**；两者仍欠。
+`test/regression/run.mjs`（**已交付，见上**）原计划读 `tasks.jsonl`（20 条，每条 `{ id, prompt, expect }`），pass 谓词按设计稿 §6.1：`两轮都完成且 isError=false 的任务数 ≥ 19 ∧ 每条被投影回执可取回且字节数 = count + 保留窗口字节数`。2026-11-18 裁决的"不搭回放集"只免除语料，**不免除这个冒烟 runner 与取回完整性检查**；两者仍欠。
 `docs/RELEASE.md` 写清 `npm pack` → 空项目安装 → 分别卸掉 `dsh-spill-policy` / `dsh-token-meter` 验证两条降级路径（isolated 布局；hoisted 布局测不出 `ERR_MODULE_NOT_FOUND`）。
 
 - [ ] **Step 4: 运行确认通过**
