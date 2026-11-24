@@ -6,7 +6,7 @@ checkout with the development dependencies installed.
 
 ## Session statistics
 
-`npm run stats` prints npm's own banner (`> dsh-boost@0.3.13 stats` and the
+`npm run stats` prints npm's own banner (`> dsh-boost@0.3.14 stats` and the
 command line) on **stdout** before the JSON, so it must not be piped directly.
 For a machine-readable stream use one of the quiet forms:
 

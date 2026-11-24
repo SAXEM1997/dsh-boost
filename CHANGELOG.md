@@ -8,6 +8,28 @@ This file records user-visible changes. Format follows Keep a Changelog; version
 Design rationale lives in `docs/superpowers/specs/`; the release-acceptance procedure is in
 `docs/RELEASE.md`.
 
+## [0.3.14] - 2026-11-24
+
+第 12 轮通读评审（Standards + Spec 两轴）的修复。**没有 P0**；两条 P1 都在文档里。
+
+### 修复
+
+- **`SCOPE_CODE_TABLE` 改成穷尽映射**（`Record<ScopeCode, true>`）：此前是 `ReadonlySet<ScopeCode>`，只保证「表里的都是合法码」，不保证「合法码都在表里」——往 `ScopeCode` 加一个码而忘了登记，会静默降级成 `ERR_BOOST_INTERNAL`，正是 0.2.3 那个缺陷。现在加成员不登记就编译失败。
+- **`scripts/checks.mjs` 成为检查清单的唯一来源**：`verify-package` 断言实际跑过的实例等于清单，`gate-negatives` 断言清单每一项都有负例。此前 `ran.length === CASES.length` 是自己跟自己比，加第 13 个 check 仍报「12/12」。
+- **`bundle-patch` 的负例 `expect` 收紧**到该 check 独有的文案；此前的 `/patch/i` 会被 allowlist 的错误文案命中。
+- **`ui-payload` 的「degraded 不是数组」用例改为驱动真实守卫**（新抽出的 `degradedCodesOf`）。此前只断言夹具自身形状，把守卫整个删掉测试仍绿——变异验证：删守卫 → 红。
+- **`GET /scope` 回 405 而不是 404**：路径存在、动词不对。
+- **`slots.register` 抛错时打一条 warn**：静默缺席与「没装插件」不可区分。
+- 修掉四处说错话的注释/文案：`attempt.ts` 重复且矛盾的 JSDoc、`boost.ts` 关于 `selector-error` 的自相矛盾、`ci.yml` 说「没有 prepare 钩子」（其实有）、`scripts.test.ts` 说 B/2 是 partial（断言是 0）。
+- 回归夹具收敛成 `test/regression/fixture.ts` 一份（`run.mjs` 与 `integrity.test.ts` 曾各存一份）。
+
+### 文档
+
+- 交付版本归属统一为 0.3.11；版本清单补上 0.3.8–0.3.12 五个真实发布版本。
+- **启用顺序改对了**：`ERR_HOST_SPILL_UNUSABLE` 只在 `projection: 'on'` 时才进 `degraded`，所以「翻开关前先检查」是一个永远通过的检查。README 与 operating 都改成「先开、立刻查」。
+- `files` 清单补 `lib` 与 `static`；patch 节选标明是节选；`SAVED` 的提示不再承诺一个不存在的「重新读取」按钮；影子模式的提示不再声称「不改动发给模型的内容」（投影仍会截断）。
+- 码表首列的 `distill`（采用）改为真实码 `projected`；`rejected` 也含墓碑重放；`ERR_SCOPE_ABORTED` 的适用范围改成「任何 boost 子命令」。
+
 ## [0.3.13] - 2026-11-24
 
 ### 修复（设置页收据面板，#16 评审）
