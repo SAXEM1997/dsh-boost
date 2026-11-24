@@ -471,7 +471,10 @@ export interface BoostStatus {
     projectionNet: number | 'unknown'
     /**
      * Σ `retrievalCost` over receipts written before `retrieval_content_tokens`
-     * existed, replayed by their own horizon.
+     * existed.
+     *
+     * Those values were already replay-aware when written, so this is
+     * subtracted once, not multiplied by a horizon here.
      *
      * Omitted when `0`. Present only when `projectionNet` is a number: an
      * `unknown` net has no terms to explain.

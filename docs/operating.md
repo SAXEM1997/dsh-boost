@@ -450,7 +450,8 @@ horizon 重放，并计入 `projection_horizon_reestimated`；`projection_horizo
   - `retrievalContent` / `retrievalCalls` / `retrieval_legacy`：**净额实际减掉的三项**，与
     `projectionNet` 同一次聚合派生，所以 `projectionGross − projectionNet` 恰好等于三者之和。
     前两项是 `retrieval_content_tokens`（按收据自己的视界回放）与 `retrieval_call_tokens`；
-    `retrieval_legacy` 只统计 0.3 之前写入、没有拆分内容与调用的取回收据，**为 0 时整个键省略**。
+    `retrieval_legacy` 只统计 0.3 之前写入、没有拆分内容与调用的取回收据（那些值写入时就已是重放口径，
+    所以直接相减、不再乘视界），**为 0 时整个键省略**。
     净额为 `'unknown'` 时三个键**都省略而不是置 0**——0 等于宣称「这一项没花钱」，而这些数没人算过。
   - `retrievals`：模型对 spill locator 的取回次数（读一次 spill 算一次）。
 

@@ -1373,3 +1373,41 @@ test('status 对会抛的 usage 账本仍然作答：null / 0', async () => {
   assert.equal(r.data.cache_hit_ratio, null)
   assert.deepEqual(r.data.prefix_drops, { count: 0, tokens: 0 })
 })
+
+test('净额恒等式：gross − net 恰好等于三项被减数之和', async () => {
+  // The page shows the subtracted terms; the doc says they add up. This pins
+  // the identity across the three kinds of retrieval, including the legacy one
+  // that predates content/call splitting.
+  const d = await deps()
+  const base = { version: 1, ts: new Date().toISOString(), sessionId: 's1', turn: 1 } as const
+  await d.receipts.append({ ...base, kind: 'projection', code: 'projected', saved_projection_tokens: 100 })
+  await d.receipts.append({
+    ...base,
+    kind: 'projection',
+    code: 'projection-retrieval',
+    retrieved: true,
+    retrieval_call_tokens: 10,
+    retrieval_content_tokens: 20,
+    retrieval_tokens: 30,
+  })
+  await d.receipts.append({
+    ...base,
+    kind: 'projection',
+    code: 'projection-retrieval',
+    retrieved: true,
+    retrievalCost: 7,
+  })
+  await d.receipts.flush()
+
+  const status = await getStatus(d)
+  const gross = status.saved.projectionGross
+  const net = status.saved.projectionNet
+  assert.equal(typeof gross, 'number')
+  assert.equal(typeof net, 'number')
+  const subtracted =
+    (status.saved.retrievalContent ?? 0) + (status.saved.retrievalCalls ?? 0) + (status.saved.retrieval_legacy ?? 0)
+  assert.equal(gross, net + subtracted, 'the three terms shown must close the gap to the gross')
+  // Pre-schema `retrievalCost` was already a replayed total when it was
+  // written, so it is subtracted as-is rather than multiplied again.
+  assert.equal(status.saved.retrieval_legacy, 7, 'a legacy cost is charged once, not re-replayed')
+})
