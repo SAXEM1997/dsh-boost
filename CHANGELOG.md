@@ -8,6 +8,25 @@ This file records user-visible changes. Format follows Keep a Changelog; version
 Design rationale lives in `docs/superpowers/specs/`; the release-acceptance procedure is in
 `docs/RELEASE.md`.
 
+## [0.3.12] - 2026-11-24
+
+### 修复
+
+- 发布门负例补到**十二个 check 实例全覆蓋**（`0.3.10` 只做了九个，且声明「剩下三组构造不出」）。三个反例都成立：`install (ignore-scripts)` 用 `os: ["aix"]` 让安装本身被拒；`typecheck-no-host-stubs` 把宿主类型的 import 藏到 600 字符之后（声明扫描的正则只看到 400），于是带 stub 的那遍通过、无 stub 的那遍失败；第二次探针用一个成功安装之后才改坏模块的 `postinstall`。
+- 每条 `expect` 收紧到该 check 独有的一句话。此前 `install` 的 `/failed|postinstall/i` 会命中 `typecheck` 和探针的输出，`/patch/i` 会命中 allowlist 的错误文案——一个 case 可以在目标 check 根本没跑的情况下变绿。
+- skip 现在是失败：`mutate` 必须显式返回布尔值（`undefined` 曾经被当成「已应用」，还会把 `mutate` 调用两遍）；没有可改的东西就计一次失败，结束时断言 `ran === CASES.length`。
+- 负例前加 preflight：`dist/index.js` 与 `lib/client.js` 缺失时报「先跑 `npm run ci`」，而不是 `execFileSync` 的堆栈。写文件一律经 `safePath()` 锚在解包目录内（防 manifest 里出现 `../`）。
+
+### 修复（`#17` 评审）
+
+- 完整性检查的「能失败」用例此前只是断言 `assert.equal` 会抛，证明不了检查本身能发现回归。改成通过 `checkIntegrity` 的注入接缝传入一个「只落头段」的投影，断言它被拒绝。
+- 断言从「页脚里出现过 locator」改为「页脚点名的是后端返回的那个 locator」，并补 `outcome.locator === handle.locator`。
+- `run.mjs` 现在断言 `tasks.jsonl` 里的三个 `expect` 字段（此前只用了 `applied`，`shrink`/`pointsLocator` 是死字段）。
+
+### 文档
+
+- `RELEASE` §6.1 与 `scripts/README` 的发布流程补 `verify:negatives`；CI 注释从「九组」改为「十二个实例」。
+
 ## [0.3.11] - 2026-11-24
 
 ### 新增
@@ -24,8 +43,8 @@ Design rationale lives in `docs/superpowers/specs/`; the release-acceptance proc
 
 ### 新增
 
-- `npm run verify:negatives`（issue #15）：把真实 tarball 逐一改坏再跑发布门，证明门能失败并点出是哪一项。之前十二组断言里只有客户端 bundle 一组有负例，其余十一组改坏仍 `exit 0`——一个不会失败的门等于没有门。覆盖九组：`dist-index-present`、`tarball-allowlist`、`exports-targets`、`client-bundle-structure`、`bundle-patch`、`declarations-host-free`、`install`、`typecheck`、`import-require-locales`。
-- CI 在发布门之后跑它。剩下三组没有用例，且**构造不出**：`typecheck-no-host-stubs` 是 `typecheck` 的严格超集（能过前者的产物必过后者，它的独立防护是更早跑的 `declarations-host-free` 正则）；第二次 `import-require-locales` 是同一段探针跑在带生命周期脚本的那次安装上，而 `install` 用例已经证明那次安装被检查。
+- `npm run verify:negatives`（issue #15）：把真实 tarball 逐一改坏再跑发布门，证明门能失败并点出是哪一项。之前十二个 check 实例里只有客户端 bundle 一组有负例，其余改坏仍 `exit 0`——不会失败的门等于没有门。**现在十二个实例全部覆盖**：`dist-index-present`、`tarball-allowlist`、`exports-targets`、`client-bundle-structure`、`bundle-patch`、`declarations-host-free`、`typecheck-no-host-stubs`、`install (ignore-scripts)`、`install (default)`、`typecheck`、`import-require-locales (ignore-scripts)`、`import-require-locales (default)`。每条 expect 是该 check 独有的失败文案，不是会命中邻组输出的词。
+- 我第一版声明有三组「构造不出」，这是错的：`typecheck-no-host-stubs` 用一个藏在 600 字符之后的宿主类型 import 就能只打红无 stub 的那一遍；`install (ignore-scripts)` 用 `os: ["aix"]` 让安装本身被拒；第二次探针用一个成功安装后用 `postinstall` 改坏模块的 npm 脚本。三条都补上了。
 
 ### 修复
 

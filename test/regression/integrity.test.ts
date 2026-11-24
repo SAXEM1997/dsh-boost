@@ -17,25 +17,28 @@ test('投影一定变短，且被省掉的字节等于两个窗口之外的部�
   assert.ok(report.omittedBytes < report.originalBytes)
 })
 
-test('这条检查真的能失败：落库换成截断后的头段，第一条断言立刻红', async () => {
-  // The regression this check exists for: a later edit passes `truncation.head`
-  // to the backend instead of the whole receipt. Simulate it by asserting the
-  // property against a deliberately wrong artifact.
-  const text = receipt()
-  const { backend, saved } = recordingSpill()
-  await projectApply({
-    text,
-    isError: false,
-    family: 'bash',
-    cfg: projectingConfig('bash'),
-    sessionId: 'regression',
-    toolName: 'bash',
-    spill: backend,
-    formatFooter: footer,
-  })
-  const truncated = (saved[0]?.content ?? '').slice(0, 100)
-  assert.notEqual(truncated, text)
-  assert.throws(() => assert.equal(truncated, text, 'the spilled artifact must be the whole original'), /whole original/)
+test('这条检查真的能失败：把投影换成「只落头段」的实现，checkIntegrity 立刻拒绝', async () => {
+  // Drive the real check against a broken projection through its seam. The
+  // earlier version of this test hand-truncated the saved string and asserted
+  // that `assert.equal` throws — which proves the assertion works, not that the
+  // check catches a regression.
+  await assert.rejects(
+    checkIntegrity('bash', receipt(), async (input) => {
+      // One artifact, but the wrong bytes: wrap the backend so the recorded
+      // save carries a window instead of the receipt.
+      const spill = input.spill
+      return projectApply({
+        ...input,
+        spill: {
+          saveText: async (ask) => {
+            assert.ok(spill !== undefined, 'the fixture always provides a backend')
+            return spill.saveText({ ...ask, content: ask.content.slice(0, 100) })
+          },
+        },
+      })
+    }),
+    /the spilled artifact must be the whole original/,
+  )
 })
 
 test('低于触发阈值时不落库，也不假装落过', async () => {

@@ -97,7 +97,7 @@ jobs:
       # `--prebuilt` flag is required: it makes the pack step describe the tree
       # `npm run ci` just built instead of rebuilding it (row 9/31, round 4).
       - run: npm run ci && npm run verify:package -- --prebuilt
-      # The gate must be able to fail. Nine of its twelve check groups get a
-      # corrupted tarball here; the three without a case are explained in
-      # `scripts/gate-negatives.mjs` (they cannot be isolated by construction).
+      # The gate must be able to fail: all twelve check instances get a
+      # corrupted tarball here, and each case asserts the specific failure text
+      # of its own check.
       - run: npm run verify:negatives

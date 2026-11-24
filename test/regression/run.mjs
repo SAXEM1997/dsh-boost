@@ -29,8 +29,16 @@ let failed = 0
 for (const task of tasks) {
   try {
     const report = await checkIntegrity(task.family, receiptFor(task.lines))
+    // Every declared expectation is asserted, not just `applied`: a field that
+    // the runner ignores would let the task file claim coverage it does not have.
     if (task.expect.applied && !report.applied) throw new Error('expected a projection, got a skip')
     if (!task.expect.applied && report.applied) throw new Error('expected a skip, got a projection')
+    if (task.expect.shrink === true && report.viewBytes >= report.originalBytes) {
+      throw new Error(`expected the view to shrink, got ${report.originalBytes}->${report.viewBytes}B`)
+    }
+    if (task.expect.pointsLocator === true && !report.pointsLocator) {
+      throw new Error('expected the view to name the locator')
+    }
     const shape = `view ${report.originalBytes}->${report.viewBytes}B, omitted ${report.omittedBytes}, stored ${report.storedBytes}B`
     console.log(`ok   ${task.id.padEnd(20)} ${task.family.padEnd(5)} ${shape}`)
   } catch (error) {

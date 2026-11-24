@@ -10,7 +10,7 @@
 
 > 记录在案的决定：本项目**不附带** 20 任务回放集。用户明确否决的是"搭回放集"的**语料**部分
 > （2026-11-18），这条豁免**只免除语料**。冒烟 runner 与 locator 取回完整性检查按裁决并不需要
-> 语料，且**已交付**（0.3.11）：`npm run test:regression` 跑 6 条合成任务，`test/regression/
+> 语料，且**已交付**（0.3.12）：`npm run test:regression` 跑 6 条合成任务，`test/regression/
 > integrity.test.ts` 把同样的断言接进 `npm test`。因此第 3 节仍只规定过程与判据，**不伪造语料**。
 
 ---
@@ -357,10 +357,10 @@ tarball 会拉进 `dsh-spill-policy@rc.5` 并 `ERESOLVE`（当时实测 exit 1�
   **`0.2.3-rc.4` / `0.2.3-rc.5` / `0.2.3` 都在区间外**：它们会告警一次，但仍照常加载——`0.2.3-rc.5`
   与本插件触及的九个包逐字节相同（见 §6），所以那条告警说的是「没验证过」，不是「会坏」。
 
-安装规格：**`dsh-boost@^0.3.11`**。版本清单以 `npm view dsh-boost versions --registry=https://registry.npmjs.org/` 为准——这里不记条数，因为每发一版它就会过期一次；其中 `0.0.0-stage` 是 npm 自动创建的占位版本，不要把它当成
+安装规格：**`dsh-boost@^0.3.12`**。版本清单以 `npm view dsh-boost versions --registry=https://registry.npmjs.org/` 为准——这里不记条数，因为每发一版它就会过期一次；其中 `0.0.0-stage` 是 npm 自动创建的占位版本，不要把它当成
 “更早的 API”：
 
-- `0.3.11` — 当前 `latest`；`status.distill` 分账（`saved_tokens`/`spilled_bytes`）、蒸馏基线补页脚
+- `0.3.12` — 当前 `latest`；`status.distill` 分账（`saved_tokens`/`spilled_bytes`）、蒸馏基线补页脚
 - `0.3.7` — 文档：版本清单不再记条数，改为指向 `npm view`
 - `0.3.6` — 未知原因的墓碑不再冻结回执、临时文件按 pid 存活判定
 - `0.3.5` — 回放次数改回 `1 + 剩余步数`、采用保留 §5.4-4 信号行、墓碑只认已知原因
@@ -702,14 +702,15 @@ tool share 变动约 ±1.3pp。这是选择边界差，不是公式差；设计�
 `.github/workflows/ci.yml` 在 `push` 到 `main`、`v*` tag 和 `pull_request` 时跑一个 job：
 
 - 断言 `package-lock.json` 里没有 `registry.npmmirror.com`（§6.2），然后 `npm ci --registry=https://registry.npmjs.org/`；
-- 跑 `npm run ci`（typecheck + `npm test` + clean build），再跑
+- 跑 `npm run ci`（typecheck + `npm test` + `test:regression` + clean build），再跑
   `npm run verify:package -- --prebuilt`——这正是 `prepublishOnly` 的两条命令，按同一顺序显式执行，
-  所以 §1 的整道门在 CI 里跑。`--prebuilt` 是承重的：不带它，`verify:package` 会在自己的 pack 步骤
+  所以 §1 的整道门在 CI 里跑；最后跑 `npm run verify:negatives`，把打包好的 tarball 逐一改坏，
+  证明门本身能失败（十二个 check 实例各一条）。`--prebuilt` 是承重的：不带它，`verify:package` 会在自己的 pack 步骤
   里重新 build，于是「缺一个 dist 文件」「多一个 ghost dist 条目」两个断言会被修复或掩盖，而不是报错；
 - 权限只有 `contents: read`，没有 registry token，也**没有**任何 `npm publish` 调用（连
   `--dry-run` 都没有）：npm 要先跑完 `prepublishOnly` 才检查 registry，`--dry-run` 只会让每次
   push 在几分钟绿灯后以 `You cannot publish over the previously published versions: <当前版本>` 变红；
-- `v*` tag **不会**把任何东西推到 registry；打 tag 只是再跑一遍这两条命令。
+- `v*` tag **不会**把任何东西推到 registry；打 tag 只是再跑一遍这几条命令。
 
 注意：§1 的次安装会执行包内 lifecycle 脚本；`pull_request` 上也会执行。runner 是临时的、
 没有 registry token，但这仍是在跑不可信代码——不要给这个 job 加 secrets 或写权限。
@@ -755,12 +756,12 @@ DSH 宿主后的行为、§3 的 20 任务回退流程（人工）、§5 的统�
 - [ ] 两条降级路径都保留 status/收据证据；验收中出现的每个稳定码都按 §2.5 的矩阵处置并留证（含 `ERR_HOST_NO_SPILL_NOTICE` / `ERR_HOST_VERSION_MISMATCH` / `ERR_BOOST_SECTION_REGISTER_FAILED`，以及已有的 `ERR_RECEIPTS_UNREADABLE` / `ERR_RECEIPTS_TRUNCATED` / `ERR_HOST_COMPLETE_SECTION` / `ERR_SCOPE_ABORTED` / `ERR_HOST_SPILL_FAILING` / `ERR_BOOST_PARTIAL_MOUNT`）；同时确认 `status.data.receipts_stopped` 为 `false`（为 `true` 表示收据已连续写失败 3 次、替换被整体拒绝）
 - [ ] 第一次开启替换的真实回合检查 `content[].thinking` 400（不是影子周）；若有，替换在该路由关闭
 - [ ] `npm run --silent stats` 在干净 clone 上可复算 §5.2 的聚合（口径对应设计稿 §2.1）
-- [ ] 发布侧：`npm publish` 走 `publishConfig.registry`（registry.npmjs.org、public）；用 `npm view dsh-boost dist-tags --registry=https://registry.npmjs.org/` 确认 `latest` 是 `package.json` 里的版本（registry 上另有 npm 自动创建的 `0.0.0-stage` 占位版本，见 §2.4）；**必须带 `--registry`**，否则读到的是镜像的旧 `latest`；安装规格是 `dsh-boost@^0.3.11`
+- [ ] 发布侧：`npm publish` 走 `publishConfig.registry`（registry.npmjs.org、public）；用 `npm view dsh-boost dist-tags --registry=https://registry.npmjs.org/` 确认 `latest` 是 `package.json` 里的版本（registry 上另有 npm 自动创建的 `0.0.0-stage` 占位版本，见 §2.4）；**必须带 `--registry`**，否则读到的是镜像的旧 `latest`；安装规格是 `dsh-boost@^0.3.12`
 
 **未交付、因此不在上表可勾选范围：§3 的 20 条真实任务语料。**
 `test/regression/` 提供的是 runner 与**合成**任务集（`tasks.jsonl`，6 条），不是 20 条真实回放
 （2026-11-18 用户明确否决“搭回放集”的语料部分，见文首记录）。runner 与取回完整性检查已于
-0.3.11 交付：前者 `npm run test:regression`，后者 `test/regression/integrity.ts` 的三条断言
+0.3.12 交付：前者 `npm run test:regression`，后者 `test/regression/integrity.ts` 的三条断言
 （落库的是完整原文、页脚点名返回的 locator、被省字节与两个窗口闭合），并接进 `npm test`。
 「无数据丢失」这条不变量因此**已核实到插件能看见的边界**——宿主 `SpillBackend` 是只写的，
 「宿主真的把字节还回来」仍属宿主的责任。

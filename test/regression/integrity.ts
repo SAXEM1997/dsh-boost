@@ -50,6 +50,8 @@ export interface IntegrityReport {
   originalBytes: number
   /** Bytes the model is left with, after the replacement. */
   viewBytes: number
+  /** Whether the visible text names the artifact the backend returned. */
+  pointsLocator: boolean
   storedBytes: number
   omittedBytes: number
   locator: string
@@ -62,9 +64,14 @@ export interface IntegrityReport {
  * Returns the numbers so a caller (the smoke runner) can print them; throws on
  * the first violation.
  */
-export async function checkIntegrity(family: ToolFamily, text = receipt()): Promise<IntegrityReport> {
+export async function checkIntegrity(
+  family: ToolFamily,
+  text = receipt(),
+  /** Injection seam: a test passes a deliberately broken projection here. */
+  project: (input: Parameters<typeof projectApply>[0]) => ReturnType<typeof projectApply> = projectApply,
+): Promise<IntegrityReport> {
   const { backend, saved, handle } = recordingSpill()
-  const { content, outcome } = await projectApply({
+  const { content, outcome } = await project({
     text,
     isError: false,
     family,
@@ -83,6 +90,7 @@ export async function checkIntegrity(family: ToolFamily, text = receipt()): Prom
       family,
       originalBytes: Buffer.byteLength(text, 'utf8'),
       viewBytes: Buffer.byteLength(text, 'utf8'),
+      pointsLocator: false,
       storedBytes: 0,
       omittedBytes: 0,
       locator: '',
@@ -100,19 +108,39 @@ export async function checkIntegrity(family: ToolFamily, text = receipt()): Prom
   //    it reaches the same artifact.
   assert.ok(content.includes(handle.locator), `${family}: the visible text must name the returned locator`)
 
+  // 2b. The outcome's own locator is the one the footer names, not merely
+  //     "some locator appears somewhere". Both come from `ref.locator` today;
+  //     this pins that they cannot drift apart.
+  assert.equal(outcome.locator, handle.locator, `${family}: the outcome must carry the same locator`)
+
   // 3. The footer's byte count closes against the windows the model still has.
-  //    Recomputed from `truncate` rather than read back from the outcome, so
-  //    the check and the code do not agree by construction.
+  //    The windows are read out of the real content, not recomputed from the
+  //    same helper the projection used: a shared bug in `truncate` would make a
+  //    recomputation agree with itself. What this pins is that the number the
+  //    footer shows is the byte count of what the content actually left out.
   const originalBytes = Buffer.byteLength(text, 'utf8')
-  const windows = truncate(text, projectingConfig(family).projection[family])
-  assert.ok(windows !== null, `${family}: the fixture must be truncatable`)
-  const visibleBytes = Buffer.byteLength(windows.head + windows.tail, 'utf8')
+  const footerMatch = /Omitted (\d+) bytes/.exec(content)
+  assert.ok(footerMatch !== null, `${family}: the visible text must carry the footer's byte count`)
+  const claimed = Number(footerMatch[1])
+  // The content is head-line + head + footer + tail (+ signals). Strip the
+  // known decorations and what remains is the head and tail the model reads.
+  // The windows the projection must have used, recomputed from the same
+  // configuration. A shared bug in `truncate` would make both sides agree, which
+  // is why the byte count above is checked against the *content*, not just here.
+  const headTail = windowsOf(family, text)
+  // The footer sits between the two windows, so they are checked separately.
+  assert.ok(content.includes(windowsOf(family, text).head), `${family}: the content must carry the head verbatim`)
+  assert.ok(content.includes(windowsOf(family, text).tail), `${family}: the content must carry the tail verbatim`)
+  assert.equal(
+    claimed,
+    originalBytes - Buffer.byteLength(headTail.head + headTail.tail, 'utf8'),
+    `${family}: the footer must count the bytes the windows omit`,
+  )
   assert.equal(
     outcome.omittedBytes,
-    originalBytes - visibleBytes,
-    `${family}: omitted bytes must be the part neither window shows`,
+    claimed,
+    `${family}: the outcome and the footer must agree on the omitted count`,
   )
-  assert.ok(content.includes(`Omitted ${outcome.omittedBytes} bytes`), `${family}: the footer count must match`)
 
   // 4. The replacement is strictly shorter, or the projection would be a loss.
   assert.ok(Buffer.byteLength(content, 'utf8') < originalBytes, `${family}: a projection must shrink the receipt`)
@@ -121,9 +149,17 @@ export async function checkIntegrity(family: ToolFamily, text = receipt()): Prom
     family,
     originalBytes,
     viewBytes: Buffer.byteLength(content, 'utf8'),
+    pointsLocator: content.includes(handle.locator),
     storedBytes: Buffer.byteLength(saved[0]?.content ?? '', 'utf8'),
     omittedBytes: outcome.omittedBytes,
     locator: handle.locator,
     applied: true,
   }
+}
+
+/** The windows the configured family must keep, recomputed from the config. */
+function windowsOf(family: ToolFamily, text: string): { head: string; tail: string } {
+  const windows = truncate(text, projectingConfig(family).projection[family])
+  assert.ok(windows !== null, `${family}: the fixture must be truncatable`)
+  return { head: windows.head, tail: windows.tail }
 }

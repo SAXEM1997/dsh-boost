@@ -6,7 +6,7 @@ checkout with the development dependencies installed.
 
 ## Session statistics
 
-`npm run stats` prints npm's own banner (`> dsh-boost@0.3.11 stats` and the
+`npm run stats` prints npm's own banner (`> dsh-boost@0.3.12 stats` and the
 command line) on **stdout** before the JSON, so it must not be piped directly.
 For a machine-readable stream use one of the quiet forms:
 
@@ -35,10 +35,17 @@ zero-result week. Pass `--allow-empty` when the empty report is intentional.
 The release path is three explicit steps, in this order:
 
 ```bash
-npm run ci                            # typecheck, tests, and one clean build
+npm run ci                            # typecheck, unit tests, regression tasks, and one clean build
 npm run verify:package -- --prebuilt  # pack and verify exactly that dist
 npm publish                           # `prepare` runs, but both halves exist, so it is a no-op
 ```
+
+`npm run verify:negatives` sits beside the gate, not inside it: it packs the same
+artifact, breaks one thing per check, and asserts the gate fails with that
+check's own message. Twelve cases, several of which install and typecheck twice,
+so it runs in CI after the gate rather than on every local test cycle. It needs
+`dist/` and `lib/client.js` to exist — run `npm run ci` first.
+
 
 `prepublishOnly` is `npm run ci && npm run verify:package -- --prebuilt`, so a
 release cannot skip the gate. `package.json` publishes `prepare`, because a git install has neither half
