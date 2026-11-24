@@ -8,6 +8,19 @@ This file records user-visible changes. Format follows Keep a Changelog; version
 Design rationale lives in `docs/superpowers/specs/`; the release-acceptance procedure is in
 `docs/RELEASE.md`.
 
+## [0.3.6] - 2026-11-24
+
+### 修复
+
+- 未知原因的墓碑不再冻结回执：读到 `rejected` 不在已知集合里时当作**没有这个产物**并照常调用，此前会走「不是候选」分支——既不调模型也不写收据，该回执从此每次重放都空转。
+- 墓碑集合收窄为三个真正该钉的原因（`empty`/`unverifiable`/`not-smaller`）；`timeout` 与 `not-worth-it` 明确不钉，与 README、ADR 0001 的说法一致。
+- 新增的墓碑测试此前写的是一个没人读的文件名，删掉守卫仍会通过；改成先用真实路径产出一条墓碑、再手工改坏它的 `rejected` 字段，并断言模型被调用一次。
+- 「没有 `horizonFor` 就弃权」的用例此前无法失败（默认 horizon 20 两条路径都放行）；改成把配置 horizon 设为 0，回落即拒绝。
+- 保留策略补两条测试：单个产物大于假定值时立即测量（九个 12 KiB 产物不再把目录推到上限之上）、陈旧 `.tmp` 被回收而活写者的不动。
+- 裁剪不再无条件删除 `*.tmp`：只清十分钟以前的。此前每写一次就把所有临时文件删光，另一个进程正在写的那个会让它的 `rename` 报 ENOENT，把一次丢失的竞争变成一次丢失的蒸馏。
+- `verifyQuotes` 的 JSDoc 改成与实现一致（零引用失败）；`docs/how-it-works.md` 的字节门补上信号行；`src/distill/decide.ts` 的回本注释与模块 docstring 同步为 `1 + 剩余步数` 与「含信号行」。
+- 文档版本线推进到 0.3.5/0.3.6：`RELEASE` 的安装规格与版本清单（补 0.3.5、0.3.4 降为历史、计数二十条）、`operating` 的 `latest` 与 `@^0.3.5`、README×2 的安装示例。
+
 ## [0.3.5] - 2026-11-24
 
 ### 修复

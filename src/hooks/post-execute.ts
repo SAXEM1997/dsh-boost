@@ -2215,10 +2215,13 @@ async function finishDistillDecision(
 /**
  * The truncation view's rendered bytes, for pricing a distillation against it.
  *
- * Carries the preserved signals, like every other renderer of this view: a
- * baseline that dropped them would make the distill receipt's `before` smaller
- * than the same receipt's projection receipt, and the two would stop being
- * comparable in `boost status`.
+ * Carries the preserved signals, like every other renderer of this view, so a
+ * baseline never understates what the projection path would have shown. It does
+ * **not** carry the footer: the footer names the spill artifact, and at decision
+ * time no artifact exists yet. The omission makes this baseline a few dozen
+ * tokens shorter than the applied view, so a distill receipt's `before` is
+ * slightly conservative relative to a projection receipt's — deliberately, and
+ * never in the other direction.
  */
 function truncationViewOf(text: string, cfg: BoostConfig, family: ToolFamily): string | undefined {
   const params = cfg.projection[family]

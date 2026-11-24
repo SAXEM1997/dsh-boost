@@ -13,7 +13,7 @@
  */
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtemp, writeFile } from 'node:fs/promises'
+import { mkdtemp, readFile, readdir, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { decide, verifyQuotes } from '../src/distill/decide.ts'
@@ -634,18 +634,26 @@ test('回本预判：截断视图里带保留信号时照常预判并采用', as
   assert.ok(r?.content?.includes('[exit code: 1]'), 'the adopted view keeps the preserved signal')
 })
 
-test('墓碑写了未知原因时当作未命中，不把任意字符串变成收据码', async () => {
-  const store = await makeStore()
-  const key = { file: 'forged-v1' }
-  await store.write('s1', key, { model: 'deepseek-flash', rejected: 'not-a-known-reason' })
-  // The file is data: it can be hand-edited or written by an older build. An
-  // unknown reason must not reach history as `distill-rejected:<anything>`.
+test('墓碑写了未知原因时当作未命中：不冻结该回执，也不把任意字符串变成收据码', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'dsh-decide-forged-'))
+  const store = new DistillStore(dir)
+  // Produce a real tombstone through the real path, so the key is the one the
+  // decision actually reads — a hand-written filename would test nothing.
+  const forged = fakeFn(async () => ({ text: 'invented', quotes: ['not in the receipt'], model: 'deepseek-flash' }))
+  const first = await decide(baseInput(store, { distill: forged.fn }))
+  assert.equal(first?.code, 'distill-rejected:unverifiable')
+  const files = (await readdir(join(dir, 'distilled'))).filter((name) => name.endsWith('.json'))
+  assert.equal(files.length, 1, 'exactly one tombstone was pinned')
+  // Hand-edit it the way an operator or an older build would.
+  const path = join(dir, 'distilled', files[0] as string)
+  const record = JSON.parse(await readFile(path, 'utf8')) as Record<string, unknown>
+  await writeFile(path, JSON.stringify({ ...record, rejected: 'not-a-known-reason' }), 'utf8')
+
   const fake = fakeFn(async (request) => goodAnswer(request.text))
   const r = await decide(baseInput(store, { distill: fake.fn }))
   assert.notEqual(r?.code, 'distill-rejected:not-a-known-reason')
-  assert.equal(fake.calls.length, 1, 'unknown tombstone is a miss: the call runs')
+  assert.equal(fake.calls.length, 1, 'an untrusted tombstone is absent, not a refusal that freezes the receipt')
 })
-
 test('回本预判的回放次数是 1 + 剩余步数：同一回执 h=1 拒、h=2 放行', async () => {
   // Tokens = characters, so the arithmetic is exact and the test is about the
   // replay count rather than about the estimator: saving per replay is one

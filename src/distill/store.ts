@@ -65,6 +65,29 @@ export const MAX_BYTES = 16 * 1024 * 1024
  */
 const ASSUMED_PRODUCT_BYTES = 4096
 
+/**
+ * Whether a temp file's owning process is gone.
+ *
+ * Temp files are named `<target>.<pid>.tmp`, so liveness — not age — decides who
+ * may reclaim one. A live writer's temp file is deleted at our peril: its
+ * `rename` would then fail with ENOENT and a distillation would be lost to a
+ * race it never entered. A pid that cannot be signalled is either dead or
+ * recycled; both mean nobody will ever rename that file, so it is ours to drop.
+ */
+function ownerGone(name: string): boolean {
+  const match = /\.(\d+)\.tmp$/.exec(name)
+  if (match === null) return false
+  const pid = Number(match[1])
+  if (!Number.isInteger(pid) || pid <= 0) return false
+  if (pid === process.pid) return false
+  try {
+    process.kill(pid, 0)
+    return false
+  } catch (error) {
+    return (error as { code?: string }).code === 'ESRCH'
+  }
+}
+
 /** One persisted product. */
 export interface DistillProduct {
   /** The distilled body, without the head marker and the footer. */
@@ -153,14 +176,12 @@ export class DistillStore {
   }
 
   /**
-   * Persist a product atomically; rejects when it cannot be written.
+   * Write one product atomically, then keep the directory inside its caps.
    *
    * The body is serialised before the first filesystem call, so a body that
-   * cannot be serialised (it cannot, structurally) fails here too; and the
-   * rename means a reader never observes the temp file's name.
-   */
-  /**
-   * Write one product, then keep the directory inside its caps.
+   * cannot be serialised (it cannot, structurally) fails here too, and the
+   * rename means a reader never observes the temp file's name. Rejects when the
+   * product cannot be written; a failed prune never rejects.
    *
    * `_sessionId` is retained so every caller keeps the same signature; products
    * are keyed by receipt, question and distiller version only, because they
@@ -215,9 +236,11 @@ export class DistillStore {
    * a cap pays for nothing. The byte cap is estimated from
    * {@link ASSUMED_PRODUCT_BYTES}: a product is a body plus a handful of quotes,
    * so the directory cannot be over the byte cap until it holds
-   * `maxBytes / ASSUMED_PRODUCT_BYTES` files. A product far larger than the
-   * assumption can therefore carry the directory past the byte cap between
-   * checks; the file cap still bounds it and the next write reclaims.
+   * `maxBytes / ASSUMED_PRODUCT_BYTES` files. A write whose product is itself
+   * larger than the assumption forces the measured pass, so a directory full of
+   * large products cannot drift far past the byte cap; a small write in between
+   * two large ones does not reclaim on its own, which is why the forced pass
+   * keys on the product being written rather than on the directory total.
    */
   private async prune(keep: string, written: number): Promise<void> {
     const dir = this.dir()
@@ -229,9 +252,11 @@ export class DistillStore {
     }
     const files = names.filter((name) => name.endsWith('.json'))
     // A killed process leaves `<name>.json.<pid>.tmp` behind: never counted by
-    // the caps, so nothing would ever reclaim it.
+    // the caps, so nothing would ever reclaim it. Only a temp whose owner is
+    // gone is reclaimed — see {@link ownerGone}.
     for (const name of names) {
       if (!name.endsWith('.tmp')) continue
+      if (!ownerGone(name)) continue
       await unlink(join(dir, name)).catch(() => {})
     }
     // A product larger than the assumption is itself evidence that the count

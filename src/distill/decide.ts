@@ -25,7 +25,8 @@
  * 6. **Persist.** The product is written before its bytes are returned, so the
  *    bytes that enter history are the bytes on disk (ADR 0001). A failed write
  *    is `distill-failed`.
- * 7. **Adopt.** The view is `<head marker>\n<body>\n\n<host footer>` with the
+ * 7. **Adopt.** The view is `<head marker>\n<body>\n\n<host footer>`, followed by the preserved
+ * §5.4-4 signal lines when the cut middle held any with the
  *    footer rendered by the host's own `formatSpillNotice`, exactly the shape
  *    an ordinary projection has, so anchors, spill and receipts keep working.
  *
@@ -58,25 +59,32 @@ export type DistillRejectReason = 'empty' | 'not-smaller' | 'not-worth-it' | 'un
  * The reasons a replayed decision must not pay for the model again.
  *
  * `timeout` is excluded on purpose: it carries no answer, and the whole point of
- * parking the request is that a late answer lands and a replay adopts it. The
- * three below are decisions — the answer arrived and was refused — so they are
- * pinned as tombstones, otherwise every replay of the same receipt pays for the
- * same refusal.
+ * parking the request is that a late answer lands and a replay adopts it.
+ * `not-worth-it` is excluded for the same shape of reason: it rests on how many
+ * steps remain, which grows as the session does, so pinning it would freeze a
+ * judgement the evidence has since overturned. The three below are decisions —
+ * the answer arrived and was refused — so they are pinned as tombstones,
+ * otherwise every replay of the same receipt pays for the same refusal.
  */
-/** Every reason a tombstone may legitimately carry. */
-const REJECT_REASONS: ReadonlySet<string> = new Set<string>([
-  'empty',
-  'not-smaller',
-  'not-worth-it',
-  'timeout',
-  'unverifiable',
-])
-
 const PINNED_REJECTIONS: ReadonlySet<DistillRejectReason> = new Set<DistillRejectReason>([
   'empty',
   'unverifiable',
   'not-smaller',
 ])
+
+/**
+ * Every reason a tombstone may legitimately carry — i.e. exactly the pinnable
+ * ones.
+ *
+ * A tombstone is a file: it can be edited, truncated, or left by an older build
+ * that pinned reasons this build no longer pins (`timeout`, `not-worth-it`). A
+ * value outside this set is not a refusal to replay; it is a file that cannot be
+ * trusted, so the decision falls through to the ordinary path and pays for a
+ * call if one is warranted. Reading it as a refusal would freeze the receipt
+ * forever: the file stays on disk, every replay hits the same branch, and
+ * nothing is written to say why.
+ */
+const REJECT_REASONS: ReadonlySet<string> = new Set<string>(PINNED_REJECTIONS)
 
 /** Everything one decision reads; every host service arrives pre-bound. */
 export interface DecideInput {
@@ -180,8 +188,9 @@ export interface DistillOutcome {
  *
  * A quote check is a forgery filter, not a proof of relevance: it proves the
  * model copied, never that it copied the right lines (issue #9's research
- * note). An empty list passes — an answer that cites nothing is not a forged
- * answer, and the size and quote gates are the only gates there are.
+ * note). An empty list **fails**: an answer that cites nothing is not a forged
+ * answer, but it is an unverifiable one, and the quote list is the only signal
+ * that the body is anchored in the receipt rather than invented.
  */
 export function verifyQuotes(quotes: readonly string[], source: string): boolean {
   // An answer that cites nothing is not a forged answer — it is an unverifiable
@@ -218,18 +227,18 @@ function triggerOf(cfg: BoostConfig, family: ToolFamily): number | null {
  * them understates every view that has one.
  */
 function truncationViewText(truncation: Truncation, footer: string): string {
-  const view = `${renderHeadLine(truncation)}\n${truncation.head}\n${footer}\n${truncation.tail}`
-  const signals = truncation.signals ?? []
-  return signals.length === 0 ? view : `${view}\n${signals.join('\n')}`
+  return `${renderHeadLine(truncation)}\n${truncation.head}\n${footer}\n${truncation.tail}${signalSuffix(truncation)}`
 }
 
 /**
  * The truncation view of the same receipt, in bytes.
  *
  * Built from the same window and the same footer renderer an applied
- * projection would use, with a probe locator: the footer's length is what the
- * post-gate must compare against, and the locator's length is the same on both
- * sides of the comparison because both renders name the same spill artifact.
+ * projection would use, with a probe locator and an empty retrieval hint: the
+ * footer's length is what the post-gate compares against, and both renders name
+ * the same spill artifact, so the locator lengths match. The hint is omitted
+ * here and present in the applied footer, so this baseline is a few tokens
+ * shorter than the real view — conservative, never the other way.
  */
 function truncationViewBytes(
   text: string,
@@ -486,15 +495,18 @@ export async function decide(input: DecideInput): Promise<DistillOutcome | null>
   }
 
   const key = keyFor(input.text, question, route.model)
-  const pinned = await input.store.read(key)
+  let pinned = await input.store.read(key)
+  if (pinned !== undefined && typeof pinned.rejected === 'string' && !REJECT_REASONS.has(pinned.rejected)) {
+    // Not a refusal this build may replay: an older build's `timeout` or
+    // `not-worth-it` tombstone, or a hand-edited file. Treat the artifact as
+    // absent and decide afresh — returning early here would freeze the receipt
+    // on every replay with nothing in the ledger to explain it, and inventing a
+    // code would put `distill-rejected:<anything>` into history.
+    pinned = undefined
+  }
   if (pinned !== undefined && typeof pinned.rejected === 'string') {
     // A pinned refusal: the answer arrived and was refused, so the replay reads
     // the tombstone instead of paying for the same call.
-    // A tombstone is a file: it can be edited, truncated or written by an older
-    // build. An unknown reason is a miss, never a receipt code — otherwise a
-    // hand-written file puts `distill-rejected:<anything>` into history and the
-    // receipt-code table stops being the authority.
-    if (!REJECT_REASONS.has(pinned.rejected)) return null
     const reason = pinned.rejected as DistillRejectReason
     return {
       content: null,
@@ -541,7 +553,7 @@ export async function decide(input: DecideInput): Promise<DistillOutcome | null>
 
   // Payback gate. The byte gate below compares two renderings of one receipt;
   // it says nothing about whether the model call that produced them ever pays
-  // for itself. A receipt is replayed `max(1, remainingSteps)` times, so the
+  // for itself. A receipt is replayed `1 + remainingSteps` times, so the
   // most a distillation can ever save is (truncation view − footer) per replay,
   // and the least it costs is the receipt as input plus the output budget. When
   // even that most-optimistic product does not cover the cost, no answer can

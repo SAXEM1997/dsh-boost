@@ -2103,12 +2103,14 @@ test('#10 回本预判接进生产装配：horizon 为 0 时不调模型，记 n
 })
 
 test('#10 没有 horizonFor 时回本预判弃权：不拿配置 horizon 顶替', async () => {
-  // The gate must abstain when the host cannot say how many replays are left.
-  // Feeding it `config.horizonSteps` instead would make every receipt look
-  // worth distilling — a guess dressed as evidence. Distinguishable from the
-  // horizon-0 case only when no `horizonFor` is wired at all.
-  const env = await distillSetup()
+  // The gate must abstain when the host cannot say how many replays are left,
+  // rather than falling back to `config.horizonSteps`. The configured horizon is
+  // 0 here on purpose: a fallback would then refuse (the call cannot pay back in
+  // zero replays) while abstaining calls. With the default horizon of 20 both
+  // paths call, and this test would pass either way.
+  const env = await distillSetup({ cfg: { ...distillConfig(), horizonSteps: 0 } })
   assert.equal(env.deps.horizonFor, undefined)
+  assert.equal(env.deps.config.horizonSteps, 0, 'the fallback this test rules out would refuse')
   const res = await runBash(env.host, bashReceipt(), { arguments: { command: 'npm test' } })
 
   assert.equal(env.seam.calls.length, 1, 'gate abstains, so the call runs')

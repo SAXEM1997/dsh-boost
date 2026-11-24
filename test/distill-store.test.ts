@@ -9,7 +9,7 @@
  */
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtemp, mkdir, readFile, readdir, writeFile } from 'node:fs/promises'
+import { mkdtemp, mkdir, readFile, readdir, rename, stat, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { DistillStore } from '../src/distill/store.ts'
@@ -103,6 +103,50 @@ test('写入超过文件数上限时裁掉最旧的，最新的仍在', async ()
   assert.equal(files.includes('a-v1.json'), false, 'the oldest is the one dropped')
   assert.equal(files.includes('d-v1.json'), true, 'the newest survives')
   assert.ok(await store.read({ file: 'd-v1' }))
+})
+
+test('单个产物大于假定值时立即测量：不靠文件数估算放过字节上限', async () => {
+  const dir = await root()
+  // Nine 12 KiB products are ~108 KiB: past the cap, but the count estimate
+  // (9 × 4 KiB = 36 KiB) says otherwise, so only the written-size trigger can
+  // catch it. Without that trigger the directory ends up over the cap.
+  const maxBytes = 100_000
+  const store = new DistillStore(dir, { maxFiles: 1000, maxBytes })
+  const big = { ...PRODUCT, text: 'x'.repeat(12_000), quotes: [] }
+  for (let n = 0; n < 9; n += 1) {
+    await store.write('s1', { file: `big-${n}-v1` }, big)
+    await new Promise((resolve) => setTimeout(resolve, 5))
+  }
+  const files = (await readdir(join(dir, 'distilled'))).filter((name) => name.endsWith('.json'))
+  let total = 0
+  for (const name of files) total += (await stat(join(dir, 'distilled', name))).size
+  assert.ok(total <= maxBytes, `total ${total} must stay under ${maxBytes}`)
+  assert.ok(files.length < 9, 'the oldest were reclaimed')
+  assert.ok(files.includes('big-8-v1.json'), 'the product just written survives')
+})
+
+test('裁剪顺手回收陈旧的 .tmp，但不动刚写的那个', async () => {
+  const dir = await root()
+  const store = new DistillStore(dir)
+  await mkdir(join(dir, 'distilled'), { recursive: true })
+  const stale = join(dir, 'distilled', 'crashed-v1.json.999.tmp')
+  const live = join(dir, 'distilled', 'inflight-v1.json.1000.tmp')
+  await writeFile(stale, 'partial', 'utf8')
+  await writeFile(live, 'partial', 'utf8')
+  // Liveness, not age, decides: `999` and `1000` are pids this test cannot own.
+  // Pretend 999 is dead by giving the file a pid that is not running, and keep
+  // the live one as our own pid so the check has something to protect.
+  await rename(live, join(dir, 'distilled', `inflight-v1.json.${process.pid}.tmp`))
+
+  await store.write('s1', { file: 'one-v1' }, PRODUCT)
+
+  const left = await readdir(join(dir, 'distilled'))
+  assert.equal(left.includes('crashed-v1.json.999.tmp'), false, 'a dead writer\'s temp is reclaimed')
+  assert.equal(
+    left.includes(`inflight-v1.json.${process.pid}.tmp`),
+    true,
+    "a live writer's temp is not ours to delete",
+  )
 })
 
 test('写入超过总字节上限时也裁，且至少留下刚写的那一条', async () => {
