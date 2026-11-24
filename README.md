@@ -58,12 +58,12 @@ Node.js `>=24.9.0`，DSH `>=0.2.2-rc.4 <0.2.3-0`（**区间**，不是精确钉�
 上可用；v1 面向 web profile。
 
 ```bash
-dsh plugin --profile <name> add dsh-boost@^0.4.3 --registry=https://registry.npmjs.org/
+dsh plugin --profile <name> add dsh-boost@^0.4.4 --registry=https://registry.npmjs.org/
 ```
 
 `dsh plugin` 要求指定 profile，其余参数转发给该 profile 里的 pnpm（所以 pnpm 必须在 PATH
 上）；本地 checkout 安装先 `npm run build`，再把绝对路径传给 `add`。npmjs 上的 `latest` 是
-`0.4.3`；镜像可能滞后，在意 registry 时显式带上 `--registry`。版本历史、镜像与
+`0.4.4`；镜像可能滞后，在意 registry 时显式带上 `--registry`。版本历史、镜像与
 `0.0.0-stage` 的坑见[运维](docs/operating.md#安装与版本)。装完**必须重启 DSH**（插件在宿主
 启动时加载）；web profile 就是重启 `dsh web`。
 
@@ -128,6 +128,7 @@ README、`LICENSE`、`NOTICE`；`src/` 也不进包，`dist` 的 sourcemap 内�
 | [运维](docs/operating.md) | 怎么装、启用、回滚、卸载；配置键、降级码、状态字段与已知限制 |
 | [发布验收](docs/RELEASE.md) | `npm run verify:package` 怎么跑；两条发布门不变式、零 peerDependencies 与安装规格、降级码矩阵；20 任务人工回归与影子周复算 |
 | [质量仪](docs/quality.md) | 怎么用已有轨迹做两臂配对比较；装置交了什么、没交什么；三个已知偏差与二期判据 |
+| [A/B 跑法](docs/quality-runbook.md) | 一次配对质量实验的逐步清单：前置检查、两臂命令、结果格式、五个常见错、预先定死的判据 |
 | [设计稿](docs/superpowers/specs/2026-11-18-dsh-token-efficiency-design.md) | 目标、证据、架构、契约、度量、风险、发布形态 |
 | [宿主契约附录](docs/superpowers/plans/2026-11-18-host-contracts.md) | 逐条抄自宿主源码的接口准绳 |
 | [三层委派研究](docs/research/2026-11-18-three-tier-delegation.md) | 缓存、路由阈值、压缩、校验的 25 条一手来源 |

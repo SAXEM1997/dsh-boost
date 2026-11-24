@@ -27,7 +27,10 @@ async function writeSession(
   id: string,
   calls: [string, Record<string, unknown>][],
 ): Promise<void> {
-  const events: unknown[] = [{ type: 'session', version: 4, id, createdAt: 1_700_000_000_000 }]
+  const events: unknown[] = [
+    { type: 'session', version: 4, id, createdAt: 1_700_000_000_000 },
+    { type: 'user/message', time: 900, data: { content: [{ type: 'text', text: `run ${id}` }] } },
+  ]
   calls.forEach(([name, args], index) => {
     events.push({
       type: 'tool/call',
@@ -63,10 +66,10 @@ test('quality-tasks 只认验证命令，并标出它是否是会话的最后一
   const out = await runScript('quality-tasks.mjs', ['--sessions', sessions])
   assert.equal(out.sessions, 3)
   assert.deepEqual(
-    out.tasks.map((task: any) => [task.sessionId, task.command, task.isFinal]),
+    out.tasks.map((task: any) => [task.sessionId, task.command, task.isFinal, task.task]),
     [
-      ['final-verdict', 'npm test', true],
-      ['mid-verdict', 'npm run typecheck 2>&1 | tail -5', false],
+      ['final-verdict', 'npm test', true, 'run final-verdict'],
+      ['mid-verdict', 'npm run typecheck 2>&1 | tail -5', false, 'run mid-verdict'],
     ],
   )
 })

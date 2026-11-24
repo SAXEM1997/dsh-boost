@@ -21,6 +21,9 @@ import { readFileSync, readdirSync, statSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { zstdDecompressSync } from 'node:zlib'
 
+/** How much of the opening user message to keep as the task statement. */
+const TASK_CHARS = 400
+
 /** Commands whose success or failure a re-run can compare without a model. */
 const VERIFICATION = /^(?:npm\s+(?:test|run\s+(?:ci|verify:package|test:regression|typecheck))|npx\s+tsc|pytest|cargo\s+test|go\s+test|make\s+test)\b/
 
@@ -75,6 +78,7 @@ function candidatesOf(path) {
     return undefined
   }
   let sessionId = dirname(path).split(/[\\/]/).pop() ?? path
+  let firstUserText
   const calls = []
   for (const line of text.split('\n')) {
     if (line === '') continue
@@ -86,6 +90,23 @@ function candidatesOf(path) {
     }
     if (record.type === 'session' && typeof record.id === 'string') {
       sessionId = record.id
+      continue
+    }
+    if (record.type === 'user/message') {
+      // The operator's own opening instruction is the closest thing the log has
+      // to a task statement; without it a candidate is just a command.
+      if (firstUserText === undefined) {
+        const content = record.data?.content
+        const text = Array.isArray(content)
+          ? content
+              .filter((part) => part?.type === 'text' && typeof part.text === 'string')
+              .map((part) => part.text)
+              .join('\n')
+          : typeof record.data?.text === 'string'
+            ? record.data.text
+            : ''
+        if (text.trim() !== '') firstUserText = text.trim()
+      }
       continue
     }
     if (record.type !== 'tool/call') continue
@@ -105,6 +126,9 @@ function candidatesOf(path) {
   const last = verdicts[verdicts.length - 1]
   return {
     sessionId,
+    // Truncated: the runbook pastes this as the task prompt, and a 40k-character
+    // session opener would not survive that hand-off.
+    task: firstUserText === undefined ? undefined : firstUserText.slice(0, TASK_CHARS),
     turn: last.turn,
     step: last.step,
     tool: last.name,

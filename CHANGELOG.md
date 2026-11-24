@@ -8,6 +8,18 @@ This file records user-visible changes. Format follows Keep a Changelog; version
 Design rationale lives in `docs/superpowers/specs/`; the release-acceptance procedure is in
 `docs/RELEASE.md`.
 
+## [0.4.4] - 2026-11-24
+
+A/B 跑法（`docs/quality-runbook.md`）与它需要的最后一块机械动作。
+
+`quality-tasks.mjs` 原来只给「哪个会话以验证命令收尾」，不给任务陈述——那就没法重放。现在多带
+一个 `task` 字段（会话的第一条用户消息，截到 400 字符），跑实验的人不必回头翻日志。其余是清单：
+前置检查（commit / 版本 / 工作区必须冻结）、两臂只差 `projection` 一个开关、结果文件格式、七个
+会毁掉实验的错、以及**预先定死**的判据（`insufficient-pairs` 是硬门；一致率 100% 或每条不一致
+都有非本次引入的解释；`tokenDelta` 为负且不小于该干预的收益天花板）。
+
+清单里每一条都是可复制粘贴的，没有「适当配置」这类句子。
+
 ## [0.4.3] - 2026-11-24
 
 两轴评审（Standards / Spec）对 0.3.14 → 0.4.2 的复审修复。其中两条是我在 0.4.x 里自己造出来的。

@@ -67,12 +67,12 @@ Node.js `>=24.9.0` and DSH `>=0.2.2-rc.4 <0.2.3-0` (a **range**, not an exact pi
 POSIX-only; v1 targets the web profile.
 
 ```bash
-dsh plugin --profile <name> add dsh-boost@^0.4.3 --registry=https://registry.npmjs.org/
+dsh plugin --profile <name> add dsh-boost@^0.4.4 --registry=https://registry.npmjs.org/
 ```
 
 `dsh plugin` requires a profile and forwards the remaining arguments to pnpm in that profile
 directory (so pnpm must be on `PATH`); for a local checkout, run `npm run build` first and pass the
-absolute path to `add`. npmjs has `latest` at `0.4.3`; a mirror may lag, so pass `--registry`
+absolute path to `add`. npmjs has `latest` at `0.4.4`; a mirror may lag, so pass `--registry`
 explicitly when the registry matters. Version history, mirrors and the `0.0.0-stage` trap are in
 the [operations guide](docs/operating.md#安装与版本) (Chinese). **You must restart DSH after
 installing** (plugins load at host startup); for the web profile, restart `dsh web`.
@@ -155,6 +155,7 @@ are `docs/RELEASE.md` and the design documents; this English README is the Engli
 | [Operations](docs/operating.md) | Install, enable, roll back, uninstall; config keys, degradation codes, state fields and known limits |
 | [Release acceptance](docs/RELEASE.md) | How to run `npm run verify:package`; the two release-gate invariants, zero peerDependencies and the install spec, the degradation-code matrix; the manual 20-task regression and shadow-week recompute |
 | [Quality instrument](docs/quality.md) | Paired two-arm comparison over existing trajectories; what the apparatus does and does not deliver; three known biases and the phase-two gate |
+| [A/B runbook](docs/quality-runbook.md) | Step-by-step checklist for one paired quality run: preconditions, both arms, result format, five ways to ruin it, the pre-committed gate |
 | [Design](docs/superpowers/specs/2026-11-18-dsh-token-efficiency-design.md) | Goals, evidence, architecture, contracts, measurement, risks, release shape |
 | [Host contracts appendix](docs/superpowers/plans/2026-11-18-host-contracts.md) | Interface reference copied line by line from the host sources |
 | [Three-tier delegation research](docs/research/2026-11-18-three-tier-delegation.md) | 25 primary sources on caching, routing thresholds, compression, and verification |

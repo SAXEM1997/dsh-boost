@@ -47,7 +47,8 @@
 
 ## 在宿主上跑
 
-仓库不驱动 agent，所以这一步由人做，但过程要可重复：
+逐步清单见 **[`quality-runbook.md`](quality-runbook.md)**（前置检查、两臂命令、结果文件格式、
+五个会毁掉实验的错、预先定死的判据）。下面只是四步的摘要：
 
 1. `node scripts/quality-tasks.mjs --sessions <dsh home>/sessions --out tasks.json`，取 `isFinal` 的那些。
 2. 对每个任务，在**同一份工作区快照**上跑两遍，只差一个变量：
