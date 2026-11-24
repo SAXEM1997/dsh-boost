@@ -8,6 +8,32 @@ This file records user-visible changes. Format follows Keep a Changelog; version
 Design rationale lives in `docs/superpowers/specs/`; the release-acceptance procedure is in
 `docs/RELEASE.md`.
 
+## [0.4.2] - 2026-11-24
+
+质量仪（issue #20）。到 0.4.1 为止，仓库里每一项干预都只记 token 账，**没有任何一处回答「结果
+变差了吗」**；两个新分母把收益天花板压到 1.47% / 0.24%，越是这样越该先测「有没有变差」。
+
+**边界先说清楚**：仓库驱动不了 agent 的 A/B。这一版交的是装置的一半——挑任务的机器与比较的
+算术；跑两遍要在宿主上做，规程写在 `docs/quality.md`。
+
+### 新增
+
+- `scripts/quality-tasks.mjs`：从会话日志里找**验证命令**（`npm test` / `npm run ci` / `npx tsc` /
+  `pytest` / `cargo test` / `go test` / `make test`），每个会话取最后一次，标出它是否是会话的
+  最后一个调用（`isFinal`）——只有终态的判定才能整体重放。2,249 个会话上实测 **48 个候选、
+  2 个 `isFinal`**。
+- `scripts/quality-compare.mjs`：两臂配对比较，输出 `compared / agree / agreementRate /
+  tokenDelta / mismatches / missing / conclusion`。样本低于 `--min-pairs`（默认 12）时
+  `conclusion` 是 `insufficient-pairs`——**不用小样本的一致率宣称安全**。没有配对时
+  `tokenDelta` 是 `null` 而不是 0。
+- `docs/quality.md`：规程、字段口径、三个已知偏差（样本小、重放不是原样、`ok` 的定义由人给）、
+  以及二期每加一项干预的前置条件。
+
+### 测试
+
+1003 绿（新增 6 条：验证命令与 `isFinal` 的判定、空目录、不存在的目录、一致率与 `mismatches`、
+`insufficient-pairs`、输入形状与报错）。变异验证：`isFinal` 恒真、`minPairs` 恒过 → 各自变红。
+
 ## [0.4.1] - 2026-11-24
 
 一期有两条缺口挂着**从没被仪器测量过的**「重启条件」：PTC 等「批量步的收益标签」，去重等

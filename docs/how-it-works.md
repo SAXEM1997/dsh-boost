@@ -6,7 +6,7 @@
 ## 问题：每次请求都回放全部历史
 
 DSH 每次模型请求都会回放全部历史。本机 300 个最长会话的实测聚合（`npm run --silent stats`——
-不带 `--silent` 时 npm 会把 `> dsh-boost@0.4.1 stats` 横幅打进 stdout，机器解析请用 `--silent`
+不带 `--silent` 时 npm 会把 `> dsh-boost@0.4.2 stats` 横幅打进 stdout，机器解析请用 `--silent`
 或直接 `node scripts/session-stats.mjs`；快照时刻 `2026-11-19T03:13:21Z`）：54,141 步、
 54,088 个请求，合计 10,575,904,022 raw token。按步均值 195,340 token，按请求均值 195,531、
 中位 187,681；97.01% 的输入是缓存读。工具回执是体积主体（bash 61.75%、read 22.13%、
@@ -238,7 +238,7 @@ net = savedTokens − overheadTokens
 
 ### 两个「值不值得做下一个功能」的分母
 
-`scripts/session-stats.mjs` 除了 §2.1 的聚合，还量两件事（0.4.1 起）。它们都是**天花板**，
+`scripts/session-stats.mjs` 除了 §2.1 的聚合，还量两件事（0.4.2 起）。它们都是**天花板**，
 不是承诺：
 
 | 指标 | 定义 | 300 个最长会话上的实测 | 能证明什么 / 不能证明什么 |

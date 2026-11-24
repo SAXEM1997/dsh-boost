@@ -1,6 +1,6 @@
 {
   "name": "dsh-boost",
-  "version": "0.4.1",
+  "version": "0.4.2",
   "description": "Cut DSH token usage by projecting tool receipts and substituting deterministic read-only calls.",
   "type": "module",
   "license": "Apache-2.0",
@@ -39,6 +39,8 @@
     "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.test.json && tsc -p tsconfig.client.json",
     "test": "node scripts/run-tests.mjs",
     "stats": "node scripts/session-stats.mjs",
+    "quality:tasks": "node scripts/quality-tasks.mjs",
+    "quality:compare": "node scripts/quality-compare.mjs",
     "ci": "npm run typecheck && npm test && npm run test:regression && npm run build",
     "verify:package": "node scripts/verify-package.mjs",
     "prepublishOnly": "npm run ci && npm run verify:package -- --prebuilt",
