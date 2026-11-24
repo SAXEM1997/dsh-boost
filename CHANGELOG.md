@@ -10,7 +10,35 @@ Design rationale lives in `docs/superpowers/specs/`; the release-acceptance proc
 
 ## [0.4.4] - 2026-11-24
 
-A/B 跑法（`docs/quality-runbook.md`）与它需要的最后一块机械动作。
+A/B 跑法（`docs/quality-runbook.md`）、它需要的最后一块机械动作，以及通读两轴对 0.4.2/0.4.3 的
+复审修复。
+
+### 复审修复（两轴：Standards + Spec）
+
+- **`tokens` 记错了来源**：runbook 让操作者从 `boost status` 取 `data.usage.totalTokens`——那个
+  字段不存在，`totalTokens` 只出现在固定开销分解里（778）。照做会让两臂的 token 数恒为 778，
+  `tokenDelta` 恒为 0，**质量仪唯一的数值输出被静默废掉**。改为从
+  `session-stats.mjs --sessions` 的 `sessions[].tokens.total` 取。
+- **`isFinal` 只看带 `command` 的调用**：验证命令之后若还有 `read`/`grep`/`mcp__ssh__*`，仍判
+  `isFinal: true`，而「终态 = 已验证」的前提已被打破。改为按全部 `tool/call` 判定，并补一条
+  「判定后还有 read」的用例。
+- **又两处 0.3 的「399」**：`operating.md` 的回滚节与 `how-it-works.md` 的惰性状态句仍写
+  `selected + []` 剩 399——上一版只改了三处副本，它有两处。这次连「缓存冷时 fail-open 付 399」
+  的限定一起写清。
+- **版本归属再被我毁一次**：0.4.4 的提交又把文档里的 `0.4.3` 批量改成 `0.4.4`，把 0.4.1 的两个
+  分母、0.4.2 的质量仪、0.3.11 的 `test/regression` 全挂到 0.4.4 名下。按 CHANGELOG 逐句改回；
+  RELEASE 的版本清单原本还有一份重复的 0.3.8–0.3.12 副本，已删并补上 0.4.2/0.4.3。
+- **`--min-pairs 0` 不是门**：`Number()` 直接进比较，0 会让一对就得出 `no-difference-observed`。
+  现在要求正整数，否则 exit 2。
+- **结果文件形状**：runbook §6 让把两臂塞进一个文件，而比较脚本每臂读一个文件，照做会 exit 2。
+  改成 `base.json` / `treat.json` / `meta.json` 三份。
+- **判据符号写反**：`quality.md` 写「token 差为正」，而 `tokenDelta = treatment - baseline`，
+  正确条件是**小于 0**。
+- **`src/admission/fixed-cost.ts` 头注释**仍是 0.3 语义（「every request」「both stay visible」）。
+- 文档：`M5` 补一句定义；验证命令清单补齐实现里的三条；compare 输出补 `tokenPairs`/
+  `baselineTokens`/`treatmentTokens`/`minPairs`；「三个例外」改为「两条 fail-open + 正常可见」；
+  `prefix_drops` 的正当原因补上插件自己的可见性翻转；`task` 增加 `taskTruncated`，无用户消息时
+  写 `null` 而不是丢键；`2,249` → `2,271`（并注明是快照）。
 
 `quality-tasks.mjs` 原来只给「哪个会话以验证命令收尾」，不给任务陈述——那就没法重放。现在多带
 一个 `task` 字段（会话的第一条用户消息，截到 400 字符），跑实验的人不必回头翻日志。其余是清单：

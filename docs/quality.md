@@ -23,12 +23,13 @@
 
 ### 挑任务
 
-从 `session.v4.jsonl.zstd` 里找**验证命令**——`npm test`、`npm run ci`、`npx tsc`、`pytest`、
-`cargo test`、`go test`、`make test`——每个会话取最后一次，标出它是否是该会话的最后一个调用
+从 `session.v4.jsonl.zstd` 里找**验证命令**——`npm test`、`npm run ci`、`npm run typecheck`、
+`npm run verify:package`、`npm run test:regression`、`npx tsc`、`pytest`、`cargo test`、`go test`、
+`make test`——每个会话取最后一次，标出它是否是该会话的最后一个调用
 （`isFinal`）。只有 `isFinal` 的会话才能整体重放：否则这个判定不是终态，任务在它之后还继续了。
 
-在 2,249 个会话上的实测：**48 个候选，其中 2 个 `isFinal`**。语料很小，这正是「装置能交、结论
-不能交」的现实理由。
+截至 0.4.3 的语料实测：**2,271 个会话，48 个候选，其中 2 个 `isFinal`**。语料很小，这正是
+「装置能交、结论不能交」的现实理由。（会话数会随语料增长，48/2 是个快照，不是常量。）
 
 ### 比结果
 
@@ -41,6 +42,9 @@
 | `tokenDelta` | 只在**两端都报了 token** 的配对上求和；一个配对都没有时是 `null` |
 | `mismatches` | 逐条列出 `{id, baseline, treatment}`——**这张表比一致率有用**，它给出失败模式 |
 | `missing` | `baselineOnly` / `treatmentOnly`，两边没配上的任务 |
+| `tokenPairs` | 两端都报了 token 的配对数——`tokenDelta` 只在这批上求和 |
+| `baselineTokens` / `treatmentTokens` | 上述配对的合计；没有配对时是 `null` |
+| `minPairs` | 本次的阈值（默认 12），写进报告是为了让读者知道门槛 |
 | `conclusion` | `insufficient-pairs`（少于 `--min-pairs`，默认 12）/ `no-difference-observed` / `difference-observed` |
 
 判定规则是预先定死的：**样本不足就说不足**，不用一个小样本的一致率去宣称安全。
@@ -55,7 +59,8 @@
    - 基线：`scope.json` 里 `projection: "off"`、`shadow: false`；
    - 处理：`projection: "on"`、`shadow: false`。
 3. 两遍都要记 `{id, ok, tokens}`：`ok` 来自第 1 步那条验证命令的**真实**结果（不是模型的自我
-   报告），`tokens` 用 `boost status` 的 `totalTokens`，或宿主自己的用量。
+   报告）；`tokens` 取 `node scripts/session-stats.mjs --sessions <dir>` 输出里该会话的
+   `tokens.total`——**不是** `boost status`，那个接口没有会话级累计。
 4. `node scripts/quality-compare.mjs --baseline base.json --treatment treat.json`。
 
 ## 它能证明什么、不能证明什么
@@ -74,10 +79,12 @@
 
 ## 之后的判据
 
-M5 交完之后，二期每加一项干预，前置条件变成：
+质量仪（内部称 M5，指二期路线图里「先有质量仪再谈新干预」那一步）交完之后，每加一项干预的
+前置条件变成：
 
 1. 有基线（质量一致率 + token 差），且样本 ≥ `--min-pairs`；
 2. 一致率 100%（或所有不一致都有可解释的失败模式，且不是这次干预引入的）；
-3. token 差为正，且不小于该干预已知的收益天花板。
+3. 处理臂更省——`tokenDelta` 是 `treatment - baseline`，所以这一条要求它**小于 0**，且
+   `|tokenDelta|` 不小于该干预已知的收益天花板。
 
 三条不满足，就不加。这条规则写在 issue #20 的收尾评论里，避免下一轮又从「感觉能省」开始。

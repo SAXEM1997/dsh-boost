@@ -6,7 +6,7 @@
 ## 0. 前置（十分钟）
 
 - [ ] 插件已装、DSH 已重启，设置页能看到「Token 效率」。
-- [ ] 本会话的工作区**已选中**（`boost` 工具可见——不可见就没法记 `tokens`）。
+- [ ] 本会话的工作区**已选中**（`boost` 工具可见——否则你看不到投影是否真的生效）。
 - [ ] 记下三件事，写进结果文件头部：
       `git -C <repo> rev-parse HEAD`、`npm view dsh-boost version`、`date -u +%FT%TZ`。
 - [ ] 冻结工作区：`git status --porcelain` 必须为空；实验期间**不改代码、不改插件版本**。
@@ -22,8 +22,9 @@ node scripts/quality-tasks.mjs --sessions "$DSH_HOME/sessions" --out /tmp/tasks.
 只取 `isFinal: true` 的那些（判定不是终态的会话不能整体重放）。在当前语料上只有个位数——
 **个位数就只能得到个位数的结论**，见第 5 步。
 
-- [ ] 打开 `/tmp/tasks.json`，人工过一遍 `task` 字段：它是那次会话的开场白，可能带上下文
-      （例如「只读评审」），跑之前把它改成能独立执行的陈述。
+- [ ] 打开 `/tmp/tasks.json`，人工过一遍 `task` 字段：它是那次会话的**第一条非空用户消息**，
+      可能带上下文（例如「只读评审」），跑之前把它改成能独立执行的陈述。`taskTruncated: true`
+      表示被截到 400 字符；`task: null` 表示那会话没有用户消息，不能直接用。
 - [ ] 每条记下**怎么判定 `ok`**——必须是能机器读的东西（退出码、`ℹ fail 0`、`git status --porcelain`
       为空），不是「看起来对了」。
 
@@ -33,9 +34,17 @@ node scripts/quality-tasks.mjs --sessions "$DSH_HOME/sessions" --out /tmp/tasks.
 - [ ] `boost status` 确认：`looksAt.data.scope.projection === 'off'`、`shadow === false`。
 - [ ] 对每个任务：**新开一个会话**，粘贴任务陈述，让它跑到终态；记一行
 
-      { "id": "<sessionId 或自定义名>", "ok": true|false, "tokens": <totalTokens> }
+      { "id": "<sessionId 或自定义名>", "ok": true|false, "tokens": <该会话的 totalTokens> }
 
-      `tokens` 取 `boost status` 的 `data.usage.totalTokens`（该会话的累计），或宿主自己给的数。
+      `tokens` **不能**从 `boost status` 取：那个接口没有会话级累计，`totalTokens` 只出现在
+      固定开销的分解里（778），把它当用量会让 `tokenDelta` 恒为 0。用仓里的统计脚本：
+
+      ```bash
+      node scripts/session-stats.mjs --sessions "$DSH_HOME/sessions" --out /tmp/stats.json
+      # 从 /tmp/stats.json 的 sessions[] 里取该会话的 tokens.total
+      ```
+      找不到会话（例如刚跑完还没落盘）就留空——`quality-compare.mjs` 会把它排除出
+      `tokenDelta`，并报 `tokenPairs` 少了几个。
 - [ ] 全部跑完后**不要**改工作区。
 
 ## 3. 跑处理臂（`projection: on`）

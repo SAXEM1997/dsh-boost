@@ -360,21 +360,18 @@ tarball 会拉进 `dsh-spill-policy@rc.5` 并 `ERESOLVE`（当时实测 exit 1�
 安装规格：**`dsh-boost@^0.4.4`**。版本清单以 `npm view dsh-boost versions --registry=https://registry.npmjs.org/` 为准——这里不记条数，因为每发一版它就会过期一次；其中 `0.0.0-stage` 是 npm 自动创建的占位版本，不要把它当成
 “更早的 API”：
 
-- `0.4.4` — 当前 `latest`；质量仪的装置（`scripts/quality-tasks.mjs` / `quality-compare.mjs`）与 `docs/quality.md` 的边界声明
+- `0.4.4` — 当前 `latest`；A/B 跑法（`docs/quality-runbook.md`）与 `task` 字段
+- `0.4.3` — 两轴复审修复：同一事实的三处副本统一、机械替换造成的版本归属回滚
+- `0.4.2` — 质量仪装置（`scripts/quality-tasks.mjs` / `quality-compare.mjs`）与 `docs/quality.md`
 - `0.4.1` — PTC 与去重的两个分母（`continuation` 1.47% / `duplicates` 0.24%），快照重生成
 - `0.4.0` — `boost` 工具与协议段共用可见性判定；作用域外会话的固定开销从 399 降到 0
 - `0.3.14` — `SCOPE_CODE_TABLE` 改穷尽映射（漏登记不再静默降级成 `ERR_BOOST_INTERNAL`）
 - `0.3.13` — 设置页收据面板按族分组、净额列出三个被减项
-- `0.3.12` — 发布门负例补到十二个 check 实例
-- `0.3.11` — 取回完整性检查与冒烟 runner（`test/regression/`）
-- `0.3.10` — 发布门逐组负例（`scripts/gate-negatives.mjs`）
-- `0.3.9` — 截断视图收敛成一份、蒸馏基线用真实 locator
-- `0.3.8` — 蒸馏的节省与被弃原文分开记账（`saved_tokens`/`spilled_bytes`）
 - `0.3.12` — 发布门负例补到十二个 check 实例；完整性检查的「能失败」用例改走注入接缝
 - `0.3.11` — 取回完整性检查与冒烟 runner（`test/regression/`）
-- `0.3.10` — 发布门逐组负例（`verify:negatives`）
+- `0.3.10` — 发布门逐组负例（`scripts/gate-negatives.mjs`）
 - `0.3.9` — 蒸馏：截断视图收敛成一份、基线用真实 locator、`spilled_bytes` 只在真写过时上报
-- `0.3.8` — 设置页：退出码等信号行在截断后仍保留
+- `0.3.8` — 蒸馏的节省与被弃原文分开记账（`saved_tokens`/`spilled_bytes`）；设置页保留退出码等信号行
 - `0.3.7` — 文档：版本清单不再记条数，改为指向 `npm view`
 - `0.3.6` — 未知原因的墓碑不再冻结回执、临时文件按 pid 存活判定
 - `0.3.5` — 回放次数改回 `1 + 剩余步数`、采用保留 §5.4-4 信号行、墓碑只认已知原因
@@ -776,7 +773,7 @@ DSH 宿主后的行为、§3 的 20 任务回退流程（人工）、§5 的统�
 **未交付、因此不在上表可勾选范围：§3 的 20 条真实任务语料。**
 `test/regression/` 提供的是 runner 与**合成**任务集（`tasks.jsonl`，6 条），不是 20 条真实回放
 （2026-11-18 用户明确否决“搭回放集”的语料部分，见文首记录）。runner 与取回完整性检查已于
-0.4.4 交付：前者 `npm run test:regression`，后者 `test/regression/integrity.ts` 的三条断言
+0.3.11 交付：前者 `npm run test:regression`，后者 `test/regression/integrity.ts` 的三条断言
 （落库的是完整原文、页脚点名返回的 locator、被省字节与两个窗口闭合），并接进 `npm test`。
 「无数据丢失」这条不变量因此**已核实到插件能看见的边界**——宿主 `SpillBackend` 是只写的，
 「宿主真的把字节还回来」仍属宿主的责任。

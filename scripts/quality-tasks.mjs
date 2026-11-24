@@ -118,17 +118,22 @@ function candidatesOf(path) {
       parsed = {}
     }
     const command = typeof parsed?.command === 'string' ? parsed.command.trim() : ''
-    if (command === '') continue
+    // Every call counts towards `isFinal`, including the ones that carry no
+    // command: a session that ends on a `read` after the verdict did not stop
+    // there, so its verdict is not the terminal state.
     calls.push({ step: data.step, turn: data.turn, name: data.name, command, index: calls.length })
   }
-  const verdicts = calls.filter((call) => VERIFICATION.test(call.command))
+  const verdicts = calls.filter((call) => call.command !== '' && VERIFICATION.test(call.command))
   if (verdicts.length === 0) return undefined
   const last = verdicts[verdicts.length - 1]
   return {
     sessionId,
     // Truncated: the runbook pastes this as the task prompt, and a 40k-character
-    // session opener would not survive that hand-off.
-    task: firstUserText === undefined ? undefined : firstUserText.slice(0, TASK_CHARS),
+    // session opener would not survive that hand-off. `taskTruncated` says the
+    // text was cut, and `null` says the session had no user message at all —
+    // both are facts the operator needs before pasting it as a task.
+    task: firstUserText === undefined ? null : firstUserText.slice(0, TASK_CHARS),
+    taskTruncated: firstUserText === undefined ? false : firstUserText.length > TASK_CHARS,
     turn: last.turn,
     step: last.step,
     tool: last.name,

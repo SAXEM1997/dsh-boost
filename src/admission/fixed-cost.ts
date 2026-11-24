@@ -1,20 +1,21 @@
 /**
- * Fixed overhead: what the plugin costs on **every** request.
+ * Fixed overhead: the **ceiling** on what the plugin costs per request.
  *
- * The protocol section and the `boost` tool schema are injected regardless of
- * whether the plugin ever saves a token, so the design budgets them at ≤800
- * tokens per request and requires the measured value in `boost status`
- * (design §6.1). The measurement uses the host's own fixed-density estimator
+ * The protocol section and the `boost` tool schema are budgeted at ≤800 tokens
+ * together, and `boost status` reports the measured figure (design §6.1). Since
+ * 0.4 both halves share one visibility gate, so a request in a workspace that
+ * is not in scope pays **0**; this measurement is the worst case, not the
+ * per-request cost. The measurement uses the host's own fixed-density estimator
  * (`estimateSystemMessage` / `estimateToolsTokens` from
  * `@deepseek-ai/dsh-token-meter/estimate`), a dynamic import of an undeclared package: a missing
  * package must degrade to `'unknown'`, never to a fabricated zero, because the
  * audit reader cannot tell a real zero from an absent measurement
  * (design §9: do not fabricate).
  *
- * Both components stay visible. The protocol section alone is not the number
+ * Both components are counted. The protocol section alone is not the number
  * the design names: the `boost` tool schema is another ~399 tokens, and a
- * status figure that silently omits it understates the cost it is named after.
- * `fixedOverheadTokens` is therefore the total, with
+ * status figure that silently omits it understates the ceiling it is named
+ * after. `fixedOverheadTokens` is therefore the sum, with
  * `fixedOverhead.protocolTokens` / `fixedOverhead.toolSchemaTokens` alongside.
  *
  * This is a **startup/status-time** measurement, never a per-request one:

@@ -37,7 +37,13 @@ function parseArgs(raw) {
       args.treatment = value
       index += 1
     } else if (flag === '--min-pairs' && value !== undefined) {
-      args.minPairs = Number(value)
+      // A gate that accepts `0` is not a gate: one pair would then be reported
+      // as `no-difference-observed`.
+      const parsed = Number(value)
+      if (!Number.isInteger(parsed) || parsed < 1) {
+        throw new Error(`--min-pairs must be a positive integer, got ${value}`)
+      }
+      args.minPairs = parsed
       index += 1
     } else {
       throw new Error(`unknown argument: ${flag}`)
