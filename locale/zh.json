@@ -132,5 +132,7 @@
   "DISTILL_NOT_IN_CONFIG": "这个宿主的 config 里没有 `distillation` 段：多半是宿主进程还跑着 0.3.0 之前的构建。重启宿主后这一节才会出现。",
   "EMPTY_LIST": "（无）",
   "HINT_DISTILL_OFF": "蒸馏关闭时不产生这些数字：没有调用，也没有产物。",
-  "LABEL_WORKSPACE_COUNT": "已选 {selected} / 共 {total}"
+  "LABEL_WORKSPACE_COUNT": "已选 {selected} / 共 {total}",
+  "LABEL_DISTILL_SAVED": "蒸馏采用后省下的 token",
+  "LABEL_DISTILL_SPILLED": "被拒但仍落盘的原文（字节）"
 }

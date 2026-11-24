@@ -58,12 +58,12 @@ Node.js `>=24.9.0`，DSH `>=0.2.2-rc.4 <0.2.3-0`（**区间**，不是精确钉�
 上可用；v1 面向 web profile。
 
 ```bash
-dsh plugin --profile <name> add dsh-boost@^0.3.6 --registry=https://registry.npmjs.org/
+dsh plugin --profile <name> add dsh-boost@^0.3.9 --registry=https://registry.npmjs.org/
 ```
 
 `dsh plugin` 要求指定 profile，其余参数转发给该 profile 里的 pnpm（所以 pnpm 必须在 PATH
 上）；本地 checkout 安装先 `npm run build`，再把绝对路径传给 `add`。npmjs 上的 `latest` 是
-`0.3.6`；镜像可能滞后，在意 registry 时显式带上 `--registry`。版本历史、镜像与
+`0.3.9`；镜像可能滞后，在意 registry 时显式带上 `--registry`。版本历史、镜像与
 `0.0.0-stage` 的坑见[运维](docs/operating.md#安装与版本)。装完**必须重启 DSH**（插件在宿主
 启动时加载）；web profile 就是重启 `dsh web`。
 
@@ -98,7 +98,7 @@ workspace UUID，不是路径；找不到时单用户机器可以用 `"mode": "g
 | 它做什么 | 内容 |
 |---|---|
 | 看 | 降级码与处置、替换节省的上下界、投影毛额/净额、取回次数、收据计数、常驻开销、生效配置（只读） |
-| 看（蒸馏） | 开关、适用族、触发阈值、输出上限、等待上限、路由；以及 `calls`/`tokens`/`adopted`/`rejected`/`fallback` 与送去蒸馏的字符数合计 |
+| 看（蒸馏） | 开关、适用族、触发阈值、输出上限、等待上限、路由；以及 `calls`/`tokens`/`adopted`/`rejected`/`fallback`/`saved_tokens`（蒸馏自己省下的）/`spilled_bytes`（被弃但仍落盘的原文）与送去蒸馏的字符数合计 |
 | 写 | `<dshHome>/boost/scope.json` 的四个字段：`mode`、`workspaceIds`、`shadow`、`projection` |
 
 **蒸馏的配置改不了**：`distillation.*` 在 profile 的 `cordis.patch.yml` 里，不在 `scope.json`，页面只

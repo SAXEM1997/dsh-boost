@@ -8,6 +8,23 @@ This file records user-visible changes. Format follows Keep a Changelog; version
 Design rationale lives in `docs/superpowers/specs/`; the release-acceptance procedure is in
 `docs/RELEASE.md`.
 
+## [0.3.9] - 2026-11-24
+
+### 修复
+
+- 截断视图的模板从三份手抄收敛成一份（`projection/apply.ts` 的 `truncationView`）：投影、影子下界、字节门、回本门、蒸馏基线现在调同一个函数。0.3.5 漏信号行、0.3.8 漏页脚，两次漂移都出在这三份副本上。
+- 蒸馏基线的 locator 改用真实的：此前传空串，比同回执的字节门少 17 B / 4 token；注释里「决策时产物还不存在」的说法也不成立——`outcome.locator` 就在手边。
+- 采用路径上的宿主页脚调用加了保护：这是该路径唯一未加 try 的宿主调用，抛错会冒到外层 `catch` → 返回原文，已采用的正文与收据双失，且下次重放重复。现在失败只损失测量（`before`/`after` 记 unknown），不损失决定。
+- `distill_spilled_bytes` 只在真正落盘的那次上报：表命中重放复用钉住的句柄、不写盘，此前每次重放都会再报一次原文大小，`status.distill.spilled_bytes` 随重放次数膨胀。落盘后才失败的路径（页脚抛错、产物写失败）现在也带上这个尺寸——它们留下的孤儿此前没有任何痕迹。
+- `.tmp` 回收的测试改成用真实存活的 pid（`process.ppid`）与一个真的退出过的 pid：此前「活写者」用例走的是「本进程短路」，另一进程的分支从未被执行，删掉保护仍然全绿。
+
+### 文档与测试
+
+- 新增 `test/docs-version.test.ts`：README×2、RELEASE、operating、scripts/README 的安装规格与 `latest` 陈述必须等于 `package.json` 的版本。连续四个版本都有文档落后一到两版，改用会失败的测试盯住。
+- `operating` 的 `status.distill` 字段说明补 `saved_tokens`/`spilled_bytes`，并把 `failed` 改为真实的 `fallback`；字节门补「+ 信号行」；设置页蒸馏一节新增两行；README 的字段枚举同步。
+- ADR 0001 补 `not-worth-it` 不钉的理由；`decide.ts` 的模块 docstring 与墓碑注释改写（`with the` 悬空句、从未存在过的「旧构建墓碑」论据）。
+- CHANGELOG 0.3.6 的「只清十分钟以前的」改为实际的「按 pid 存活判定」。
+
 ## [0.3.8] - 2026-11-24
 
 ### 新增
@@ -39,9 +56,9 @@ Design rationale lives in `docs/superpowers/specs/`; the release-acceptance proc
 - 新增的墓碑测试此前写的是一个没人读的文件名，删掉守卫仍会通过；改成先用真实路径产出一条墓碑、再手工改坏它的 `rejected` 字段，并断言模型被调用一次。
 - 「没有 `horizonFor` 就弃权」的用例此前无法失败（默认 horizon 20 两条路径都放行）；改成把配置 horizon 设为 0，回落即拒绝。
 - 保留策略补两条测试：单个产物大于假定值时立即测量（九个 12 KiB 产物不再把目录推到上限之上）、陈旧 `.tmp` 被回收而活写者的不动。
-- 裁剪不再无条件删除 `*.tmp`：只清十分钟以前的。此前每写一次就把所有临时文件删光，另一个进程正在写的那个会让它的 `rename` 报 ENOENT，把一次丢失的竞争变成一次丢失的蒸馏。
+- 裁剪不再无条件删除 `*.tmp`：按 pid 存活判定，只回收所有者已消失的（`kill(pid, 0)` 报 `ESRCH`）与本进程以外的、名字里带 pid 的临时文件。此前每写一次就把所有临时文件删光，另一个进程正在写的那个会让它的 `rename` 报 ENOENT，把一次丢失的竞争变成一次丢失的蒸馏。
 - `verifyQuotes` 的 JSDoc 改成与实现一致（零引用失败）；`docs/how-it-works.md` 的字节门补上信号行；`src/distill/decide.ts` 的回本注释与模块 docstring 同步为 `1 + 剩余步数` 与「含信号行」。
-- 文档版本线推进到 0.3.5/0.3.6：`RELEASE` 的安装规格与版本清单（补 0.3.5、0.3.4 降为历史、计数二十条）、`operating` 的 `latest` 与 `@^0.3.5`、README×2 的安装示例。
+- 文档版本线推进到当时的 latest：`RELEASE` 的安装规格、`operating` 的 `latest`、README×2 的安装示例。
 
 ## [0.3.5] - 2026-11-24
 

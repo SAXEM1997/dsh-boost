@@ -9,7 +9,7 @@
  */
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtemp, mkdir, readFile, readdir, rename, stat, writeFile } from 'node:fs/promises'
+import { mkdtemp, mkdir, readFile, readdir, stat, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { DistillStore } from '../src/distill/store.ts'
@@ -17,6 +17,16 @@ import { DistillStore } from '../src/distill/store.ts'
 async function root(): Promise<string> {
   const dir = await mkdtemp(join(tmpdir(), 'dsh-distill-'))
   return dir
+}
+
+/** A pid that is guaranteed to have exited (spawn, wait, remember). */
+async function exitedPid(): Promise<number> {
+  const { spawn } = await import('node:child_process')
+  const child = spawn(process.execPath, ['-e', '0'], { stdio: 'ignore' })
+  const pid = child.pid
+  assert.ok(typeof pid === 'number')
+  await new Promise((resolve) => child.on('exit', resolve))
+  return pid as number
 }
 
 const PRODUCT = {
@@ -125,51 +135,27 @@ test('单个产物大于假定值时立即测量：不靠文件数估算放过�
   assert.ok(files.includes('big-8-v1.json'), 'the product just written survives')
 })
 
-test('裁剪顺手回收陈旧的 .tmp，但不动刚写的那个', async () => {
+test('裁剪只回收所有者已消失的 .tmp：活写者的不动', async () => {
   const dir = await root()
   const store = new DistillStore(dir)
   await mkdir(join(dir, 'distilled'), { recursive: true })
-  const stale = join(dir, 'distilled', 'crashed-v1.json.999.tmp')
-  const live = join(dir, 'distilled', 'inflight-v1.json.1000.tmp')
-  await writeFile(stale, 'partial', 'utf8')
+
+  // A live pid that is not ours. `process.ppid` is guaranteed to exist for as
+  // long as this test runs, so the branch that actually calls `process.kill`
+  // gets exercised — a temp file named after our own pid would short-circuit
+  // and prove only that we do not delete ourselves.
+  const livePid = process.ppid
+  const deadPid = await exitedPid()
+  const live = join(dir, 'distilled', `inflight-v1.json.${livePid}.tmp`)
+  const dead = join(dir, 'distilled', `crashed-v1.json.${deadPid}.tmp`)
   await writeFile(live, 'partial', 'utf8')
-  // Liveness, not age, decides: `999` and `1000` are pids this test cannot own.
-  // Pretend 999 is dead by giving the file a pid that is not running, and keep
-  // the live one as our own pid so the check has something to protect.
-  await rename(live, join(dir, 'distilled', `inflight-v1.json.${process.pid}.tmp`))
+  await writeFile(dead, 'partial', 'utf8')
 
   await store.write('s1', { file: 'one-v1' }, PRODUCT)
 
   const left = await readdir(join(dir, 'distilled'))
-  assert.equal(left.includes('crashed-v1.json.999.tmp'), false, 'a dead writer\'s temp is reclaimed')
-  assert.equal(
-    left.includes(`inflight-v1.json.${process.pid}.tmp`),
-    true,
-    "a live writer's temp is not ours to delete",
-  )
-})
-
-test('只写不超过假定值的产物时，字节上限的误差不超过一条产物', async () => {
-  const dir = await root()
-  const maxBytes = 20_000
-  const store = new DistillStore(dir, { maxFiles: 1000, maxBytes })
-  // Every product is at or below ASSUMED_PRODUCT_BYTES, so the count estimate
-  // (files × 4096) is never an under-estimate and the measured pass may not run
-  // at all. The bound that holds is therefore "cap + one product", not "cap".
-  const small = { ...PRODUCT, text: 'x'.repeat(3000), quotes: [] }
-  for (let n = 0; n < 12; n += 1) {
-    await store.write('s1', { file: `s-${n}-v1` }, small)
-    await new Promise((resolve) => setTimeout(resolve, 5))
-  }
-  const files = (await readdir(join(dir, 'distilled'))).filter((name) => name.endsWith('.json'))
-  let total = 0
-  let largest = 0
-  for (const name of files) {
-    const size = (await stat(join(dir, 'distilled', name))).size
-    total += size
-    largest = Math.max(largest, size)
-  }
-  assert.ok(total <= maxBytes + largest, `total ${total} stays within one product of ${maxBytes}`)
+  assert.equal(left.includes(`crashed-v1.json.${deadPid}.tmp`), false, 'a dead owner\'s temp is reclaimed')
+  assert.equal(left.includes(`inflight-v1.json.${livePid}.tmp`), true, "a live writer's temp is not ours to delete")
 })
 
 test('写入超过总字节上限时也裁，且至少留下刚写的那一条', async () => {

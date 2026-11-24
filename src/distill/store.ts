@@ -71,8 +71,15 @@ const ASSUMED_PRODUCT_BYTES = 4096
  * Temp files are named `<target>.<pid>.tmp`, so liveness — not age — decides who
  * may reclaim one. A live writer's temp file is deleted at our peril: its
  * `rename` would then fail with ENOENT and a distillation would be lost to a
- * race it never entered. A pid that cannot be signalled is either dead or
- * recycled; both mean nobody will ever rename that file, so it is ours to drop.
+ * race it never entered.
+ *
+ * Only `ESRCH` counts as gone. `EPERM` (the pid belongs to another user) and a
+ * recycled pid both leave the file behind forever, since nothing else reclaims a
+ * temp file: the caps never count them. That leak is accepted — the alternative
+ * is guessing a timeout, and a wrong guess deletes a live writer's work. The
+ * check is host-local too: a pid from another machine or pid namespace is always
+ * `ESRCH` here, so a shared `dshHome` can lose its temp files (ADR 0001 already
+ * says products do not travel across machines).
  */
 function ownerGone(name: string): boolean {
   const match = /\.(\d+)\.tmp$/.exec(name)

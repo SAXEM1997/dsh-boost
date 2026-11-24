@@ -91,8 +91,8 @@ import type { Candidate, Guard, Plan } from '../gate/plan.js'
 import { isPosixOnly } from '../host/platform.js'
 import type { ProjectionCounters } from '../projection/counters.js'
 import { PROTOCOL_NAME, PROTOCOL_ORDER, PROTOCOL_TEXT } from '../prompt/protocol.js'
-import { projectApply, projectShadow, signalSuffix } from '../projection/apply.js'
-import { renderHeadLine, truncate } from '../projection/truncate.js'
+import { projectApply, projectShadow, truncationView } from '../projection/apply.js'
+import { truncate } from '../projection/truncate.js'
 import type { FormatFooter, ProjectionMode, SpillBackend, SpillHandle } from '../projection/apply.js'
 import { canonicalise } from '../projection/canonicalise.js'
 import type { CanonicalReceipt } from '../projection/canonicalise.js'
@@ -2190,8 +2190,14 @@ async function finishDistillDecision(
   if (outcome.locator !== undefined) deps.retrievals?.record(ctx.sessionId, outcome.locator)
 
   // Resolved here rather than threaded through: the distill decision already
-  // resolved one copy, and the seam is allowed to answer differently.
-  const view = truncationViewOf(target, deps.config, family, await resolveFooterFormatter(deps))
+  // resolved one copy, and the seam is allowed to answer differently. Adoption
+  // implies the decision had a formatter, but the seam may answer `undefined`
+  // on the second call; that costs the measurement, not the decision.
+  const formatter = await resolveFooterFormatter(deps)
+  const view =
+    formatter === undefined
+      ? undefined
+      : truncationViewOf(target, deps.config, family, formatter, outcome.locator ?? '')
   const priced = view === undefined || estimate === undefined
     ? { before: undefined, after: undefined }
     : { before: safeEstimate(estimate, view), after: safeEstimate(estimate, outcome.content) }
@@ -2220,26 +2226,39 @@ async function finishDistillDecision(
  *
  * The same shape an applied projection commits — head line, head, footer, tail,
  * signals — so a distill receipt's `before` names the same bytes a projection
- * receipt would have carried. The footer uses a probe locator and an empty
- * retrieval hint: at decision time no artifact exists, and the probe is a few
- * tokens shorter than a real `retrievalHint`, which keeps the comparison on the
- * conservative side.
+ * receipt would have carried. It takes the real locator, because an adopted
+ * distillation has already spilled: pricing the baseline with an empty one would
+ * make this receipt's `before` a few tokens shorter than the same receipt's byte
+ * gate measured, and the two numbers would describe different bytes.
+ *
+ * The retrieval hint stays empty. The host footer renders it after the locator,
+ * and the hint the model will actually see is only known once the artifact
+ * exists — omitting it keeps the baseline on the conservative side.
  */
 function truncationViewOf(
   text: string,
   cfg: BoostConfig,
   family: ToolFamily,
-  formatFooter: FormatFooter | undefined,
+  formatFooter: FormatFooter,
+  locator: string,
 ): string | undefined {
   const params = cfg.projection[family]
   if (params === undefined) return undefined
   const truncation = truncate(text, params)
   if (truncation === null) return undefined
-  const footer =
-    formatFooter === undefined
-      ? ''
-      : formatFooter({ kind: 'exact', count: truncation.omittedBytes }, { locator: '', retrievalHint: '' })
-  return `${renderHeadLine(truncation)}\n${truncation.head}\n${footer}\n${truncation.tail}${signalSuffix(truncation)}`
+  // The host formatter is the one call on this path that could throw: the
+  // receipt is already written and the model's content already replaced, so an
+  // escaping error would unwind into `return decision` — the model gets the raw
+  // text, the adoption is unrecorded, and the next replay repeats it. A footer
+  // that cannot be rendered costs the measurement (`before`/`after` stay
+  // unknown), never the decision.
+  let footer: string
+  try {
+    footer = formatFooter({ kind: 'exact', count: truncation.omittedBytes }, { locator, retrievalHint: '' })
+  } catch {
+    return undefined
+  }
+  return truncationView(truncation, footer)
 }
 
 /**

@@ -349,6 +349,8 @@ export function App() {
                       <Row label={c.LABEL_DISTILL_ADOPTED} value={tokens(c, distillStatus?.adopted)} />
                       <Row label={c.LABEL_DISTILL_REJECTED} value={tokens(c, distillStatus?.rejected)} />
                       <Row label={c.LABEL_DISTILL_FALLBACK} value={tokens(c, distillStatus?.fallback)} />
+                      <Row label={c.LABEL_DISTILL_SAVED} value={tokens(c, distillStatus?.saved_tokens)} />
+                      <Row label={c.LABEL_DISTILL_SPILLED} value={tokens(c, distillStatus?.spilled_bytes)} />
                     </dl>
                     <div className="boost-settings__notice" role="note">
                       <p>{c.HINT_DISTILL_CALLS}</p>

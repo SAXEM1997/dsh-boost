@@ -142,7 +142,20 @@ function omissionNote(omittedBytes: number): string {
  * locator text is not known before that write, this is a lower bound.
  */
 function projectedText(truncation: Truncation): string {
-  return `${renderHeadLine(truncation)}\n${truncation.head}\n${omissionNote(truncation.omittedBytes)}\n${truncation.tail}${signalSuffix(truncation)}`
+  return truncationView(truncation, omissionNote(truncation.omittedBytes))
+}
+
+/**
+ * The truncation view's exact bytes: marker, head, footer, tail, then signals.
+ *
+ * One renderer for every caller that must price or compare a view — the applied
+ * projection, shadow mode's lower bound, the byte gate, the payback gate and the
+ * adopted distillation's baseline. Three hand-copied versions of this template
+ * drifted twice (0.3.5 lost the signals, 0.3.8 lost the footer); a shared
+ * function makes the next drift impossible instead of merely unlikely.
+ */
+export function truncationView(truncation: Truncation, footer: string): string {
+  return `${renderHeadLine(truncation)}\n${truncation.head}\n${footer}\n${truncation.tail}${signalSuffix(truncation)}`
 }
 
 /**
@@ -281,7 +294,7 @@ export async function projectApply(
     phase = 'footer'
 
     const footer = formatFooter({ kind: 'exact', count: truncation.omittedBytes }, ref)
-    const assembled = `${renderHeadLine(truncation)}\n${truncation.head}\n${footer}\n${truncation.tail}${signalSuffix(truncation)}`
+    const assembled = truncationView(truncation, footer)
 
     // The footer is only known after the write, so this check can only run now.
     // The backend exposes no delete: a spill that reaches this point stays in

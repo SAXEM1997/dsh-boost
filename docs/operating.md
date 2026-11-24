@@ -24,31 +24,31 @@
 `dsh plugin` 要求指定 profile，剩下的参数原样转发给该 profile 目录里的 pnpm：
 
 ```bash
-# 从 registry 安装：npmjs 上的 latest 是 0.3.6（本仓库 .npmrc 与 lockfile
+# 从 registry 安装：npmjs 上的 latest 是 0.3.9（本仓库 .npmrc 与 lockfile
 # 也已钉在 npmjs，见下）
-dsh plugin --profile <name> add dsh-boost@^0.3.6 --registry=https://registry.npmjs.org/
+dsh plugin --profile <name> add dsh-boost@^0.3.9 --registry=https://registry.npmjs.org/
 
 # 或从本地 checkout 安装（先构建；dist/ 不入库）
 npm run build
 dsh plugin --profile <name> add /absolute/path/to/dsh-boost
 ```
 
-例如 web profile：`dsh plugin --profile web add dsh-boost@^0.3.6 --registry=https://registry.npmjs.org/`。
+例如 web profile：`dsh plugin --profile web add dsh-boost@^0.3.9 --registry=https://registry.npmjs.org/`。
 `dsh plugin` 把操作转发给 pnpm，所以 pnpm 必须在 PATH 上。
 
 ### 版本与 registry
 
-> **`^0.3.6` 是当前的安全钉法。** `registry.npmjs.org` 上 `latest` 是 `0.3.6`，历史版本依次是
-> `0.3.5`、`0.3.4`、`0.3.3`、`0.3.2`、`0.3.1`、`0.3.0`、`0.2.7`、`0.2.6`、`0.2.5`、`0.2.4`、`0.2.3`、`0.2.2`、`0.2.1`、`0.2.0`、
+> **`^0.3.9` 是当前的安全钉法。** `registry.npmjs.org` 上 `latest` 是 `0.3.9`，历史版本依次是
+> `0.3.7`、`0.3.6`、`0.3.5`、`0.3.4`、`0.3.3`、`0.3.2`、`0.3.1`、`0.3.0`、`0.2.7`、`0.2.6`、`0.2.5`、`0.2.4`、`0.2.3`、`0.2.2`、`0.2.1`、`0.2.0`、
 > `0.1.4`、`0.1.3`、`0.1.2`、`0.1.1`、`0.1.0`，以及首次发布时 npm 自动创建的占位版本
 > `0.0.0-stage`——**不要安装 `0.0.0-stage`**，它不是可用构建。`0.2.0` 新增了设置页（`dsh.client`
 > 与 `./client` 出口、`/dsh-boost/api` 路由、随包发布的 `lib/client.js`）与中英双语；`0.3.0` 新增
-> 回执蒸馏（默认关闭），`0.3.2` 修了「每次蒸馏都被自己抽干」的缺陷，`0.3.4` 让产物跨会话保留并加了回本预判，`0.3.5` 修正回放次数与信号行，`0.3.6` 修掉未知墓碑冻结回执——**`0.3.0`/`0.3.1` 的蒸馏从未
+> 回执蒸馏（默认关闭），`0.3.2` 修了「每次蒸馏都被自己抽干」的缺陷，`0.3.4` 让产物跨会话保留并加了回本预判，`0.3.5` 修正回放次数与信号行，`0.3.6` 修掉未知墓碑冻结回执，`0.3.9` 把蒸馏的节省与被弃原文分开记账——**`0.3.0`/`0.3.1` 的蒸馏从未
 > 生效过**，要用就装 `0.3.2` 及以上。`0.1.4` 及更早**没有设置页**，`^0.1.4` 也不会解析到 `0.3.x`
-> （`^` 不跨大版本），所以从 `0.1.x`/`0.2.x` 升上来要显式写 `@^0.3.6`。本仓库已把 `.npmrc` 与
-> lockfile 钉在 npmjs，但**你机器上的全局 npm 配置**可能仍指向一个尚未同步 `0.3.6` 的镜像：那是
+> （`^` 不跨大版本），所以从 `0.1.x`/`0.2.x` 升上来要显式写 `@^0.3.9`。本仓库已把 `.npmrc` 与
+> lockfile 钉在 npmjs，但**你机器上的全局 npm 配置**可能仍指向一个尚未同步 `0.3.9` 的镜像：那是
 > 本机配置，不是本仓库的状态。在意 registry 时显式传 `--registry=https://registry.npmjs.org/`；
-> 镜像滞后时 `@^0.3.6` 会在同步前解析失败。
+> 镜像滞后时 `@^0.3.9` 会在同步前解析失败。
 
 ### 包装形态与重启
 
@@ -303,12 +303,12 @@ token，它只产出下一节的四个比例；`selected + []` 下协议段为�
 
 运行态在 `status.distill`：`calls`（真花掉的调用数）、`tokens`（完成 token）、`input_chars`
 （送进去的字符数——它是成本主体，`tokens` 只是输出侧）、`adopted`（采用次数，**含读表重放**，
-所以可能大于 `calls`）、`rejected`、`failed`、`saved_tokens`（**只有采用收据贡献**，是蒸馏这条路
+所以可能大于 `calls`）、`rejected`、`fallback`（无模型、无路由、落盘失败都记在这里）、`saved_tokens`（**只有采用收据贡献**，是蒸馏这条路
 自己的节省；`saved.projectionGross` 把采用与普通投影混在一起，回答不了这个问题）、
 `spilled_bytes`（被拒但原文已经落盘的字节数——`not-smaller` 是唯一这样的路径，宿主后端没有删除
 能力，所以这些文件会留下；这个计数是它们唯一的痕迹）。收据码见 `docs/RELEASE.md` 的 `distill-*` 段。
 
-**两道门，各管一件事**：采用后的**字节门**只看视图大小——「蒸馏正文 + 页脚」按 UTF-8 字节严格
+**两道门，各管一件事**：采用后的**字节门**只看视图大小——「蒸馏正文 + 页脚 + 信号行」按 UTF-8 字节严格
 短于同回执的截断视图，它回答「每次重放是不是更小」。调用之前的**回本预判**回答另一件事：
 `最乐观节省（截断视图 − 页脚，含被保留的信号行）×（1 + 剩余步数）` 必须**大于**
 `回执输入 + 输出预算`，否则不调模型（`distill-rejected:not-worth-it`）。前者保证每次重放都更小，

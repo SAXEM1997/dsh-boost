@@ -67,12 +67,12 @@ Node.js `>=24.9.0` and DSH `>=0.2.2-rc.4 <0.2.3-0` (a **range**, not an exact pi
 POSIX-only; v1 targets the web profile.
 
 ```bash
-dsh plugin --profile <name> add dsh-boost@^0.3.6 --registry=https://registry.npmjs.org/
+dsh plugin --profile <name> add dsh-boost@^0.3.9 --registry=https://registry.npmjs.org/
 ```
 
 `dsh plugin` requires a profile and forwards the remaining arguments to pnpm in that profile
 directory (so pnpm must be on `PATH`); for a local checkout, run `npm run build` first and pass the
-absolute path to `add`. npmjs has `latest` at `0.3.6`; a mirror may lag, so pass `--registry`
+absolute path to `add`. npmjs has `latest` at `0.3.9`; a mirror may lag, so pass `--registry`
 explicitly when the registry matters. Version history, mirrors and the `0.0.0-stage` trap are in
 the [operations guide](docs/operating.md#安装与版本) (Chinese). **You must restart DSH after
 installing** (plugins load at host startup); for the web profile, restart `dsh web`.
@@ -114,7 +114,7 @@ When the page cannot reach its data it shows a stable code instead of an empty t
 | It does | Content |
 |---|---|
 | Shows | degradation codes and what to do, substitution saving as a lower/upper bound, projection gross/net, retrieval count, receipt counts, fixed overhead, effective configuration (read-only) |
-| Shows (distillation) | enabled, families, trigger, max output, timeout, route; plus `calls`/`tokens`/`adopted`/`rejected`/`fallback` and the total characters sent for distillation |
+| Shows (distillation) | enabled, families, trigger, max output, timeout, route; plus `calls`/`tokens`/`adopted`/`rejected`/`fallback`/`saved_tokens` (what distillation itself saved)/`spilled_bytes` (originals spilled and then refused), and the total characters sent for distillation |
 | Writes | four fields of `<dshHome>/boost/scope.json`: `mode`, `workspaceIds`, `shadow`, `projection` |
 
 **Distillation's configuration is not editable here**: `distillation.*` lives in the profile's

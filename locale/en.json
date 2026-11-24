@@ -132,5 +132,7 @@
   "DISTILL_NOT_IN_CONFIG": "This host's config has no `distillation` section: the host process is most likely still running a build from before 0.3.0. Restart the host and this section appears.",
   "EMPTY_LIST": "(none)",
   "HINT_DISTILL_OFF": "Distillation is off, so none of these numbers exist: no calls, no products.",
-  "LABEL_WORKSPACE_COUNT": "{selected} of {total} selected"
+  "LABEL_WORKSPACE_COUNT": "{selected} of {total} selected",
+  "LABEL_DISTILL_SAVED": "Tokens saved by adopted distillations",
+  "LABEL_DISTILL_SPILLED": "Original bytes spilled for a refusal"
 }

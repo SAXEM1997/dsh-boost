@@ -32,9 +32,12 @@ accepted（2026-11-23）
 
 A refusal is pinned too. `empty`, `unverifiable` and `not-smaller` write a
 bodyless tombstone under the same `(receipt, question, version)` key, so a replay
-reads the refusal instead of paying for the same call again. `timeout` is
-deliberately not pinned: it has no answer, and the parked call exists precisely
-so a late answer can still land.
+reads the refusal instead of paying for the same call again. Two are
+deliberately not pinned. `timeout` has no answer, and the parked call exists
+precisely so a late answer can still land. `not-worth-it` is a bet about the
+future — it compares the saving against `1 + remaining steps` — and the remaining
+steps grow when the session outlives the guess, so freezing it would keep a
+decision the evidence has already overturned.
 
 The product also pins the spill handle (`locator` + `retrievalHint`), because the
 host backend names each artifact with `randomBytes(6)`: re-spilling on a replay

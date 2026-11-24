@@ -634,6 +634,43 @@ test('回本预判：截断视图里带保留信号时照常预判并采用', as
   assert.ok(r?.content?.includes('[exit code: 1]'), 'the adopted view keeps the preserved signal')
 })
 
+test('表命中重放不报 spilledBytes：这次决策没有落盘', async () => {
+  // A pinned product whose body is as long as the receipt: the replay reuses
+  // the pin, writes nothing, and the byte gate refuses it as `not-smaller`.
+  // Reporting the original's size here would make `status.distill.spilled_bytes`
+  // grow by one artifact per replay.
+  const store = await makeStore()
+  const text = receipt()
+  const question = questionOf('bash')
+  assert.ok(question !== undefined)
+  const key = keyOf(receiptKeyOf(text), questionKeyOf(question), versionOf('deepseek-flash', question))
+  await store.write('s1', key, {
+    text,
+    quotes: ['npm ERR! Test failed: expected 3 got 4'],
+    model: 'deepseek-flash',
+    spill: { locator: '/spill/pinned.txt', retrievalHint: 'read it' },
+  })
+
+  let spills = 0
+  const model = fakeFn(async () => ({ text, quotes: ['npm ERR! Test failed: expected 3 got 4'], model: 'deepseek-flash' }))
+  const r = await decide(
+    baseInput(store, {
+      spill: {
+        saveText: async () => {
+          spills += 1
+          return { locator: '/spill/fresh.txt', retrievalHint: 'read it' }
+        },
+      },
+      distill: model.fn,
+    }),
+  )
+
+  assert.equal(r?.code, 'distill-rejected:not-smaller')
+  assert.equal(spills, 0, 'the pinned spill is reused, so nothing is written')
+  assert.equal(model.calls.length, 0, 'the table answered without a model call')
+  assert.equal(r?.spilledBytes, undefined, 'no write, no orphan to report')
+})
+
 test('墓碑写了未知原因时当作未命中：不冻结该回执，也不把任意字符串变成收据码', async () => {
   const dir = await mkdtemp(join(tmpdir(), 'dsh-decide-forged-'))
   const store = new DistillStore(dir)

@@ -25,9 +25,9 @@
  * 6. **Persist.** The product is written before its bytes are returned, so the
  *    bytes that enter history are the bytes on disk (ADR 0001). A failed write
  *    is `distill-failed`.
- * 7. **Adopt.** The view is `<head marker>\n<body>\n\n<host footer>`, followed by the preserved
- * §5.4-4 signal lines when the cut middle held any with the
- *    footer rendered by the host's own `formatSpillNotice`, exactly the shape
+ * 7. **Adopt.** The view is `<head marker>\n<body>\n\n<host footer>`, followed
+ *    by the preserved §5.4-4 signal lines when the cut middle held any. The
+ *    footer is rendered by the host's own `formatSpillNotice`, exactly the shape
  *    an ordinary projection has, so anchors, spill and receipts keep working.
  *
  * The original is spilled **before** the decision is finalised: the footer's
@@ -38,9 +38,9 @@
  *
  * @module dsh-boost/distill/decide
  */
-import { renderHeadLine, truncate } from '../projection/truncate.js'
+import { truncate } from '../projection/truncate.js'
 import type { Truncation } from '../projection/truncate.js'
-import { signalSuffix } from '../projection/apply.js'
+import { signalSuffix, truncationView } from '../projection/apply.js'
 import type { FormatFooter, SpillBackend } from '../projection/apply.js'
 import type { BoostConfig, ToolFamily } from '../types.js'
 import { keyOf, questionKeyOf, questionOf, receiptKeyOf, TIMEOUT, versionOf, withTimeout } from './pin.js'
@@ -76,14 +76,20 @@ const PINNED_REJECTIONS: ReadonlySet<DistillRejectReason> = new Set<DistillRejec
  * Every reason a tombstone may legitimately carry — i.e. exactly the pinnable
  * ones.
  *
- * A tombstone is a file: it can be edited, truncated, or left by an older build
- * that pinned reasons this build no longer pins (`timeout`, `not-worth-it`). A
- * value outside this set is not a refusal to replay; it is a file that cannot be
- * trusted, so the decision falls through to the ordinary path and pays for a
- * call if one is warranted. Reading it as a refusal would freeze the receipt
- * forever: the file stays on disk, every replay hits the same branch, and
- * nothing is written to say why.
+ * A tombstone is a file: it can be edited by hand, truncated, or written by a
+ * build that pinned something else. A value outside this set is not a refusal to
+ * replay; it is a file that cannot be trusted, so the decision falls through to
+ * the ordinary path and pays for a call if one is warranted. Reading it as a
+ * refusal would freeze the receipt forever: the file stays on disk, every replay
+ * hits the same branch, and nothing is written to say why.
+ *
+ * The set matches what `reject()` may pin, and `reject()` pins only
+ * `empty`/`unverifiable`/`not-smaller` — `timeout` and `not-worth-it` are
+ * decisions that a later replay can legitimately overturn, so they never reach
+ * disk.
  */
+// Deliberately the same set as `PINNED_REJECTIONS`: a tombstone only ever holds a
+// reason that decision would have pinned, so validation and pinning must agree.
 const REJECT_REASONS: ReadonlySet<string> = new Set<string>(PINNED_REJECTIONS)
 
 /** Everything one decision reads; every host service arrives pre-bound. */
@@ -182,14 +188,14 @@ export interface DistillOutcome {
   /** The facts `status` and the receipt line report. */
   evidence: DistillEvidence
   /**
-   * UTF-8 bytes written to the spill store for this decision, when it was
-   * written and then refused.
+   * UTF-8 bytes this decision wrote to the spill store, and then left behind.
    *
-   * `not-smaller` is the one refusal that lands after the original has been
-   * spilled — the size comparison needs the real footer, and the footer names
-   * the artifact. Nothing deletes that artifact (the host backend has no
-   * delete), so it becomes an orphan; reporting its size keeps the cost visible
-   * instead of letting every refusal silently add a file.
+   * Present only when the write actually happened: a replay that reuses a pin
+   * reports nothing, so a replayed receipt cannot inflate the counter once per
+   * replay. Two paths leave an artifact with no consumer — `not-smaller`
+   * (the comparison needs the real footer, which names the artifact) and any
+   * failure after the write (a throwing footer, a failed product write). The
+   * host backend has no delete, so the size is the only trace they leave.
    */
   spilledBytes?: number
 }
@@ -204,9 +210,7 @@ export interface DistillOutcome {
  * that the body is anchored in the receipt rather than invented.
  */
 export function verifyQuotes(quotes: readonly string[], source: string): boolean {
-  // An answer that cites nothing is not a forged answer — it is an unverifiable
-  // one, and the quote list is the only signal that the body is anchored in the
-  // receipt rather than invented. Zero quotes fails the same gate as a bad one.
+  // Zero quotes fails the same gate as a bad one; the JSDoc says why.
   if (quotes.length === 0) return false
   for (const quote of quotes) {
     if (typeof quote !== 'string' || quote === '') return false
@@ -230,15 +234,13 @@ function triggerOf(cfg: BoostConfig, family: ToolFamily): number | null {
 }
 
 /**
- * The rendered truncation view: marker, head, footer, tail, then preserved signals.
+ * The rendered truncation view, from the one renderer in `projection/apply`.
  *
- * One renderer for every caller that needs to price or compare a truncation
- * view — the byte gate, the payback gate and the adopted receipt's baseline.
- * The signals are part of the view (design §5.4-4), so a renderer that drops
- * them understates every view that has one.
+ * Kept as a named local so the gates read as intent; the template itself lives
+ * in one place, because three copies of it drifted twice.
  */
 function truncationViewText(truncation: Truncation, footer: string): string {
-  return `${renderHeadLine(truncation)}\n${truncation.head}\n${footer}\n${truncation.tail}${signalSuffix(truncation)}`
+  return truncationView(truncation, footer)
 }
 
 /**
@@ -407,6 +409,11 @@ async function adopt(
   let ref: Awaited<ReturnType<SpillBackend['saveText']>>
   let composed: string
   let truncationBytes: number | null
+  // Bytes this decision actually wrote to the spill store, or `undefined` when
+  // it reused a pin. Reported as `spilledBytes` on every outcome that leaves the
+  // artifact behind — including the failures below, which happen *after* the
+  // write and would otherwise leave no trace at all.
+  let spilledBytes: number | undefined
   try {
     // The original goes to the spill store before the decision is final, so
     // the footer names an artifact that exists and holds the whole receipt.
@@ -418,17 +425,22 @@ async function adopt(
     // the locator for exactly this reason (`DistillStore`), and a product
     // without one (written before the field existed) falls through to a fresh
     // write, which is the only case where a replay may re-spill.
-    ref = pinnedSpill !== undefined ? pinnedSpill : await spill.saveText({
-      owner: { sessionId },
-      source: {
-        kind: 'tool',
-        toolName: input.toolName ?? family,
-        callId: input.callId ?? input.toolName ?? family,
-        label: family,
-      },
-      suggestedName: `${input.toolName ?? family}.txt`,
-      content: text,
-    })
+    if (pinnedSpill !== undefined) {
+      ref = pinnedSpill
+    } else {
+      ref = await spill.saveText({
+        owner: { sessionId },
+        source: {
+          kind: 'tool',
+          toolName: input.toolName ?? family,
+          callId: input.callId ?? input.toolName ?? family,
+          label: family,
+        },
+        suggestedName: `${input.toolName ?? family}.txt`,
+        content: text,
+      })
+      spilledBytes = Buffer.byteLength(text, 'utf8')
+    }
     const bodyBytes = Buffer.byteLength(answer.text, 'utf8')
     const omittedBytes = Buffer.byteLength(text, 'utf8') - bodyBytes
     const footer = formatFooter({ kind: 'exact', count: omittedBytes }, ref)
@@ -441,7 +453,13 @@ async function adopt(
     composed = `${distilledView(answer.text, text, question, footer)}${signals}`
     truncationBytes = truncationViewBytes(text, cfg, family, formatFooter, ref.locator)
   } catch {
-    return { content: null, code: 'distill-failed', mode: 'fallback', evidence: { ...evidence, adopted: false } }
+    return {
+      content: null,
+      code: 'distill-failed',
+      mode: 'fallback',
+      evidence: { ...evidence, adopted: false },
+      ...(spilledBytes === undefined ? {} : { spilledBytes }),
+    }
   }
 
   const bodyBytes = Buffer.byteLength(answer.text, 'utf8')
@@ -450,7 +468,7 @@ async function adopt(
   // UTF-8 bytes: the unit the footer counts and the ledger reports.
   if (truncationBytes === null || Buffer.byteLength(composed, 'utf8') >= truncationBytes) {
     const refusal = await reject('not-smaller')
-    return { ...refusal, spilledBytes: Buffer.byteLength(text, 'utf8') }
+    return { ...refusal, ...(spilledBytes === undefined ? {} : { spilledBytes }) }
   }
 
   // Written on the first decision, and also when a table hit had no pin to
@@ -470,7 +488,13 @@ async function adopt(
         spill: { locator: ref.locator, retrievalHint: ref.retrievalHint },
       })
     } catch {
-      return { content: null, code: 'distill-failed', mode: 'fallback', evidence: { ...evidence, adopted: false } }
+      return {
+        content: null,
+        code: 'distill-failed',
+        mode: 'fallback',
+        evidence: { ...evidence, adopted: false },
+        ...(spilledBytes === undefined ? {} : { spilledBytes }),
+      }
     }
   }
 
