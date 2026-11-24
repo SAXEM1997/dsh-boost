@@ -8,6 +8,12 @@ This file records user-visible changes. Format follows Keep a Changelog; version
 Design rationale lives in `docs/superpowers/specs/`; the release-acceptance procedure is in
 `docs/RELEASE.md`.
 
+## [0.3.7] - 2026-11-24
+
+### 文档
+
+- 版本清单不再记条数，改为指向 `npm view dsh-boost versions`：每发一版那个数字就过期一次，最近三轮通读各抓到过一次。安装规格、`latest` 与 README 示例同步到 0.3.6。
+
 ## [0.3.6] - 2026-11-24
 
 ### 修复
