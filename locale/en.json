@@ -134,5 +134,14 @@
   "HINT_DISTILL_OFF": "Distillation is off, so none of these numbers exist: no calls, no products.",
   "LABEL_WORKSPACE_COUNT": "{selected} of {total} selected",
   "LABEL_DISTILL_SAVED": "Tokens saved by adopted distillations",
-  "LABEL_DISTILL_SPILLED": "Original bytes spilled for a refusal"
+  "LABEL_DISTILL_SPILLED": "Original bytes spilled for a refusal",
+  "LABEL_SAVED_RETRIEVAL_CONTENT": "Cost of retrieved content (replayed per remaining step)",
+  "LABEL_SAVED_RETRIEVAL_CALLS": "Cost of the retrieval calls (one each)",
+  "LABEL_COUNTS_GROUP_SUBSTITUTE": "Substitutions",
+  "LABEL_COUNTS_GROUP_PROJECTION": "Projections",
+  "LABEL_COUNTS_GROUP_DISTILL": "Distillation",
+  "LABEL_COUNTS_GROUP_SKIP": "Skips",
+  "LABEL_COUNTS_GROUP_OTHER": "Other",
+  "LABEL_COUNTS_TOTAL": "Total",
+  "HINT_COUNTS_GROUPED": "Grouped by receipt-code prefix; codes in a group mean similar things, expand for the per-code counts."
 }

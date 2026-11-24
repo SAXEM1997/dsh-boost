@@ -134,5 +134,14 @@
   "HINT_DISTILL_OFF": "蒸馏关闭时不产生这些数字：没有调用，也没有产物。",
   "LABEL_WORKSPACE_COUNT": "已选 {selected} / 共 {total}",
   "LABEL_DISTILL_SAVED": "蒸馏采用后省下的 token",
-  "LABEL_DISTILL_SPILLED": "被拒但仍落盘的原文（字节）"
+  "LABEL_DISTILL_SPILLED": "被拒但仍落盘的原文（字节）",
+  "LABEL_SAVED_RETRIEVAL_CONTENT": "取回内容的成本（按剩余步数重放）",
+  "LABEL_SAVED_RETRIEVAL_CALLS": "取回的调用成本（每次一次）",
+  "LABEL_COUNTS_GROUP_SUBSTITUTE": "替换",
+  "LABEL_COUNTS_GROUP_PROJECTION": "投影",
+  "LABEL_COUNTS_GROUP_DISTILL": "蒸馏",
+  "LABEL_COUNTS_GROUP_SKIP": "跳过",
+  "LABEL_COUNTS_GROUP_OTHER": "其它",
+  "LABEL_COUNTS_TOTAL": "合计",
+  "HINT_COUNTS_GROUPED": "按收据码前缀分组；同一组的码含义相近，展开看逐条计数。"
 }

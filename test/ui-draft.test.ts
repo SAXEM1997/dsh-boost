@@ -11,6 +11,7 @@ import {
   disableReasons,
   distillStateOf,
   draftOf,
+  groupCounts,
   isDirty,
   isTicked,
   patchOf,
@@ -181,4 +182,41 @@ test('distillStateOf 区分「不知道」与「这个构建没有该段」', ()
   assert.equal(distillStateOf({ distillation: 'no' } as unknown as BoostConfig), 'absent')
   assert.equal(distillStateOf({ distillation: { enabled: false } } as unknown as BoostConfig), 'present')
   assert.equal(distillStateOf({ distillation: { enabled: true } } as unknown as BoostConfig), 'present')
+})
+
+test('groupCounts 按前缀分组，组内降序，组间顺序固定', () => {
+  const groups = groupCounts({
+    'skip:no-scope': 9620,
+    'projection-skipped:no-spill': 3,
+    'substitute-settled': 12,
+    'substitute': 4,
+    'distill-rejected:not-smaller': 1,
+    'guard-trivial': 7,
+    'not a number': Number.NaN,
+  } as Record<string, number>)
+
+  assert.deepEqual(
+    groups.map((group) => group.key),
+    ['substitute', 'projection', 'distill', 'skip', 'other'],
+  )
+  const substitute = groups.find((group) => group.key === 'substitute')
+  assert.equal(substitute?.total, 16, 'the group total is the sum of its rows')
+  assert.deepEqual(
+    substitute?.rows.map((row) => row.code),
+    ['substitute-settled', 'substitute'],
+    'rows are ordered by count, descending',
+  )
+  assert.equal(groups.find((group) => group.key === 'skip')?.total, 9620)
+  assert.equal(groups.find((group) => group.key === 'other')?.rows[0]?.code, 'guard-trivial')
+  assert.equal(
+    groups.reduce((sum, group) => sum + group.total, 0),
+    9647,
+    'a NaN count is dropped, everything else is counted exactly once',
+  )
+})
+
+test('groupCounts 对空载荷与未知前缀都给出稳定的形状', () => {
+  assert.deepEqual(groupCounts({}), [])
+  const unknown = groupCounts({ 'weird:prefix': 2 })
+  assert.deepEqual(unknown, [{ key: 'other', total: 2, rows: [{ code: 'weird:prefix', count: 2 }] }])
 })

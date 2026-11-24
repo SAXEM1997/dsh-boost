@@ -441,3 +441,37 @@
   font-size: 11.5px;
   overflow-wrap: anywhere;
 }
+
+/* Grouped receipt counts: one disclosure per prefix, its total on the right.
+   A flat list let `skip:no-scope` (thousands) bury every other code. */
+.boost-settings__count-group {
+  border-top: 1px solid color-mix(in srgb, currentColor 12%, transparent);
+  padding-block: 0.35rem;
+}
+
+.boost-settings__count-group:first-of-type {
+  border-top: 0;
+}
+
+.boost-settings__count-group > summary {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 1rem;
+  cursor: pointer;
+  font-weight: 600;
+  padding-block: 0.15rem;
+}
+
+.boost-settings__count-group > summary:hover {
+  color: color-mix(in srgb, currentColor 100%, transparent);
+}
+
+.boost-settings__count-total {
+  font-variant-numeric: tabular-nums;
+  color: color-mix(in srgb, currentColor 75%, transparent);
+}
+
+.boost-settings__count-group .boost-settings__counts {
+  margin-block: 0.25rem 0.5rem;
+}

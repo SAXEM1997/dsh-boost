@@ -11,7 +11,7 @@
  * measurement.
  */
 import { copyOf, adviceFor, type Copy } from './copy'
-import { configOf, distillStateOf, envelopeOf } from './draft'
+import { configOf, distillStateOf, envelopeOf, groupCounts, type CountGroup } from './draft'
 import { useT } from './i18n'
 import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react'
 import { fetchState, type StateResult } from './api'
@@ -124,6 +124,22 @@ function Degraded({ codes, unavailable }: { codes: readonly string[]; unavailabl
   )
 }
 
+/** The group's display name; `other` is the bucket for codes with no prefix. */
+function groupLabel(c: Copy, key: CountGroup['key']): string {
+  switch (key) {
+    case 'substitute':
+      return c.LABEL_COUNTS_GROUP_SUBSTITUTE
+    case 'projection':
+      return c.LABEL_COUNTS_GROUP_PROJECTION
+    case 'distill':
+      return c.LABEL_COUNTS_GROUP_DISTILL
+    case 'skip':
+      return c.LABEL_COUNTS_GROUP_SKIP
+    default:
+      return c.LABEL_COUNTS_GROUP_OTHER
+  }
+}
+
 export function App() {
   const [result, setResult] = useState<StateResult | undefined>(undefined)
   const [pending, setPending] = useState(true)
@@ -186,9 +202,7 @@ export function App() {
     ? status.degraded.filter((code): code is string => typeof code === 'string')
     : []
   const counts = status?.counts ?? {}
-  const countRows: [string, number][] = Object.entries(counts)
-    .filter(([, count]) => typeof count === 'number' && Number.isFinite(count))
-    .sort(([, left], [, right]) => right - left)
+  const countGroups = groupCounts(counts as Record<string, number>)
   const configGroups = grouped(flatten(config))
   const distill = config?.distillation
   const distillStatus = status?.distill
@@ -235,6 +249,12 @@ export function App() {
                 hint={c.HINT_PROJECTION_GROSS_REPLAY}
               />
               <Row label={c.LABEL_PROJECTION_NET} value={tokens(c, saved?.projectionNet)} hint={c.HINT_PROJECTION_NET} />
+              {saved?.retrievalContent === undefined ? null : (
+                <Row label={c.LABEL_SAVED_RETRIEVAL_CONTENT} value={tokens(c, saved.retrievalContent)} />
+              )}
+              {saved?.retrievalCalls === undefined ? null : (
+                <Row label={c.LABEL_SAVED_RETRIEVAL_CALLS} value={tokens(c, saved.retrievalCalls)} />
+              )}
               <Row label={c.LABEL_RETRIEVALS} value={tokens(c, saved?.retrievals)} />
               <Row label={c.LABEL_OVERHEAD} value={tokens(c, status?.fixedOverheadTokens)} hint={c.HINT_OVERHEAD} />
               <Row
@@ -275,19 +295,30 @@ export function App() {
           />
 
           <Card title={c.SECTION_COUNTS}>
-            {countRows.length === 0 ? (
+            {countGroups.length === 0 ? (
               <p className="boost-settings__muted">
                 {statusCode === undefined ? c.NO_RECEIPTS : c.STATUS_UNAVAILABLE}
               </p>
             ) : (
-              <ul className="boost-settings__counts">
-                {countRows.map(([code, count]) => (
-                  <li key={code}>
-                    <code>{code}</code>
-                    <span>{count.toLocaleString()}</span>
-                  </li>
+              <>
+                <p className="boost-settings__hint">{c.HINT_COUNTS_GROUPED}</p>
+                {countGroups.map((group) => (
+                  <details key={group.key} className="boost-settings__count-group" open={group.key !== 'other'}>
+                    <summary>
+                      <span>{groupLabel(c, group.key)}</span>
+                      <span className="boost-settings__count-total">{group.total.toLocaleString()}</span>
+                    </summary>
+                    <ul className="boost-settings__counts">
+                      {group.rows.map((row) => (
+                        <li key={row.code}>
+                          <code>{row.code}</code>
+                          <span>{row.count.toLocaleString()}</span>
+                        </li>
+                      ))}
+                    </ul>
+                  </details>
                 ))}
-              </ul>
+              </>
             )}
           </Card>
 

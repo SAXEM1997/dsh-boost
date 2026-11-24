@@ -471,6 +471,18 @@ export interface BoostStatus {
     projectionNet: number | 'unknown'
     /** Number of `kind:'projection'` receipts marked `retrieved: true`. */
     retrievals: number
+    /**
+     * The two terms `projectionNet` subtracts, exposed so the number can be
+     * explained instead of taken on faith.
+     *
+     * `retrievalContent` replays with the gross (`content × (1 + horizon)`), and
+     * `retrievalCalls` is the single call each retrieval costs. They are absent —
+     * never `0` — when the net is `'unknown'`, because that state also covers
+     * "a retrieval had no price", and reporting `0` there would claim the
+     * subtraction was measured as zero.
+     */
+    retrievalContent?: number
+    retrievalCalls?: number
   }
   /**
    * Cache hit rate of the most recent real request:
@@ -1170,6 +1182,12 @@ async function statusCommand(deps: BoostDeps): Promise<BoostResult<BoostStatus>>
     projectionGross: grossReplay,
     projectionNet,
     retrievals: totals.retrievals,
+    ...(projectionNet === 'unknown'
+      ? {}
+      : {
+          retrievalContent: totals.retrievalContentReplay,
+          retrievalCalls: totals.retrievalCallTokens,
+        }),
   }
   const data: BoostStatus = {
     scope: {

@@ -369,6 +369,8 @@ test('status 空收据目录返回零账目而不是抛错', async () => {
     substitution: 0,
     projectionGross: 0,
     projectionNet: 0,
+    retrievalContent: 0,
+    retrievalCalls: 0,
     retrievals: 0,
   })
   assert.deepEqual(status.scope, { mode: 'selected', workspaceIds: [], revision: 0 })
@@ -611,6 +613,9 @@ test('status 净额 = 非取回毛额回放 − 取回内容回放 − 取回调
     // (100 - 20) * 21 - 10.
     projectionNet: (100 - 20) * 21 - 10,
     retrievals: 1,
+    // The two terms the net subtracts, exposed so the number is explainable.
+    retrievalContent: 20 * 21,
+    retrievalCalls: 10,
   })
   assert.equal(status.projection_gross_tokens, 100)
   assert.equal(status.projection_gross_replay_tokens, 2_100)
@@ -903,6 +908,8 @@ test('status 不把没有 unit:raw 的 projection 收据算进毛额', async () 
     substitution: 0,
     projectionGross: 0,
     projectionNet: 0,
+    retrievalContent: 0,
+    retrievalCalls: 0,
     retrievals: 0,
   })
 })
@@ -1089,6 +1096,8 @@ test('status 在 scope.json 不可读时报稳定码切仍给出账目', async (
     substitution: 0,
     projectionGross: 0,
     projectionNet: 0,
+    retrievalContent: 0,
+    retrievalCalls: 0,
     retrievals: 0,
   })
 })

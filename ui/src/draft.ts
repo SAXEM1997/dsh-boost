@@ -235,3 +235,39 @@ export function distillStateOf(config: BoostConfig | undefined): 'unknown' | 'ab
   const section = (config as { distillation?: unknown }).distillation
   return section === null || typeof section !== 'object' ? 'absent' : 'present'
 }
+
+/**
+ * Receipt codes grouped by their prefix, for the counts panel.
+ *
+ * A flat list lets one runaway code (`skip:no-scope`, thousands) bury the rest,
+ * and the reader cannot tell which kinds of event the number is even made of.
+ * The group is the part before the first `:`; codes without one land in
+ * `other`. Order is by descending total, then by name, so the shape is stable
+ * between renders.
+ */
+export interface CountGroup {
+  key: 'substitute' | 'projection' | 'distill' | 'skip' | 'other'
+  total: number
+  rows: { code: string; count: number }[]
+}
+
+const GROUP_ORDER: CountGroup['key'][] = ['substitute', 'projection', 'distill', 'skip', 'other']
+
+export function groupCounts(counts: Record<string, number>): CountGroup[] {
+  const groups = new Map<CountGroup['key'], { code: string; count: number }[]>()
+  for (const [code, count] of Object.entries(counts)) {
+    if (typeof count !== 'number' || !Number.isFinite(count)) continue
+    // Receipt codes are `<family>[-<detail>][:<reason>]` — `substitute-settled`,
+    // `projection-skipped:no-spill`, `skip:no-scope`. The family is the leading
+    // word, so the split is on the first `-` or `:`, not on `:` alone.
+    const lead = code.split(/[-:]/, 1)[0] as CountGroup['key']
+    const key = GROUP_ORDER.includes(lead) ? lead : 'other'
+    const rows = groups.get(key) ?? []
+    rows.push({ code, count })
+    groups.set(key, rows)
+  }
+  return GROUP_ORDER.filter((key) => groups.has(key)).map((key) => {
+    const rows = (groups.get(key) ?? []).sort((left, right) => right.count - left.count || left.code.localeCompare(right.code))
+    return { key, total: rows.reduce((sum, row) => sum + row.count, 0), rows }
+  })
+}
