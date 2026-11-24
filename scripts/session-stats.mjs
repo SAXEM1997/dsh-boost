@@ -138,7 +138,6 @@ function prefixInfo(path, asOf) {
 // Session analysis
 // ---------------------------------------------------------------------------
 
-/** The projection family of a host tool name, or `other` when unmapped. */
 /**
  * A stable string for an argument object, so two calls can be compared for
  * "same tool, same arguments" without depending on key order.
@@ -170,6 +169,7 @@ function keysOfStep(row) {
   return row.names.map((name, index) => `${name}\u0000${canonicalArgs(row.argsList[index])}`)
 }
 
+/** The projection family of a host tool name, or `other` when unmapped. */
 function familyOf(name) {
   if (typeof name !== 'string' || name === '') return 'other'
   if (FAMILIES.has(name)) return name
@@ -348,7 +348,7 @@ function analyseSession(path, asOf) {
   // M1: repeated calls. `previous` is the key of the immediately preceding
   // step's calls; same-step repeats are counted separately because "重复" over
   // a batch is a different failure from re-issuing a call next turn.
-  const duplicates = { calls: 0, sameStep: 0, acrossStep: 0, duplicateResultChars: 0 }
+  const duplicates = { calls: 0, sameStep: 0, acrossStep: 0 }
 
   for (let index = 0; index < steps.length; index += 1) {
     const rowCalls = steps[index].names.length
@@ -363,9 +363,6 @@ function analyseSession(path, asOf) {
       if (seenThisStep.has(key)) duplicates.sameStep += 1
       else if (previousKeys.has(key)) duplicates.acrossStep += 1
       else seenThisStep.add(key)
-      if (seenThisStep.has(key) || previousKeys.has(key)) {
-        duplicates.duplicateResultChars += (row.resultTexts[call] ?? '').length
-      }
     }
     const allWhitelisted = count > 0 && row.names.every((name) => WHITELIST.has(name))
     for (const name of row.names) if (WHITELIST.has(name)) whitelistCalls += 1
@@ -464,7 +461,7 @@ function statsFromSnapshot(snapshot) {
   let full = 0
   let partial = 0
   const continuation = { steps: 0, tokens: 0 }
-  const duplicates = { calls: 0, sameStep: 0, acrossStep: 0, duplicateResultChars: 0 }
+  const duplicates = { calls: 0, sameStep: 0, acrossStep: 0 }
 
   for (const session of sessions) {
     steps += session.steps ?? 0
@@ -498,7 +495,7 @@ function statsFromSnapshot(snapshot) {
     for (const key of ['steps', 'tokens']) {
       continuation[key] += session.continuation?.[key] ?? 0
     }
-    for (const key of ['calls', 'sameStep', 'acrossStep', 'duplicateResultChars']) {
+    for (const key of ['calls', 'sameStep', 'acrossStep']) {
       duplicates[key] += session.duplicates?.[key] ?? 0
     }
   }
@@ -574,7 +571,6 @@ function statsFromSnapshot(snapshot) {
       sameStep: duplicates.sameStep,
       acrossStep: duplicates.acrossStep,
       rate: round(ratio(duplicates.sameStep + duplicates.acrossStep, duplicates.calls), 4),
-      duplicateResultChars: duplicates.duplicateResultChars,
     },
   }
 }

@@ -6,6 +6,9 @@ import { homedir, tmpdir } from 'node:os'
 import { join } from 'node:path'
 import * as plugin from '../src/index.ts'
 import { resolveBoostRoot } from '../src/host/root.ts'
+
+/** A stable workspace id for the visibility cases. */
+const WORKSPACE = 'ws-vis'
 import { ReceiptStore } from '../src/receipts/store.ts'
 import { ScopeStore } from '../src/scope/store.ts'
 import { fakeHost } from './fakes/host.ts'
@@ -1003,7 +1006,6 @@ test('boost 工具在拿不到会话键时仍然显示（诊断装配不能失�
   const host = fakeHost()
   plugin.apply(host as unknown as PluginContext, {})
   assert.equal(await host.visible('boost', {}), true)
-  assert.equal(await host.visible('boost', undefined as unknown as object), true)
 })
 
 /** Warm the visibility judgement the way a real assembly does. */
@@ -1024,3 +1026,41 @@ async function warm(host: ReturnType<typeof fakeHost>, agent: unknown): Promise<
   }
   await host.callHook('system-prompt/assemble', [assembly, { agent, scope: agent }], () => assembly)
 }
+
+test('boost 工具在「已选中且可解析」的工作区里保持可见', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'dsh-boost-vis-'))
+  await mkdir(join(dir, 'boost'), { recursive: true })
+  await writeFile(
+    join(dir, 'boost', 'scope.json'),
+    `${JSON.stringify({
+      version: 2,
+      revision: 1,
+      mode: 'selected',
+      workspaceIds: [WORKSPACE],
+      shadow: true,
+      projection: 'shadow',
+    })}\n`,
+  )
+  const savedHome = process.env.DSH_HOME
+  process.env.DSH_HOME = dir
+
+  const cwd = join(dir, 'repo')
+  const host = fakeHost({
+    get: (name: string) =>
+      name === 'workspaceRegistry' ? { list: () => [{ id: WORKSPACE, path: cwd }] } : undefined,
+  })
+  try {
+    plugin.apply(host as unknown as PluginContext, {})
+    const agent = { session: { header: { id: 's-in-scope', cwd } } }
+    // Cold: fail open.
+    assert.equal(await host.visible('boost', agent), true)
+    // Warm: the judgement is `true`, and the tool must stay visible. Without
+    // this case a predicate that hid every *judged* session would pass.
+    await warm(host, agent)
+    assert.equal(await host.visible('boost', agent), true)
+  } finally {
+    if (savedHome === undefined) delete process.env.DSH_HOME
+    else process.env.DSH_HOME = savedHome
+    await rm(dir, { recursive: true, force: true })
+  }
+})

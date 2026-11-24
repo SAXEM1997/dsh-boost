@@ -23,7 +23,9 @@ test('写不进去时代码原样返回，不被压成 ERR_BOOST_INTERNAL', asyn
   const result = await runBoost({
     scope: { write: async () => storeThatCannotWrite() } as never,
     receipts: {} as never,
-    host: undefined,
+    // Omit `host` rather than passing `undefined`: with
+    // `exactOptionalPropertyTypes` those are different states, and this test is
+    // about the write path, not about a host fact that does not exist.
     fixedOverhead: async () => 'unknown',
     args: { cmd: 'scope-set', body: { mode: 'global' }, baseRevision: 0 },
   })

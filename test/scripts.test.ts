@@ -131,6 +131,17 @@ test('session-stats 对固定 snapshot 复算出 §2.1 的 headline 计数', asy
   assert.equal(out.valueTransfer.full, 842)
   assert.equal(out.valueTransfer.partial, 2407)
   assert.equal(out.valueTransfer.rate, 0.0721)
+  // M1's two ceilings, pinned to the committed snapshot: the docs quote these
+  // numbers, and without an assertion here a regenerated snapshot could drift
+  // away from every document that cites it.
+  assert.equal(out.continuation.steps, 951)
+  assert.equal(out.continuation.stepShare, 0.0176)
+  assert.equal(out.continuation.tokens, 155379762)
+  assert.equal(out.continuation.tokenShare, 0.0147)
+  assert.equal(out.duplicates.calls, 62624)
+  assert.equal(out.duplicates.sameStep, 2)
+  assert.equal(out.duplicates.acrossStep, 148)
+  assert.equal(out.duplicates.rate, 0.0024)
 })
 
 test('session-stats --sessions 从真实 session 文件重生 snapshot，--snapshot 可复算同一批计数', async () => {
@@ -294,7 +305,9 @@ test('M1 口径：整体绑定才算一次「确定性续跑」，重复按 (too
     { type: 'step/start', time: 5100, data: { turn: 1, step: 5 } },
     { type: 'assistant/message', time: 5200, data: { turn: 1, step: 5, usage: usage(0, 500, 50) } },
     { type: 'tool/call', time: 5300, data: { turn: 1, step: 5, callId: 'a6', name: 'read', arguments: '{"path":"alpha"}' } },
-    { type: 'tool/call', time: 5350, data: { turn: 1, step: 5, callId: 'a7', name: 'read', arguments: '{"path":"not-in-any-receipt-at-all"}' } },
+    // One call, two string leaves, only one of them bound: this is what
+    // separates a leaf-level `every` from a leaf-level `some`.
+    { type: 'tool/call', time: 5350, data: { turn: 1, step: 5, callId: 'a7', name: 'read', arguments: '{"path":"alpha","note":"nowhere-to-be-found"}' } },
     { type: 'tool/result', time: 5400, data: { turn: 1, step: 5, toolCallId: 'a6', message: { content: [{ type: 'text', text: 'six' }] } } },
     { type: 'tool/result', time: 5450, data: { turn: 1, step: 5, toolCallId: 'a7', message: { content: [{ type: 'text', text: 'seven' }] } } },
     { type: 'turn/end', time: 5500, data: { turn: 1 } },

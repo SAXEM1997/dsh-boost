@@ -317,7 +317,7 @@ export interface BoostDeps {
   scope: ScopeStore
   receipts: ReceiptStore
   /** Host capabilities measured by `apply`; absent when no host was probed. */
-  host?: BoostHostFacts | undefined
+  host?: BoostHostFacts
   /**
    * The usage ledger `status` reads for `cache_hit_ratio` / `prefix_drops`.
    *
@@ -590,7 +590,10 @@ export interface BoostStatus {
    */
   hasSpill?: boolean
   /**
-   * The measured per-request fixed cost: protocol section + tool schema.
+   * **Upper bound** on a request's fixed cost: protocol section + tool schema,
+   * both injected. Since 0.4 both halves share one visibility gate, so an
+   * actual request pays 778 when the workspace is visible and 0 when it is
+   * not; this field answers "how much at worst", not "how much just now".
    *
    * `'unknown'` when the host estimator is unreachable: the measurement is
    * never fabricated (design §9). Status-time only; see

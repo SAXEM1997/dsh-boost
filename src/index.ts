@@ -1184,10 +1184,10 @@ function wireSessionEvents(
  * The tool costs 399 tokens of schema on **every** request, and until 0.4 it
  * was injected unconditionally (`when: () => true`): a session whose workspace
  * is not in the scope document could only ever get `skip:no-scope` back, yet
- * paid that schema forever. The measured fixed overhead is 778/request — the
- * protocol section (379) plus this schema (399) — and the projection's gross
- * saving on the 300 longest sessions is ~0.8%, so that overhead eats half the
- * net. Hiding the tool where it can do nothing is the cheapest saving in the
+ * paid that schema forever. The measured fixed-overhead **ceiling** is 778 per
+ * request (protocol section 379 + this schema 399, both visible); with the
+ * tool hidden an out-of-scope session now pays 0. The projection's gross saving
+ * on the 300 longest sessions is ~0.8%, so that ceiling ate half the net. Hiding the tool where it can do nothing is the cheapest saving in the
  * plugin.
  *
  * Visibility rules, in order:
@@ -1195,8 +1195,9 @@ function wireSessionEvents(
  * 1. No session key (a diagnostic assembly, a foreign agent shape) → **show**.
  *    A bug in this predicate must never remove the control plane.
  * 2. The visibility cache has no answer yet → **show**, for the same reason.
- *    Assemblies warm that cache before any request, so this is the state
- *    during the very first steps of a session.
+ *    A host that assembles before listing tools warms it, so this window is a
+ *    host whose `when` runs before `system-prompt/assemble` — not "the first
+ *    few steps" of every session.
  * 3. Otherwise the cached judgement, which is exactly what the protocol
  *    section uses — the two must never disagree about a workspace.
  *

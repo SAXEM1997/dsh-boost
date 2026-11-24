@@ -8,6 +8,40 @@ This file records user-visible changes. Format follows Keep a Changelog; version
 Design rationale lives in `docs/superpowers/specs/`; the release-acceptance procedure is in
 `docs/RELEASE.md`.
 
+## [0.4.3] - 2026-11-24
+
+两轴评审（Standards / Spec）对 0.3.14 → 0.4.2 的复审修复。其中两条是我在 0.4.x 里自己造出来的。
+
+### 我造的错
+
+- **同一事实抄了三份，只改了一份**：`boost` 是「唯一 scope 豁免 / 始终常驻 / `selected + []` 实际 399」
+  这三句话在 `operating.md` 与 `how-it-works.md` 里各有副本；0.4 改掉可见性后只改了其中一份，
+  另外两处与代码直接矛盾（评审两轴各自独立发现）。现在统一成「可见 778 / 不可见 0 / `selected + []` 0，
+  `fixedOverheadTokens` 是上界」。
+- **机械替换毁掉版本归属**：我为了升版本把文档里的 `0.4.1` 批量改成 `0.4.2`，把「0.4.1 交付了什么」
+  这段历史一起改写了，还把 `saved_tokens`/`spilled_bytes`（0.3.8）、`test/regression`（0.3.11）
+  的错误归属一并扩散。版本清单补回 `0.3.13`/`0.3.14`/`0.4.0`，每条按实际内容重写。
+
+### 测试（两条形式正确但抓不住回归）
+
+- 「已选中工作区仍可见」没有用例：把谓词改成「凡是判过的会话一律隐藏」，测试全绿。补了一个
+  真 registry + 真 `scope.json` 的 warm 后可见用例。
+- `continuation` 的内层量词（一个调用的多个字符串叶子）没有用例：`every` 改 `some` 全绿。
+  fixture 加了「一个调用、两个叶子、只绑定一个」的步。
+- 文档引用的 951 / 1.47% / 150 / 0.24% 没有任何测试保护；现在绑定到 `session-snapshot.json`。
+
+### 口径与清理
+
+- `duplicates.duplicateResultChars` 删除：它按到达顺序取 `resultTexts`，并行调用乱序到达时会把
+  字节算到别的调用上。字段没人用，删掉比留着错的好（快照同步重生成，其余字段不变）。
+- `continuation` 的三个隐含限定（同一 turn、去首尾空白、忽略 <4 字符）写进文档表格。
+- `operating.md` 的「工具不见了只有一个原因」不成立：补上「解析失败」与「协议段被宿主替换」
+  两个原因。
+- 设置页的 `HINT_OVERHEAD` 仍在描述 0.3 的成本模型（「只剩工具 schema」），标签还是「常驻开销（合计）」；
+  改成上界语义并重新构建客户端。
+- 恢复 `HookDeps.usage`/`sessionState`/`horizonFor` 与 `BoostDeps.host` 的严格可选类型——
+  `exactOptionalPropertyTypes` 在 0.4.0 被放宽得比编译器要求更宽；测试改为省略键而不是传 `undefined`。
+
 ## [0.4.2] - 2026-11-24
 
 质量仪（issue #20）。到 0.4.1 为止，仓库里每一项干预都只记 token 账，**没有任何一处回答「结果

@@ -210,7 +210,7 @@ export interface HookDeps {
    */
   budget?: StepBudget
   /** Usage pairing; the shared fallback when `sessions` is absent (T21/T23c). */
-  usage?: UsageLedger | undefined
+  usage?: UsageLedger
   /**
    * The host turn/step clock; `step()` is the only source of a call id's step.
    * The shared fallback when `sessions` is absent.
@@ -285,7 +285,7 @@ export interface HookDeps {
    * of a new turn, and otherwise retains the last turn until `clear` (or process
    * exit). The class documents the reasoning.
    */
-  sessionState?: ReceiptSessionState | undefined
+  sessionState?: ReceiptSessionState
   /** The host spill backend; absent skips apply-mode projection. */
   spill?: SpillBackend | undefined
   /**
@@ -356,7 +356,7 @@ export interface HookDeps {
    * Absent (the current production wiring) means the resolved config's
    * `horizonSteps` is the horizon in effect.
    */
-  horizonFor?: ((sessionId: string) => number) | undefined
+  horizonFor?: (sessionId: string) => number
   /**
    * Drop the per-session dispatch mirror on disposal.
    *
