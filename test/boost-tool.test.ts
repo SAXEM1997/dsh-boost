@@ -1402,8 +1402,9 @@ test('净额恒等式：gross − net 恰好等于三项被减数之和', async 
   const status = await getStatus(d)
   const gross = status.saved.projectionGross
   const net = status.saved.projectionNet
-  assert.equal(typeof gross, 'number')
-  assert.equal(typeof net, 'number')
+  // `assert.equal(typeof …)` does not narrow for the compiler; a control-flow
+  // check does, and it fails the test just as loudly.
+  if (typeof gross !== 'number' || typeof net !== 'number') assert.fail('expected a numeric net')
   const subtracted =
     (status.saved.retrievalContent ?? 0) + (status.saved.retrievalCalls ?? 0) + (status.saved.retrieval_legacy ?? 0)
   assert.equal(gross, net + subtracted, 'the three terms shown must close the gap to the gross')
