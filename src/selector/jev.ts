@@ -165,7 +165,10 @@ function requestOptions(input: ChooseInput): GenerateOptions {
     messages: [{ role: 'user', content: [{ type: 'text', text: selectorPromptText(input) }] }],
   }
   if (input.reasoningEffort !== undefined) {
-    options.reasoningEffort = input.reasoningEffort as GenerateOptions['reasoningEffort']
+    // Assign into a local of the target's exact type: `GenerateOptions`'
+    // optional field is `reasoningEffort?: X`, which no longer admits an
+    // explicit `undefined` under `exactOptionalPropertyTypes`.
+    options.reasoningEffort = input.reasoningEffort as NonNullable<GenerateOptions['reasoningEffort']>
   }
   return options
 }

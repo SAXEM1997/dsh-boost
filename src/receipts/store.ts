@@ -76,7 +76,7 @@ type ReceiptCore = {
   stepId?: string
   kind: ReceiptKind
   code: string
-  tool?: string
+  tool?: string | undefined
   [k: string]: unknown
 }
 
@@ -188,7 +188,7 @@ export function receiptHash(r: {
   sessionId: string
   turn: number
   stepId?: string
-  tool?: string
+  tool?: string | undefined
   args?: unknown
 }): string {
   const payload = {

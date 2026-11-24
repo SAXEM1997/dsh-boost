@@ -121,7 +121,7 @@ export interface ProjectApplyInput {
   /** Tool name, recorded on the spill source and used for its file name. */
   toolName: string
   /** Model-issued call id; defaults to `toolName`. */
-  callId?: string
+  callId?: string | undefined
   /** Human label for the artifact; defaults to `family`. */
   label?: string
   /** Spill backend, absent when the host has none (projection then stops). */

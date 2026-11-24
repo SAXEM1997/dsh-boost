@@ -115,9 +115,9 @@ export interface DecideInput {
   /** The spill backend that keeps the original retrievable. */
   spill: SpillBackend | undefined
   /** The tool name, for the spill source; defaults to the family. */
-  toolName?: string
+  toolName?: string | undefined
   /** The model-issued call id, for the spill source. */
-  callId?: string
+  callId?: string | undefined
   /**
    * A seam for parking the request → call association, so a timed-out call's
    * answer is still persisted when it lands (`attempt.ts`). Optional: without

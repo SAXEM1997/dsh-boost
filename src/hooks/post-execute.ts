@@ -210,7 +210,7 @@ export interface HookDeps {
    */
   budget?: StepBudget
   /** Usage pairing; the shared fallback when `sessions` is absent (T21/T23c). */
-  usage?: UsageLedger
+  usage?: UsageLedger | undefined
   /**
    * The host turn/step clock; `step()` is the only source of a call id's step.
    * The shared fallback when `sessions` is absent.
@@ -236,7 +236,7 @@ export interface HookDeps {
    * request carries `purpose: 'boost-selector'`, which the frozen stream hook
    * lets through untouched (Task 23c-2).
    */
-  llm?: LlmLike
+  llm?: LlmLike | undefined
   /**
    * Receipt distillation (ADR 0001, ticket #10): the one model call that
    * answers a family's fixed question about a long `bash`/`ssh` receipt.
@@ -246,7 +246,7 @@ export interface HookDeps {
    * call carries `purpose: 'boost-distill'`, which the stream hook passes
    * through untouched.
    */
-  distill?: DistillFn
+  distill?: DistillFn | undefined
   /**
    * The route a distillation call uses: `distillation.route` when configured,
    * else the boundary route the selector inherits. `undefined` records
@@ -285,9 +285,9 @@ export interface HookDeps {
    * of a new turn, and otherwise retains the last turn until `clear` (or process
    * exit). The class documents the reasoning.
    */
-  sessionState?: ReceiptSessionState
+  sessionState?: ReceiptSessionState | undefined
   /** The host spill backend; absent skips apply-mode projection. */
-  spill?: SpillBackend
+  spill?: SpillBackend | undefined
   /**
    * Session → spill locators of the receipts this plugin projected.
    *
@@ -313,7 +313,7 @@ export interface HookDeps {
    * Projection still clips, but records `estimate:'unknown'` and no token
    * numbers; substitution is refused before it can spend money (design §9).
    */
-  estimateText?: (t: string) => number
+  estimateText?: ((t: string) => number) | undefined
   /**
    * Which estimator produced a projection receipt's numbers.
    *
@@ -324,7 +324,7 @@ export interface HookDeps {
    * measurement, and admitting the type would let a future producer stamp a
    * fabricated figure as if the host had measured it.
    */
-  estimateKind?: 'host' | 'unknown'
+  estimateKind?: ('host' | 'unknown') | undefined
   /**
    * The host spill-notice predicate, injected instead of imported.
    *
@@ -356,7 +356,7 @@ export interface HookDeps {
    * Absent (the current production wiring) means the resolved config's
    * `horizonSteps` is the horizon in effect.
    */
-  horizonFor?: (sessionId: string) => number
+  horizonFor?: ((sessionId: string) => number) | undefined
   /**
    * Drop the per-session dispatch mirror on disposal.
    *

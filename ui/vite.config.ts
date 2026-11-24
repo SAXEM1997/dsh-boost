@@ -68,8 +68,11 @@ export default defineConfig(({ mode }) => {
     root: here,
     plugins: [react()],
     define: isClientBundle ? { 'process.env.NODE_ENV': JSON.stringify('production') } : {},
-    build: isClientBundle
-      ? {
+    // A spread, not `build: … : undefined`: an explicit `undefined` is a
+    // different thing from an absent key under `exactOptionalPropertyTypes`,
+    // and the dev build wants the key absent entirely.
+    ...(isClientBundle
+      ? { build: {
           // `BOOST_CLIENT_OUT_DIR` redirects the artifact so the artifact test
           // can build WITHOUT overwriting the committed `lib/client.js` it is
           // about to inspect — an in-place rebuild would repair the staleness
@@ -103,7 +106,7 @@ export default defineConfig(({ mode }) => {
               footer: loaderFooter,
             },
           },
-        }
-      : undefined,
+        } }
+      : {}),
   }
 })

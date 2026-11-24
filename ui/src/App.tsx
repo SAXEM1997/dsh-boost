@@ -97,7 +97,7 @@ function Card({
   )
 }
 
-function Degraded({ codes, unavailable }: { codes: readonly string[]; unavailable?: string }) {
+function Degraded({ codes, unavailable }: { codes: readonly string[]; unavailable?: string | undefined }) {
   const t = useT()
   const c = copyOf(t)
   // "Nothing is degraded" is only true when status answered. A failed envelope

@@ -56,7 +56,7 @@ interface ScopeFormProps {
    * panels use. `undefined` means status could not be read, so the notice
    * states the requirement without claiming it is met.
    */
-  hasSpill?: boolean
+  hasSpill?: boolean | undefined
   payload: StatePayload
   scopeCode: string | undefined
   onReload: () => void

@@ -317,7 +317,7 @@ export interface BoostDeps {
   scope: ScopeStore
   receipts: ReceiptStore
   /** Host capabilities measured by `apply`; absent when no host was probed. */
-  host?: BoostHostFacts
+  host?: BoostHostFacts | undefined
   /**
    * The usage ledger `status` reads for `cache_hit_ratio` / `prefix_drops`.
    *
@@ -327,7 +327,7 @@ export interface BoostDeps {
    * last one. Absent means no request has been observed (or no runtime is
    * wired), so the rate is `null` and the drop count `0`.
    */
-  usage?: UsageLedger
+  usage?: UsageLedger | undefined
   /**
    * The one fixed-overhead measurement, started at plugin load.
    *
@@ -406,7 +406,7 @@ export interface BoostDeps {
    * optional; `boostTool.execute` fills it from the host's `exec.signal` and a
    * cancelled call leaves `scope.json` untouched.
    */
-  signal?: AbortSignal
+  signal?: AbortSignal | undefined
 }
 
 /** The scope document's caller-writable fields. Everything else is store-owned. */
@@ -1342,7 +1342,7 @@ async function writeScope(
   scope: ScopeStore,
   mutate: (doc: ScopeDoc) => ScopeDoc,
   baseRevision: number,
-  signal?: AbortSignal,
+  signal?: AbortSignal | undefined,
 ): Promise<BoostResult<ScopeDoc>> {
   try {
     const doc = await scope.write(mutate, baseRevision, { signal })

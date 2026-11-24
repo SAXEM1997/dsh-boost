@@ -239,8 +239,10 @@ export class ScopeStore {
   private readonly lockTakeoverMs: number
   private readonly now: () => number
   private readonly warn: (message: string) => void
-  private cached?: { mtimeMs: number; text: string; doc: ScopeDoc }
-  private lockOwner?: string
+  // `| undefined` rather than `?`: the field is always declared, and these
+  // are cleared by assignment (`= undefined`) in several paths.
+  private cached: { mtimeMs: number; text: string; doc: ScopeDoc } | undefined
+  private lockOwner: string | undefined
   private readonly judgements = new Map<string, boolean>()
 
   constructor(private readonly dir: string, options: ScopeStoreOptions = {}) {
@@ -292,7 +294,7 @@ export class ScopeStore {
   async write(
     mutate: (doc: ScopeDoc) => ScopeDoc,
     baseRevision: number,
-    options: { signal?: AbortSignal } = {},
+    options: { signal?: AbortSignal | undefined } = {},
   ): Promise<ScopeDoc> {
     const signal = options.signal
     checkAbort(signal)

@@ -46,7 +46,7 @@ import type { AgentLike } from '../../src/types.js'
 /** One `ctx.tools.register` call: the definition plus its optional `when`. */
 type Registered = {
   def: any
-  when?: (c: { agent: AgentLike; signal: AbortSignal }) => boolean | Promise<boolean>
+  when?: ((c: { agent: AgentLike; signal: AbortSignal }) => boolean | Promise<boolean>) | undefined
 }
 
 /** One `ctx.systemPrompt.section` registration. */
@@ -78,7 +78,7 @@ export function fakeHost(overrides: Record<string, unknown> = {}): any {
   let lastSection: Section | undefined
   let last: AsyncIterable<StreamChunk> | undefined
 
-  const register = (def: unknown, opts?: { when?: Registered['when'] }): void => {
+  const register = (def: unknown, opts?: { when?: Registered['when'] | undefined }): void => {
     registrations.push({ def, when: opts?.when })
   }
   const resolve = (): readonly unknown[] => registrations.map(registration => registration.def)
