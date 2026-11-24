@@ -8,6 +8,39 @@ This file records user-visible changes. Format follows Keep a Changelog; version
 Design rationale lives in `docs/superpowers/specs/`; the release-acceptance procedure is in
 `docs/RELEASE.md`.
 
+## [0.4.0] - 2026-11-24
+
+**行为变更**：`boost` 工具不再无条件注入。它和协议段共用同一个可见性判定——本会话的工作区不在
+作用域内时，工具 schema 也不下发。
+
+### 为什么
+
+固定开销是每请求 778 token（协议段 379 + 工具 schema 399），而投影在 300 个最长会话上的毛节省
+约 0.8%——**开销吃掉了一半的净额**。0.3 及更早，工具是 scope 豁免、始终常驻：一个永远不会命中
+作用域的会话只能拿到 `skip:no-scope`，却每请求白付 399。把这两项交给同一个判定，是插件里最便宜
+的一笔节省。
+
+### 代价
+
+模型不能再在对话里替你把某个工作区打开。设置页写同一份 `scope.json` 的同样四个字段、走同一个
+CAS，所以控制面还在；失去的是「在对话里开」这条路。README 与 operating 的启用步骤已改成
+page-first。
+
+### 实现
+
+- `registerBoostTool` 的 `when` 从 `() => true` 改为读可见性判定。三个例外都让工具**显示**：
+  拿不到会话键（诊断装配）、可见性缓存还没热（会话最初几步）、判定为可见。前两条是刻意的
+  fail-open——控制面不能因为一个谓词 bug 就消失。
+- `ScopeStore.peekJudgement(key): boolean | undefined`：`judgement()` 把「没判过」折叠成
+  `false`（对必须 fail-closed 的判定是对的），而这里必须能区分「没判过」与「判过且不可见」。
+- `fixedOverheadTokens` 现在是**上界**（两项都注入时的合计），不随 scope 翻转；可见时 778、
+  不可见时 0。
+
+### 测试
+
+996 绿；新增四条可见性用例（冷缓存显示、判过不可见隐藏、无会话键显示、warm 后隐藏）。变异验证：
+把 `when` 改回 `() => true`，新用例变红。
+
 ## [0.3.14] - 2026-11-24
 
 第 12 轮通读评审（Standards + Spec 两轴）的修复。**没有 P0**；两条 P1 都在文档里。

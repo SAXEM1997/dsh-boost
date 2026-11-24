@@ -399,6 +399,19 @@ export class ScopeStore {
     return this.judgements.get(key) ?? fallback ?? false
   }
 
+  /**
+   * The cached judgement, or `undefined` when this key was never judged.
+   *
+   * `judgement()` collapses "not judged yet" into `false` — right for a
+   * decision that must fail closed, wrong for a caller that has to tell the
+   * two apart. The tool-visibility predicate is that caller: a cold cache must
+   * leave the tool **shown**, or the first steps of every session would hide
+   * the control plane.
+   */
+  peekJudgement(key: string): boolean | undefined {
+    return this.judgements.get(key)
+  }
+
   /** Async read path: stat + read + decode, all failures degraded. */
   private async readDisk(): Promise<DiskRead> {
     try {

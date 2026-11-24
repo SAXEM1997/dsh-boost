@@ -67,12 +67,12 @@ Node.js `>=24.9.0` and DSH `>=0.2.2-rc.4 <0.2.3-0` (a **range**, not an exact pi
 POSIX-only; v1 targets the web profile.
 
 ```bash
-dsh plugin --profile <name> add dsh-boost@^0.3.14 --registry=https://registry.npmjs.org/
+dsh plugin --profile <name> add dsh-boost@^0.4.0 --registry=https://registry.npmjs.org/
 ```
 
 `dsh plugin` requires a profile and forwards the remaining arguments to pnpm in that profile
 directory (so pnpm must be on `PATH`); for a local checkout, run `npm run build` first and pass the
-absolute path to `add`. npmjs has `latest` at `0.3.14`; a mirror may lag, so pass `--registry`
+absolute path to `add`. npmjs has `latest` at `0.4.0`; a mirror may lag, so pass `--registry`
 explicitly when the registry matters. Version history, mirrors and the `0.0.0-stage` trap are in
 the [operations guide](docs/operating.md#安装与版本) (Chinese). **You must restart DSH after
 installing** (plugins load at host startup); for the web profile, restart `dsh web`.
@@ -80,20 +80,19 @@ installing** (plugins load at host startup); for the web profile, restart `dsh w
 ## Enable it
 
 After installation the plugin is inert (with no `scope.json` it is `selected` + an empty list +
-shadow). `boost` is a **model tool, not a shell command** — this package has no `bin`, and every
-step is a tool call inside the conversation. The shortest honest path:
+shadow). **Enable it from the settings page** (`Settings → Token efficiency`) — until a workspace
+is selected, the model does not see the `boost` tool: it shares the protocol section's visibility
+gate, and not seeing it means not paying its 399 tokens. That is the 0.4 trade-off, and the price
+is losing the in-chat way to enable a workspace.
 
-1. Call `boost` with `{"cmd":"status"}`; confirm `ok: true` and an empty `degraded`.
-2. Write the workspace to expose; `baseRevision` is the `revision` you just read (`0` the first
-   time):
-
-   ```json
-   { "cmd": "scope-set", "body": { "mode": "selected", "workspaceIds": ["<workspace-id>"] }, "baseRevision": 0 }
-   ```
-
+1. Open the settings page and select the workspaces to expose under "scope" (or switch to
+   `global`), then save.
+2. Back in a session, `boost` is now visible; call it with `{"cmd":"status"}` and confirm
+   `ok: true` with an empty `degraded`.
 3. Shadow for a week: keep `shadow: true` and `projection: "shadow"`, and work normally.
-4. Confirm `hasSpill` is `true` **and** `degraded` does not carry `ERR_HOST_SPILL_UNUSABLE`, then
-   set `projection` to `"on"`.
+4. Set `projection` to `"on"` and **then** confirm `hasSpill` is `true` and `degraded` does not
+   carry `ERR_HOST_SPILL_UNUSABLE`. The order is load-bearing: that code only enters `degraded`
+   while `projection` is `"on"`, so checking first is a check that always passes.
 5. Once the shadow report is acceptable, set `shadow` to `false`; after the first real
    substitution, watch for the `content[].thinking` 400 as described in
    [`docs/RELEASE.md`](docs/RELEASE.md) §4.

@@ -58,27 +58,23 @@ Node.js `>=24.9.0`，DSH `>=0.2.2-rc.4 <0.2.3-0`（**区间**，不是精确钉�
 上可用；v1 面向 web profile。
 
 ```bash
-dsh plugin --profile <name> add dsh-boost@^0.3.14 --registry=https://registry.npmjs.org/
+dsh plugin --profile <name> add dsh-boost@^0.4.0 --registry=https://registry.npmjs.org/
 ```
 
 `dsh plugin` 要求指定 profile，其余参数转发给该 profile 里的 pnpm（所以 pnpm 必须在 PATH
 上）；本地 checkout 安装先 `npm run build`，再把绝对路径传给 `add`。npmjs 上的 `latest` 是
-`0.3.14`；镜像可能滞后，在意 registry 时显式带上 `--registry`。版本历史、镜像与
+`0.4.0`；镜像可能滞后，在意 registry 时显式带上 `--registry`。版本历史、镜像与
 `0.0.0-stage` 的坑见[运维](docs/operating.md#安装与版本)。装完**必须重启 DSH**（插件在宿主
 启动时加载）；web profile 就是重启 `dsh web`。
 
 ## 启用
 
-装上之后插件默认不做事（`scope.json` 不存在时是 `selected` + 空列表 + 影子）。`boost` 是
-**模型工具，不是 shell 命令**——这个包没有 `bin`，每一步都在对话里让模型调用。最短的诚实路径：
+装上之后插件默认不做事（`scope.json` 不存在时是 `selected` + 空列表 + 影子）。**启用走设置页**
+（`设置 → Token 效率`）——没有工作区被选中时，模型看不到 `boost` 工具：它和协议段共用同一个
+可见性判定，看不见就等于不花那 399 token。这是 0.4 的取舍，代价是失去「在对话里开工作区」。
 
-1. 调 `boost`，参数 `{"cmd":"status"}`，确认 `ok: true`、`degraded` 为空。
-2. 写入要暴露的工作区，`baseRevision` 取刚读到的 `revision`（首次为 `0`）：
-
-   ```json
-   { "cmd": "scope-set", "body": { "mode": "selected", "workspaceIds": ["<workspace-id>"] }, "baseRevision": 0 }
-   ```
-
+1. 打开设置页，在「作用域」里选中要暴露的工作区（或切 `global`），保存。
+2. 回到会话：`boost` 工具现在可见了，调 `{"cmd":"status"}` 确认 `ok: true`、`degraded` 为空。
 3. 影子一周：保持 `shadow: true`、`projection: "shadow"`，照常工作。
 4. 把 `projection` 设为 `"on"`，**然后**再确认 `hasSpill` 为 `true` 且 `degraded` 不含
    `ERR_HOST_SPILL_UNUSABLE`。顺序不能反：那个码只在 `projection: 'on'` 时才进 `degraded`，

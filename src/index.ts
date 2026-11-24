@@ -1181,27 +1181,43 @@ function wireSessionEvents(
 /**
  * Register the `boost` tool family.
  *
- * After T19 the family is just this one tool. The tool itself is scope-exempt
- * (`when: () => true`) because it is the only way a user can enable a workspace
- * that is not enabled yet — gating it on the scope document would make
- * `selected + []` impossible to leave. The protocol section is not exempt; T17
- * already handles it.
+ * The tool costs 399 tokens of schema on **every** request, and until 0.4 it
+ * was injected unconditionally (`when: () => true`): a session whose workspace
+ * is not in the scope document could only ever get `skip:no-scope` back, yet
+ * paid that schema forever. The measured fixed overhead is 778/request — the
+ * protocol section (379) plus this schema (399) — and the projection's gross
+ * saving on the 300 longest sessions is ~0.8%, so that overhead eats half the
+ * net. Hiding the tool where it can do nothing is the cheapest saving in the
+ * plugin.
  *
- * No step-`when` capability probe is needed: the condition is constant-true, so
- * a host that ignored the registration options would register it
- * unconditionally — exactly the behaviour this build wants. The old probe only
- * tested `typeof tools.register === 'function'`, which every host since
- * 0.2.2-rc.1 satisfies, so the branch it fed could never run; it was removed
- * rather than left as a claim that can never be false.
+ * Visibility rules, in order:
+ *
+ * 1. No session key (a diagnostic assembly, a foreign agent shape) → **show**.
+ *    A bug in this predicate must never remove the control plane.
+ * 2. The visibility cache has no answer yet → **show**, for the same reason.
+ *    Assemblies warm that cache before any request, so this is the state
+ *    during the very first steps of a session.
+ * 3. Otherwise the cached judgement, which is exactly what the protocol
+ *    section uses — the two must never disagree about a workspace.
+ *
+ * The cost is deliberate: a user can no longer ask the model to enable a
+ * workspace. The settings page writes the same four fields through the same
+ * CAS, so the control plane survives; what is lost is the in-chat path, which
+ * only mattered while the page was unavailable.
  */
 function registerBoostTool(ctx: PluginContext, deps: BoostDeps): void {
   // Annotating with the host's ToolDefinition makes a host-side tightening a
-  // build error instead of a runtime registration failure. The tool is
-  // scope-exempt by design (`when: () => true`), so it needs no registry: the
-  // registry is only the visibility warm's input, wired above.
+  // build error instead of a runtime registration failure.
   const definition: ToolDefinition = boostTool(deps)
 
-  ctx.tools.register(definition, { when: () => true })
+  ctx.tools.register(definition, {
+    when: ({ agent }) => {
+      const sessionId = sessionIdOf(agent)
+      if (sessionId === undefined) return true
+      const known = deps.scope.peekJudgement(sessionId)
+      return known ?? true
+    },
+  })
 }
 
 /**

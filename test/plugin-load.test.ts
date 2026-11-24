@@ -95,7 +95,7 @@ test('apply 重复调用不重复挂载（重复 section 视为已装配）', ()
   assert.equal(host.tools.definitions.length, 1)
 })
 
-test('apply 在 tools.resolve 存在时注册 boost 工具，when 豁免 scope', async () => {
+test('apply 在 tools.resolve 存在时注册 boost 工具（注册无条件，可见性按 scope 判定）', async () => {
   const host = fakeHost()
   plugin.apply(host as unknown as PluginContext, {})
   assert.equal(host.tools.definitions.length, 1)
@@ -104,11 +104,14 @@ test('apply 在 tools.resolve 存在时注册 boost 工具，when 豁免 scope',
   assert.equal(typeof def.output.render, 'function')
   assert.equal(typeof def.execute, 'function')
 
-  // The boost tool is the enable entry point: even an agent whose workspace is
-  // not in the scope document must still see it.
+  // Registration is unconditional — the definition is what the host lists and
+  // what `boost status` reports — but visibility follows the scope judgement.
+  // With no warmed judgement yet the tool is shown (fail-open); see the
+  // dedicated tests below for the visible/invisible cases.
   assert.equal(
     await host.visible('boost', { session: { header: { id: 's1', cwd: '/not-in-scope' } } }),
     true,
+    'an unwarmed session key falls open, so the control plane is never lost to a cold cache',
   )
 })
 
@@ -977,3 +980,47 @@ test('cordis.patch.yml 的 distillation 段与 DEFAULT_CONFIG 逐键一致（票
   const config = document[0]?.insert[0]?.config
   assert.deepEqual(config?.distillation, DEFAULT_CONFIG.distillation)
 })
+
+test('boost 工具按 scope 判定可见：warm 出「不可见」后隐藏，可见时显示', async () => {
+  const host = fakeHost()
+  plugin.apply(host as unknown as PluginContext, {})
+  // No workspace registry entry for this cwd, so the assemble that warms the
+  // judgement resolves it as out of scope.
+  const agent = { session: { header: { id: 's-out', cwd: '/not-in-scope' } } }
+
+  // Cold cache: fail open, so the first steps never lose the control plane.
+  assert.equal(await host.visible('boost', agent), true)
+
+  await warm(host, agent)
+  assert.equal(
+    await host.visible('boost', agent),
+    false,
+    'an out-of-scope workspace must not pay the 399-token schema on every request',
+  )
+})
+
+test('boost 工具在拿不到会话键时仍然显示（诊断装配不能失去控制面）', async () => {
+  const host = fakeHost()
+  plugin.apply(host as unknown as PluginContext, {})
+  assert.equal(await host.visible('boost', {}), true)
+  assert.equal(await host.visible('boost', undefined as unknown as object), true)
+})
+
+/** Warm the visibility judgement the way a real assembly does. */
+async function warm(host: ReturnType<typeof fakeHost>, agent: unknown): Promise<void> {
+  const section = host.section()
+  const assembly = {
+    sections:
+      section === undefined
+        ? []
+        : [
+            {
+              name: section.name,
+              text: typeof section.text === 'function' ? section.text({ scope: agent }) : section.text,
+            },
+          ],
+    contexts: [],
+    variables: {},
+  }
+  await host.callHook('system-prompt/assemble', [assembly, { agent, scope: agent }], () => assembly)
+}
