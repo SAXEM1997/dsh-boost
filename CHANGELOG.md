@@ -8,6 +8,17 @@ This file records user-visible changes. Format follows Keep a Changelog; version
 Design rationale lives in `docs/superpowers/specs/`; the release-acceptance procedure is in
 `docs/RELEASE.md`.
 
+## [0.3.10] - 2026-11-24
+
+### 新增
+
+- `npm run verify:negatives`（issue #15）：把真实 tarball 逐一改坏再跑发布门，证明门能失败并点出是哪一项。之前十二组断言里只有客户端 bundle 一组有负例，其余十一组改坏仍 `exit 0`——一个不会失败的门等于没有门。覆盖九组：`dist-index-present`、`tarball-allowlist`、`exports-targets`、`client-bundle-structure`、`bundle-patch`、`declarations-host-free`、`install`、`typecheck`、`import-require-locales`。
+- CI 在发布门之后跑它。剩下三组没有用例，且**构造不出**：`typecheck-no-host-stubs` 是 `typecheck` 的严格超集（能过前者的产物必过后者，它的独立防护是更早跑的 `declarations-host-free` 正则）；第二次 `import-require-locales` 是同一段探针跑在带生命周期脚本的那次安装上，而 `install` 用例已经证明那次安装被检查。
+
+### 修复
+
+- 写这个 harness 时我把一个相对路径当成了仓库路径，`writeFileSync('./lib/client.js')` 把构建产物覆盖成 `module.exports = {}`，随后基线自检报「客户端缺信封」才发现。已修：所有写入都以解包目录为根，并在脚本头注明这一点。
+
 ## [0.3.9] - 2026-11-24
 
 ### 修复
