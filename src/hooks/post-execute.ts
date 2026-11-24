@@ -2068,6 +2068,7 @@ function distillEvidence(outcome: DistillOutcome, omittedCodePoints?: number): R
     ...(e.inputChars === undefined ? {} : { distill_input_chars: e.inputChars }),
     ...(outcome.omittedBytes === undefined ? {} : { distill_omitted_bytes: outcome.omittedBytes }),
     ...(outcome.distillBytes === undefined ? {} : { distill_bytes: outcome.distillBytes }),
+    ...(outcome.spilledBytes === undefined ? {} : { distill_spilled_bytes: outcome.spilledBytes }),
     ...(omittedCodePoints === undefined ? {} : { distill_omitted_code_points: omittedCodePoints }),
     ...(e.reason === undefined ? {} : { reason: e.reason }),
   }
@@ -2188,7 +2189,9 @@ async function finishDistillDecision(
   // same way.
   if (outcome.locator !== undefined) deps.retrievals?.record(ctx.sessionId, outcome.locator)
 
-  const view = truncationViewOf(target, deps.config, family)
+  // Resolved here rather than threaded through: the distill decision already
+  // resolved one copy, and the seam is allowed to answer differently.
+  const view = truncationViewOf(target, deps.config, family, await resolveFooterFormatter(deps))
   const priced = view === undefined || estimate === undefined
     ? { before: undefined, after: undefined }
     : { before: safeEstimate(estimate, view), after: safeEstimate(estimate, outcome.content) }
@@ -2215,20 +2218,28 @@ async function finishDistillDecision(
 /**
  * The truncation view's rendered bytes, for pricing a distillation against it.
  *
- * Carries the preserved signals, like every other renderer of this view, so a
- * baseline never understates what the projection path would have shown. It does
- * **not** carry the footer: the footer names the spill artifact, and at decision
- * time no artifact exists yet. The omission makes this baseline a few dozen
- * tokens shorter than the applied view, so a distill receipt's `before` is
- * slightly conservative relative to a projection receipt's — deliberately, and
- * never in the other direction.
+ * The same shape an applied projection commits — head line, head, footer, tail,
+ * signals — so a distill receipt's `before` names the same bytes a projection
+ * receipt would have carried. The footer uses a probe locator and an empty
+ * retrieval hint: at decision time no artifact exists, and the probe is a few
+ * tokens shorter than a real `retrievalHint`, which keeps the comparison on the
+ * conservative side.
  */
-function truncationViewOf(text: string, cfg: BoostConfig, family: ToolFamily): string | undefined {
+function truncationViewOf(
+  text: string,
+  cfg: BoostConfig,
+  family: ToolFamily,
+  formatFooter: FormatFooter | undefined,
+): string | undefined {
   const params = cfg.projection[family]
   if (params === undefined) return undefined
   const truncation = truncate(text, params)
   if (truncation === null) return undefined
-  return `${renderHeadLine(truncation)}\n${truncation.head}\n${truncation.tail}${signalSuffix(truncation)}`
+  const footer =
+    formatFooter === undefined
+      ? ''
+      : formatFooter({ kind: 'exact', count: truncation.omittedBytes }, { locator: '', retrievalHint: '' })
+  return `${renderHeadLine(truncation)}\n${truncation.head}\n${footer}\n${truncation.tail}${signalSuffix(truncation)}`
 }
 
 /**

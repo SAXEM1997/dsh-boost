@@ -518,6 +518,24 @@ export interface BoostStatus {
      * This is the only honest record of that half, so the page shows both.
      */
     input_chars: number
+    /**
+     * Tokens the adopted bodies saved against the truncation view, summed.
+     *
+     * The only per-method measurement of what distillation itself bought: the
+     * projection gross pools adopted and merely-truncated receipts together, so
+     * without this the answer to "did distilling pay" is unrecoverable. Receipts
+     * that were rejected or fell back contribute nothing here — their saving, if
+     * any, came from the ordinary projection path and is already in the gross.
+     */
+    saved_tokens: number
+    /**
+     * UTF-8 bytes of originals spilled for a decision that then refused them.
+     *
+     * The host spill backend has no delete, so a `not-smaller` refusal leaves
+     * its artifact behind. Nothing reclaims it; counting it here is what makes
+     * the cost visible instead of invisible.
+     */
+    spilled_bytes: number
   }
   /** Receipt count per `code`, over every shard (including the empty session id). */
   counts: Record<string, number>
@@ -720,7 +738,7 @@ async function aggregate(
   let unpricedRetrievals = 0
   let legacyRetrievals = 0
   let legacyRetrievalCost = 0
-  const distill = { calls: 0, tokens: 0, adopted: 0, rejected: 0, fallback: 0, input_chars: 0 }
+  const distill = { calls: 0, tokens: 0, adopted: 0, rejected: 0, fallback: 0, input_chars: 0, saved_tokens: 0, spilled_bytes: 0 }
 
   for await (const receipt of receipts.scan()) {
     // A receipt is untrusted text from a file: `counts` has no prototype so a
@@ -754,6 +772,10 @@ async function aggregate(
       if (typeof tokens === 'number' && Number.isFinite(tokens) && tokens >= 0) distill.tokens += tokens
       const chars = receipt.distill_input_chars
       if (typeof chars === 'number' && Number.isFinite(chars) && chars >= 0) distill.input_chars += chars
+      const saved = receipt.distill_saved_tokens
+      if (typeof saved === 'number' && Number.isFinite(saved) && saved > 0) distill.saved_tokens += saved
+      const spilled = receipt.distill_spilled_bytes
+      if (typeof spilled === 'number' && Number.isFinite(spilled) && spilled > 0) distill.spilled_bytes += spilled
     }
 
     // Only the settled line carries a measured saving; the synth-time line is

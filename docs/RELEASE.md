@@ -523,7 +523,7 @@ JSON 体返回一个码，页面据码决定说什么。`ERR_CLIENT_*` 是页面
 | `distill-rejected:empty` | 答案正文为空（或只有空白）。空正文能通过其余每一道门——它平凡地是原文的子串，而 marker + 页脚远短于截断视图——所以单独拒绝，且在落盘原文之前拒绝 | 模型没按 JSON 契约给正文。看 `distill_tokens`；必要时收紧 `maxOutputTokens` 或换 `distillation.route` |
 | `distill-rejected:unverifiable` | 答案没给出任何引用，或给出的引用不是原文的非空子串（伪造），或落盘产物被改过 | 模型在编引用。对比同一模型的 `adopted` 与 `distill_tokens`（注意 `adopted` 含重放采用，可能多于 `calls`）；必要时换 `distillation.route` |
 | `distill-rejected:not-worth-it` | 回本预判否决：`最乐观节省（截断视图 − 页脚，含被保留的信号行）×（1 + 剩余步数）` 不大于 `回执输入 + 输出预算`。这条回执无论蒸成什么样都赚不回那次调用（典型是剩余步数很少的会话末段）。回执没有可比的截断视图（未过窗口、超 256 KiB、或窗口不会缩短它）或估算器答不出价格时，这道门**弃权**，不会记成本码 | 预期行为。**不钉墓碑**：视界随会话增长，下次同一回执会重新判断。只在宿主同时提供估算器与剩余步数时生效，两者缺一则这道门关闭 |
-| `distill-rejected:not-smaller` | 蒸馏正文 + 页脚按 UTF-8 字节不短于同回执的截断视图，净赚为负，不采用 | 正常门；持续出现说明该族的正文太长（`maxOutputTokens` 没约束住），收紧它 |
+| `distill-rejected:not-smaller` | 蒸馏正文 + 页脚按 UTF-8 字节不短于同回执的截断视图，净赚为负，不采用。**这是唯一「原文已经落盘再被拒」的路径**：比较需要真实页脚，页脚要命名产物，而宿主 spill 后端没有删除能力——被弃的原文会留下，收据上的 `distill_spilled_bytes` 是它唯一的痕迹，`status.distill.spilled_bytes` 按它汇总 | 正常门；持续出现说明该族的正文太长（`maxOutputTokens` 没约束住），收紧它；`spilled_bytes` 长期增长说明该调大 `triggerChars` 或调小 `maxOutputTokens` |
 
 | `distill`（采用） | 采用时写入的是 `kind:'projection'`、`code:'projected'` 的收据，`mode:'adopted'`，带 `distill_calls`/`distill_tokens`/`distill_omitted_bytes`/`distill_bytes`/`distill_saved_tokens` | 无需处置；`boost status` 的 `distill.calls/tokens/adopted` 由它汇总。`adopted` 数的是**采用次数**（含读表重放，那时 `distill_calls` 为 `0`），所以它可能大于 `calls`——`calls` 只数真花掉的调用 |
 | `distill-late` | 一次超时调用迟到落盘后另写的收据，`kind:'skip'`、`mode:'late'`、`distill_calls:0`。只把 `distill_tokens` 与 `distill_input_chars` 加进 `status.distill`，`calls` 与结局计数留在超时那条上 | 无需处置；出现它说明该回执的答案迟到但落盘了，下次渲染会直接采用 |

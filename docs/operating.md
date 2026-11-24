@@ -303,7 +303,10 @@ token，它只产出下一节的四个比例；`selected + []` 下协议段为�
 
 运行态在 `status.distill`：`calls`（真花掉的调用数）、`tokens`（完成 token）、`input_chars`
 （送进去的字符数——它是成本主体，`tokens` 只是输出侧）、`adopted`（采用次数，**含读表重放**，
-所以可能大于 `calls`）、`rejected`、`failed`。收据码见 `docs/RELEASE.md` 的 `distill-*` 段。
+所以可能大于 `calls`）、`rejected`、`failed`、`saved_tokens`（**只有采用收据贡献**，是蒸馏这条路
+自己的节省；`saved.projectionGross` 把采用与普通投影混在一起，回答不了这个问题）、
+`spilled_bytes`（被拒但原文已经落盘的字节数——`not-smaller` 是唯一这样的路径，宿主后端没有删除
+能力，所以这些文件会留下；这个计数是它们唯一的痕迹）。收据码见 `docs/RELEASE.md` 的 `distill-*` 段。
 
 **两道门，各管一件事**：采用后的**字节门**只看视图大小——「蒸馏正文 + 页脚」按 UTF-8 字节严格
 短于同回执的截断视图，它回答「每次重放是不是更小」。调用之前的**回本预判**回答另一件事：

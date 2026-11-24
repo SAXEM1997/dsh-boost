@@ -181,6 +181,17 @@ export interface DistillOutcome {
   locator?: string
   /** The facts `status` and the receipt line report. */
   evidence: DistillEvidence
+  /**
+   * UTF-8 bytes written to the spill store for this decision, when it was
+   * written and then refused.
+   *
+   * `not-smaller` is the one refusal that lands after the original has been
+   * spilled — the size comparison needs the real footer, and the footer names
+   * the artifact. Nothing deletes that artifact (the host backend has no
+   * delete), so it becomes an orphan; reporting its size keeps the cost visible
+   * instead of letting every refusal silently add a file.
+   */
+  spilledBytes?: number
 }
 
 /**
@@ -438,7 +449,8 @@ async function adopt(
   // Strictly smaller than the truncation view of the same receipt, measured in
   // UTF-8 bytes: the unit the footer counts and the ledger reports.
   if (truncationBytes === null || Buffer.byteLength(composed, 'utf8') >= truncationBytes) {
-    return await reject('not-smaller')
+    const refusal = await reject('not-smaller')
+    return { ...refusal, spilledBytes: Buffer.byteLength(text, 'utf8') }
   }
 
   // Written on the first decision, and also when a table hit had no pin to

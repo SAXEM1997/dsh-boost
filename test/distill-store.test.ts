@@ -149,6 +149,29 @@ test('裁剪顺手回收陈旧的 .tmp，但不动刚写的那个', async () => 
   )
 })
 
+test('只写不超过假定值的产物时，字节上限的误差不超过一条产物', async () => {
+  const dir = await root()
+  const maxBytes = 20_000
+  const store = new DistillStore(dir, { maxFiles: 1000, maxBytes })
+  // Every product is at or below ASSUMED_PRODUCT_BYTES, so the count estimate
+  // (files × 4096) is never an under-estimate and the measured pass may not run
+  // at all. The bound that holds is therefore "cap + one product", not "cap".
+  const small = { ...PRODUCT, text: 'x'.repeat(3000), quotes: [] }
+  for (let n = 0; n < 12; n += 1) {
+    await store.write('s1', { file: `s-${n}-v1` }, small)
+    await new Promise((resolve) => setTimeout(resolve, 5))
+  }
+  const files = (await readdir(join(dir, 'distilled'))).filter((name) => name.endsWith('.json'))
+  let total = 0
+  let largest = 0
+  for (const name of files) {
+    const size = (await stat(join(dir, 'distilled', name))).size
+    total += size
+    largest = Math.max(largest, size)
+  }
+  assert.ok(total <= maxBytes + largest, `total ${total} stays within one product of ${maxBytes}`)
+})
+
 test('写入超过总字节上限时也裁，且至少留下刚写的那一条', async () => {
   const dir = await root()
   const store = new DistillStore(dir, { maxFiles: 1000, maxBytes: 200 })

@@ -8,6 +8,22 @@ This file records user-visible changes. Format follows Keep a Changelog; version
 Design rationale lives in `docs/superpowers/specs/`; the release-acceptance procedure is in
 `docs/RELEASE.md`.
 
+## [0.3.8] - 2026-11-24
+
+### 新增
+
+- `boost status` 的 `distill` 增加 `saved_tokens`：只累加被采用的收据，回答「蒸馏这条路自己省了多少」。此前 `saved.projectionGross` 把采用与普通投影混在一起，这个数字无处可查。
+
+### 修复
+
+- `distill` 增加 `spilled_bytes` 并随 `distill_spilled_bytes` 落进收据：`not-smaller` 是唯一「先落盘原文、再拒绝」的路径，宿主的 spill 后端没有删除能力，被弃的原文就成了孤儿。现在它至少是可见的计数，不再每次拒绝都静默多一个文件。
+- 蒸馏收据的 `before` 现在含页脚：`truncationViewOf` 之前渲染 `head 行 + head + tail + signals`，而投影提交的字节多一个页脚，导致同一回执在两条路径下的基线差一个页脚（实测少报 24 token / 3.9%）。现在用与 `truncationViewBytes` 相同的探测页脚，方向仍然保守（探测串比真实 `retrievalHint` 短）。
+- 保留上限的误差写成不变量并加边界测试：只写不超过假定值（4096 字节）的产物时，目录总量不超过 `maxBytes + 一条产物`；超过假定值的那次写会强制测量。
+
+### 文档
+
+- `docs/operating.md` 的蒸馏一节补 `saved_tokens` 与 `spilled_bytes` 两个字段的含义；`docs/RELEASE.md` 的收据码表补 `distill_spilled_bytes`。
+
 ## [0.3.7] - 2026-11-24
 
 ### 文档

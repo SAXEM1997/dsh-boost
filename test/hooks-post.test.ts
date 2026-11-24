@@ -2159,7 +2159,40 @@ test('#10 超阈值 bash 回执：历史里是蒸馏正文 + 页脚，spill 里�
   assert.equal(typeof receipt.before, 'number')
   assert.equal(typeof receipt.after, 'number')
   assert.ok(typeof receipt.distill_saved_tokens === 'number' && receipt.distill_saved_tokens > 0)
+})
 
+test('#10 基线含页脚：同一个回执换一个更长的页脚，蒸馏省下的量随之变化', async () => {
+  // A one-sided bound cannot catch a dropped footer (the baseline only gets
+  // shorter, so any "no more than" assertion still holds). The footer's
+  // participation is only observable by changing it: the adopted body is
+  // identical in both runs, so `before` — and therefore the saving — must move
+  // by exactly the footer's delta.
+  // The footer comes from `resolveFooter`, not `deps.formatFooter`: that is the
+  // seam the production path resolves through.
+  const short = await distillSetup({
+    deps: { resolveFooter: () => (o: Any, ref: Any) => `(${o.count}b ${ref.locator})` },
+  })
+  const long = await distillSetup({
+    deps: {
+      resolveFooter: () => (o: Any, ref: Any) =>
+        `(${o.count} bytes omitted. The full formatted result is stored at ${ref.locator}. ${ref.retrievalHint}. Read that file again if you need the middle of the output.)`,
+    },
+  })
+  const text = bashReceipt()
+  await runBash(short.host, text)
+  await runBash(long.host, text)
+
+  const a = short.receipts.find((r) => r.mode === 'adopted')
+  const b = long.receipts.find((r) => r.mode === 'adopted')
+  assert.ok(a !== undefined && b !== undefined)
+  assert.ok(
+    a.before !== b.before,
+    `baseline must move with the footer: ${String(a.before)} vs ${String(b.before)}`,
+  )
+  assert.ok(
+    (b.before as number) - (a.before as number) >= 10,
+    'the difference is the footer delta in tokens, not rounding',
+  )
 })
 
 test('#10 同一回执重放两次：字节相同、数值相同，假 DistillFn 只被调用一次', async () => {
@@ -2225,6 +2258,45 @@ test('#10 蒸馏比截断长 → distill-rejected:not-smaller', async () => {
   assert.ok(receipt)
   assert.equal(receipt.mode, 'rejected')
   assert.equal(receipt.reason, 'not-smaller')
+  // This is the one refusal that lands after the original was spilled: the
+  // size comparison needs the real footer, and the footer names the artifact.
+  // The host backend has no delete, so the artifact stays — report its size
+  // rather than letting every refusal add an invisible file.
+  assert.equal(receipt.distill_spilled_bytes, Buffer.byteLength(text, 'utf8'))
+})
+
+test('#10 status 把蒸馏自己的节省与拒绝留下的原文分别记账', async () => {
+  const { runBoost } = await import('../src/tools/boost.ts')
+  const env = await distillSetup()
+  await runBash(env.host, bashReceipt('a'))
+  // A second receipt whose "summary" is as long as the input: refused after
+  // its original was spilled, so it contributes spilled bytes but no saving.
+  const long = await distillSetup({
+    deps: {
+      distill: {
+        async call(request: Any) {
+          return { text: request.text, quotes: ['npm ERR! Test failed: expected 3 got 4'], model: 'm' }
+        },
+      },
+    },
+  })
+  await runBash(long.host, bashReceipt('b'))
+
+  const status = (await runBoost({
+    args: { cmd: 'status' },
+    scope: env.deps.scope,
+    receipts: {
+      scan: async function* () {
+        yield* [...env.receipts, ...long.receipts] as Any[]
+      },
+      readErrors: () => 0,
+      scanTruncated: () => false,
+      stopped: () => false,
+    } as Any,
+  }) as Any).data
+
+  assert.ok(status.distill.saved_tokens > 0, 'the adopted receipt reports what distillation saved')
+  assert.ok(status.distill.spilled_bytes > 0, 'the refused receipt reports the original it left behind')
 })
 
 test('#10 挂起超过 timeoutMs → distill-rejected:timeout，不抛', async () => {
@@ -2349,7 +2421,19 @@ test('#10 蒸馏收据带 distill_mode，status 据此计 calls/tokens/adopted/r
   })
   assert.equal(result.ok, true)
   const status = (result as Any).data
-  assert.deepEqual(Object.keys(status.distill).sort(), ['adopted', 'calls', 'fallback', 'input_chars', 'rejected', 'tokens'])
+  assert.deepEqual(Object.keys(status.distill).sort(), [
+    'adopted',
+    'calls',
+    'fallback',
+    'input_chars',
+    'rejected',
+    'saved_tokens',
+    'spilled_bytes',
+    'tokens',
+  ])
+  // The only per-method measurement of what distillation bought: adopted
+  // receipts record it, everything else contributes nothing.
+  assert.ok(status.distill.saved_tokens > 0, 'an adopted receipt reports its saving here')
   // Two receipts: each called the model (a different receipt is a different
   // pinned product) and each was adopted. `calls` counts the model calls;
   // `adopted` counts the decisions; `tokens` sums only what the model reported.
