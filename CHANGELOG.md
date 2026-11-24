@@ -8,6 +8,38 @@ This file records user-visible changes. Format follows Keep a Changelog; version
 Design rationale lives in `docs/superpowers/specs/`; the release-acceptance procedure is in
 `docs/RELEASE.md`.
 
+## [0.4.1] - 2026-11-24
+
+一期有两条缺口挂着**从没被仪器测量过的**「重启条件」：PTC 等「批量步的收益标签」，去重等
+「重复率」。没有分母，条件永远无法满足——于是它们悬了整个 0.1–0.4。
+
+这一版把它们量出来，并因此改变了二期的路线。
+
+### 新增测量（`scripts/session-stats.mjs`）
+
+| 指标 | 定义 | 300 个最长会话上的实测 |
+|---|---|---|
+| `continuation` | 一步里**所有**调用的字符串参数都逐字来自上一步回执 | 951 / 54,141 步（1.76%），占 1.47% 的 token |
+| `duplicates` | 与紧邻上一步或同一步内另一个调用 `(tool, 规范化参数)` 完全相同 | 150 / 62,624（0.24%） |
+
+两个数都是**天花板**：`continuation` 只证明那些往返不需要模型决策，不证明可以无人值守地
+一起发出（副作用不在日志里）；`duplicates` 只覆盖现有语料。
+
+### 结论（写进文档，不只是数字）
+
+**「非单工具步占 20.2%」不是可合并的比例。** 多调用步里的调用多数彼此独立、本来就已经在同
+一次往返里；真正能省的是 1.76% 的确定性续跑与 0.24% 的重复。所以：
+
+- PTC 从「等影子期数据」变成「上限 1.47%，重启条件改为实测收益 + 质量标签」。
+- 去重/合并（设计 N5）从「无法计算」变成「可计算且很小」——按现有证据不值得做。
+
+### 其它
+
+- `scripts/session-snapshot.json` 重生成：`selection`/`asOf` 与 54,141 步 / 62,624 调用 /
+  10,575,904,022 token 逐字段不变，只多了 `continuation` 与 `duplicates`。
+- `docs/operating.md` 的两条「已知限制」按实测重写；`docs/how-it-works.md` 新增一节讲这两个
+  分母能证明什么、不能证明什么。
+
 ## [0.4.0] - 2026-11-24
 
 **行为变更**：`boost` 工具不再无条件注入。它和协议段共用同一个可见性判定——本会话的工作区不在

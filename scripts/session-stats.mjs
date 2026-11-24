@@ -139,6 +139,37 @@ function prefixInfo(path, asOf) {
 // ---------------------------------------------------------------------------
 
 /** The projection family of a host tool name, or `other` when unmapped. */
+/**
+ * A stable string for an argument object, so two calls can be compared for
+ * "same tool, same arguments" without depending on key order.
+ *
+ * Canonicalisation is deliberately shallow-but-total: arrays keep their order
+ * (a list is a value), object keys are sorted, and everything else is
+ * `JSON.stringify`. Absent arguments and `{}` collapse to the same key, which
+ * is what a duplicate-call measurement wants.
+ */
+function canonicalArgs(value) {
+  const walk = (node) => {
+    if (Array.isArray(node)) return node.map(walk)
+    if (node !== null && typeof node === 'object') {
+      const out = {}
+      for (const key of Object.keys(node).sort()) out[key] = walk(node[key])
+      return out
+    }
+    return node
+  }
+  try {
+    return JSON.stringify(walk(value ?? {}))
+  } catch {
+    return '""'
+  }
+}
+
+/** The `name\0canonicalArgs` keys of one step's calls. */
+function keysOfStep(row) {
+  return row.names.map((name, index) => `${name}\u0000${canonicalArgs(row.argsList[index])}`)
+}
+
 function familyOf(name) {
   if (typeof name !== 'string' || name === '') return 'other'
   if (FAMILIES.has(name)) return name
@@ -306,12 +337,36 @@ function analyseSession(path, asOf) {
   let full = 0
   let partial = 0
   const callsPerStep = {}
+  // M1: round trips that exist only to hand a receipt back as an argument.
+  //
+  // This is the honest ceiling for "freeze the plan / batch the dispatch":
+  // a step whose **every** call takes all of its string arguments verbatim
+  // from the previous step's receipts needed no model decision at all. What
+  // it cannot show is whether those calls were *safe* to issue together —
+  // that needs effects, which the log does not carry.
+  const continuation = { steps: 0, tokens: 0 }
+  // M1: repeated calls. `previous` is the key of the immediately preceding
+  // step's calls; same-step repeats are counted separately because "重复" over
+  // a batch is a different failure from re-issuing a call next turn.
+  const duplicates = { calls: 0, sameStep: 0, acrossStep: 0, duplicateResultChars: 0 }
 
   for (let index = 0; index < steps.length; index += 1) {
     const rowCalls = steps[index].names.length
     callsPerStep[rowCalls] = (callsPerStep[rowCalls] ?? 0) + 1
     const row = steps[index]
     const count = row.names.length
+    const previousKeys = index === 0 ? new Set() : new Set(keysOfStep(steps[index - 1]))
+    const seenThisStep = new Set()
+    for (let call = 0; call < count; call += 1) {
+      const key = `${row.names[call]}\u0000${canonicalArgs(row.argsList[call])}`
+      duplicates.calls += 1
+      if (seenThisStep.has(key)) duplicates.sameStep += 1
+      else if (previousKeys.has(key)) duplicates.acrossStep += 1
+      else seenThisStep.add(key)
+      if (seenThisStep.has(key) || previousKeys.has(key)) {
+        duplicates.duplicateResultChars += (row.resultTexts[call] ?? '').length
+      }
+    }
     const allWhitelisted = count > 0 && row.names.every((name) => WHITELIST.has(name))
     for (const name of row.names) if (WHITELIST.has(name)) whitelistCalls += 1
     if (allWhitelisted) {
@@ -321,6 +376,20 @@ function analyseSession(path, asOf) {
     if (count === 1 && WHITELIST.has(row.names[0])) singleCallSteps += 1
 
     const previous = steps[index - 1]
+    if (previous !== undefined && previous.turn === row.turn && count > 0) {
+      const haystack = previous.resultTexts.join('\n')
+      const everyCallBound = row.argsList.every((args) => {
+        const values = stringLeaves(args)
+          .map((value) => value.trim())
+          .filter((value) => value.length >= MIN_POSITION_CHARS)
+        if (values.length === 0) return false
+        return values.every((value) => haystack.includes(value))
+      })
+      if (everyCallBound) {
+        continuation.steps += 1
+        continuation.tokens += row.tokens
+      }
+    }
     if (previous === undefined || previous.turn !== row.turn) continue
     // The design's unit is the call, not the leaf: an unambiguous receipt
     // source is a previous step with exactly one tool call. Every next call
@@ -354,6 +423,8 @@ function analyseSession(path, asOf) {
     requestTokens,
     receiptChars,
     toolChars,
+    continuation,
+    duplicates,
     valueTransfer: { positions, full, partial },
     whitelist: { calls: whitelistCalls, fullSteps, singleCallSteps, fullStepTokens },
   }
@@ -392,6 +463,8 @@ function statsFromSnapshot(snapshot) {
   let positions = 0
   let full = 0
   let partial = 0
+  const continuation = { steps: 0, tokens: 0 }
+  const duplicates = { calls: 0, sameStep: 0, acrossStep: 0, duplicateResultChars: 0 }
 
   for (const session of sessions) {
     steps += session.steps ?? 0
@@ -420,6 +493,14 @@ function statsFromSnapshot(snapshot) {
     positions += session.valueTransfer?.positions ?? 0
     full += session.valueTransfer?.full ?? 0
     partial += session.valueTransfer?.partial ?? 0
+    // Sessions recorded before M1 carry neither key; they contribute zeros
+    // rather than a fabricated measurement.
+    for (const key of ['steps', 'tokens']) {
+      continuation[key] += session.continuation?.[key] ?? 0
+    }
+    for (const key of ['calls', 'sameStep', 'acrossStep', 'duplicateResultChars']) {
+      duplicates[key] += session.duplicates?.[key] ?? 0
+    }
   }
 
   requestTokens.sort((a, b) => a - b)
@@ -477,6 +558,23 @@ function statsFromSnapshot(snapshot) {
       full,
       partial,
       rate: round(ratio(full + partial, positions), 4),
+    },
+    // M1's two denominators. Both are **ceilings**, and the doc says so:
+    // `continuation` counts round trips whose every argument was copied
+    // verbatim out of the previous receipts — no model decision happened — but
+    // says nothing about whether those calls were safe to issue unattended.
+    continuation: {
+      steps: continuation.steps,
+      stepShare: round(ratio(continuation.steps, steps), 4),
+      tokens: continuation.tokens,
+      tokenShare: round(ratio(continuation.tokens, tokens.total), 4),
+    },
+    duplicates: {
+      calls: duplicates.calls,
+      sameStep: duplicates.sameStep,
+      acrossStep: duplicates.acrossStep,
+      rate: round(ratio(duplicates.sameStep + duplicates.acrossStep, duplicates.calls), 4),
+      duplicateResultChars: duplicates.duplicateResultChars,
     },
   }
 }

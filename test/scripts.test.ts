@@ -212,6 +212,18 @@ test('session-stats --sessions 从真实 session 文件重生 snapshot，--snaps
   // appear in the previous receipt at all -> neither full nor partial, so
   // `partial` stays 0. A's turn-2 grep is the first step of its turn, so it has
   // no previous step to compare against and is not a position.
+  // M1's two ceilings, on the same fixture.
+  //
+  // A/2's `read` takes its whole path from A/1's receipt and it is the only
+  // call in that step -> one deterministic continuation (55 tokens). B/2's
+  // `glob` pattern is not in B/1's receipt, so it is not one.
+  assert.equal(recomputed.continuation.steps, 1)
+  assert.equal(recomputed.continuation.tokens, 55)
+  // No call repeats the previous step's (tool, canonical args): 0 duplicates.
+  assert.equal(recomputed.duplicates.calls, 5)
+  assert.equal(recomputed.duplicates.sameStep, 0)
+  assert.equal(recomputed.duplicates.acrossStep, 0)
+
   assert.equal(recomputed.valueTransfer.positions, 2)
   assert.equal(recomputed.valueTransfer.full, 1)
   assert.equal(recomputed.valueTransfer.partial, 0)
@@ -237,4 +249,71 @@ test('session-stats --sessions 对空语料拒绝写快照，--allow-empty 才�
   const allowed = await runScript('session-stats.mjs', ['--sessions', sessions, '--allow-empty'])
   assert.equal(allowed.sessions.length, 0)
   assert.equal(allowed.selection.skipped, 0)
+})
+
+test('M1 口径：整体绑定才算一次「确定性续跑」，重复按 (tool, 规范化参数) 判', async () => {
+  const dir = await fresh()
+  const sessions = join(dir, 'sessions')
+  const usage = (input: number, cache: number, output: number) => ({
+    inputTokens: input,
+    cacheReadTokens: cache,
+    outputTokens: output,
+    totalTokens: input + cache + output,
+  })
+  // One session that separates the two definitions:
+  //   step 1  bash        -> receipt "alpha"
+  //   step 2  read alpha  -> bound to step 1        => continuation
+  //   step 3  read alpha  -> NOT bound (step 2 said "beta"), and it repeats
+  //                          step 2's (tool, args)   => cross-step duplicate
+  //   step 4  grep alpha twice -> bound to step 3's "alpha" => continuation,
+  //                          and the second call repeats the first
+  //                                                  => same-step duplicate
+  const events = [
+    { type: 'session', version: 4, id: 'session-m1', createdAt: Date.parse('2026-11-18T00:00:00Z') },
+    { type: 'turn/start', time: 1000, data: { turn: 1 } },
+    { type: 'step/start', time: 1100, data: { turn: 1, step: 1 } },
+    { type: 'assistant/message', time: 1200, data: { turn: 1, step: 1, usage: usage(0, 100, 10) } },
+    { type: 'tool/call', time: 1300, data: { turn: 1, step: 1, callId: 'a1', name: 'bash', arguments: '{"command":"cat x"}' } },
+    { type: 'tool/result', time: 1400, data: { turn: 1, step: 1, toolCallId: 'a1', message: { content: [{ type: 'text', text: 'alpha' }] } } },
+    { type: 'step/start', time: 2100, data: { turn: 1, step: 2 } },
+    { type: 'assistant/message', time: 2200, data: { turn: 1, step: 2, usage: usage(0, 200, 20) } },
+    { type: 'tool/call', time: 2300, data: { turn: 1, step: 2, callId: 'a2', name: 'read', arguments: '{"path":"alpha"}' } },
+    { type: 'tool/result', time: 2400, data: { turn: 1, step: 2, toolCallId: 'a2', message: { content: [{ type: 'text', text: 'beta' }] } } },
+    { type: 'step/start', time: 3100, data: { turn: 1, step: 3 } },
+    { type: 'assistant/message', time: 3200, data: { turn: 1, step: 3, usage: usage(0, 300, 30) } },
+    { type: 'tool/call', time: 3300, data: { turn: 1, step: 3, callId: 'a3', name: 'read', arguments: '{"path":"alpha"}' } },
+    { type: 'tool/result', time: 3400, data: { turn: 1, step: 3, toolCallId: 'a3', message: { content: [{ type: 'text', text: 'alpha' }] } } },
+    { type: 'step/start', time: 4100, data: { turn: 1, step: 4 } },
+    { type: 'assistant/message', time: 4200, data: { turn: 1, step: 4, usage: usage(0, 400, 40) } },
+    { type: 'tool/call', time: 4300, data: { turn: 1, step: 4, callId: 'a4', name: 'grep', arguments: '{"pattern":"alpha"}' } },
+    { type: 'tool/call', time: 4350, data: { turn: 1, step: 4, callId: 'a5', name: 'grep', arguments: '{"pattern":"alpha"}' } },
+    { type: 'tool/result', time: 4400, data: { turn: 1, step: 4, toolCallId: 'a4', message: { content: [{ type: 'text', text: 'alpha' }] } } },
+    { type: 'tool/result', time: 4450, data: { turn: 1, step: 4, toolCallId: 'a5', message: { content: [{ type: 'text', text: 'alpha' }] } } },
+    // step 5 is half bound: one call takes its argument from step 4, the other
+    // takes none. This is the step that tells `every` from `some`.
+    { type: 'step/start', time: 5100, data: { turn: 1, step: 5 } },
+    { type: 'assistant/message', time: 5200, data: { turn: 1, step: 5, usage: usage(0, 500, 50) } },
+    { type: 'tool/call', time: 5300, data: { turn: 1, step: 5, callId: 'a6', name: 'read', arguments: '{"path":"alpha"}' } },
+    { type: 'tool/call', time: 5350, data: { turn: 1, step: 5, callId: 'a7', name: 'read', arguments: '{"path":"not-in-any-receipt-at-all"}' } },
+    { type: 'tool/result', time: 5400, data: { turn: 1, step: 5, toolCallId: 'a6', message: { content: [{ type: 'text', text: 'six' }] } } },
+    { type: 'tool/result', time: 5450, data: { turn: 1, step: 5, toolCallId: 'a7', message: { content: [{ type: 'text', text: 'seven' }] } } },
+    { type: 'turn/end', time: 5500, data: { turn: 1 } },
+  ]
+  const body = `${events.map((event) => JSON.stringify(event)).join('\n')}\n`
+  await (await import('node:fs/promises')).mkdir(join(sessions, 'session-m1'), { recursive: true })
+  await writeFile(join(sessions, 'session-m1', 'session.v4.jsonl.zstd'), zstdCompressSync(Buffer.from(body, 'utf8')))
+
+  const snapshot = await runScript('session-stats.mjs', ['--sessions', sessions])
+  const stats = snapshot.sessions[0]
+
+  // step 2 (220) and step 4 (440) are whole-step bound. Step 3 is not bound at
+  // all, and step 5 is half bound — one unbound call is enough to need the
+  // model, which is what separates `every` from `some`.
+  assert.equal(stats.continuation.steps, 2, JSON.stringify(stats.continuation))
+  assert.equal(stats.continuation.tokens, 220 + 440, JSON.stringify(stats.continuation))
+  // 7 calls: one cross-step repeat (step 3 repeats step 2), one same-step
+  // repeat (step 4's second grep).
+  assert.equal(stats.duplicates.calls, 7, JSON.stringify(stats.duplicates))
+  assert.equal(stats.duplicates.acrossStep, 1, JSON.stringify(stats.duplicates))
+  assert.equal(stats.duplicates.sameStep, 1, JSON.stringify(stats.duplicates))
 })
