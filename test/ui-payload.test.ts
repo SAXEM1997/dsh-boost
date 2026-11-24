@@ -15,7 +15,7 @@ import { buildStatePayload, type StateDeps } from '../src/http/state.ts'
 import type { ScopeDoc } from '../src/scope/doc.ts'
 import type { Envelope } from '../src/shared/api-types.ts'
 import type { BoostStatus } from '../src/tools/boost.ts'
-import { configOf, envelopeOf } from '../ui/src/draft.ts'
+import { degradedCodesOf, configOf, envelopeOf } from '../ui/src/draft.ts'
 
 /** A complete `BoostStatus`: the route's deps are typed against the real shape. */
 function statusData(over: Partial<BoostStatus> = {}): BoostStatus {
@@ -142,13 +142,16 @@ test('信封与载荷是两个类型：读错一层编译不过', async () => {
 
 test('degraded 不是数组时页面不崩，按「没有降级项」之外的路径处理', async () => {
   // The wire is untrusted even though the type says otherwise: a host that
-  // sends an object here used to reach `codes.map` and blank the page. The
-  // fixture is deliberately the shape the type forbids, so the cast is the
-  // point of the test.
-  const malformed = {
-    ok: true as const,
-    data: { degraded: { oops: 1 }, saved: {}, counts: {} },
-  }
+  // sends an object here used to reach `codes.map` and blank the page. Drive
+  // the malformed shape through the guard the page actually uses — asserting
+  // the fixture's own shape would pass with the guard deleted.
+  const malformed = { ok: true as const, data: { degraded: { oops: 1 }, saved: {}, counts: {} } }
+  assert.deepEqual(degradedCodesOf((malformed as unknown as { data: unknown }).data), [])
+  // Non-string members are dropped rather than rendered.
+  assert.deepEqual(degradedCodesOf({ degraded: ['A', 3, null, 'B'] }), ['A', 'B'])
+  assert.deepEqual(degradedCodesOf(undefined), [])
+  assert.deepEqual(degradedCodesOf({}), [])
+
   const payload = await buildStatePayload({
     status: async () => malformed as unknown as Envelope<BoostStatus>,
     scope: async () => ({ ok: true, data: {} }) as unknown as Envelope<ScopeDoc>,
@@ -158,8 +161,6 @@ test('degraded 不是数组时页面不崩，按「没有降级项」之外的�
   })
   const read = envelopeOf(payload.status)
   assert.equal(read.ok, true)
-  const degraded = (read.data as { degraded: unknown }).degraded
-  assert.equal(Array.isArray(degraded), false, 'the fixture is the shape the guard has to survive')
 })
 
 test('configOf 接受两种线上形状：信封与信封之前那个裸对象', () => {

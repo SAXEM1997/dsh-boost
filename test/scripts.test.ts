@@ -208,10 +208,10 @@ test('session-stats --sessions 从真实 session 文件重生 snapshot，--snaps
   assert.equal(recomputed.whitelist.fullSteps, 3)
   assert.equal(recomputed.whitelist.singleCallSteps, 3)
   // Two next steps carry an argument: A/2's read path is the whole previous
-  // receipt (`hello world`) -> full; B/2's glob pattern copies
-  // `root@host:/tmp# `, which is >= 8 chars and covers >= 50% of the value ->
-  // partial. A's turn-2 grep is the first step of its turn, so it has no
-  // previous step to compare against and is not a position.
+  // receipt (`hello world`) -> full; B/2's glob pattern `**/*.ts` does not
+  // appear in the previous receipt at all -> neither full nor partial, so
+  // `partial` stays 0. A's turn-2 grep is the first step of its turn, so it has
+  // no previous step to compare against and is not a position.
   assert.equal(recomputed.valueTransfer.positions, 2)
   assert.equal(recomputed.valueTransfer.full, 1)
   assert.equal(recomputed.valueTransfer.partial, 0)

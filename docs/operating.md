@@ -39,7 +39,7 @@ dsh plugin --profile <name> add /absolute/path/to/dsh-boost
 ### 版本与 registry
 
 > **`^0.3.13` 是当前的安全钉法。** `registry.npmjs.org` 上 `latest` 是 `0.3.13`，历史版本依次是
-> `0.3.7`、`0.3.6`、`0.3.5`、`0.3.4`、`0.3.3`、`0.3.2`、`0.3.1`、`0.3.0`、`0.2.7`、`0.2.6`、`0.2.5`、`0.2.4`、`0.2.3`、`0.2.2`、`0.2.1`、`0.2.0`、
+> `0.3.12`、`0.3.11`、`0.3.10`、`0.3.9`、`0.3.8`、`0.3.7`、`0.3.6`、`0.3.5`、`0.3.4`、`0.3.3`、`0.3.2`、`0.3.1`、`0.3.0`、`0.2.7`、`0.2.6`、`0.2.5`、`0.2.4`、`0.2.3`、`0.2.2`、`0.2.1`、`0.2.0`、
 > `0.1.4`、`0.1.3`、`0.1.2`、`0.1.1`、`0.1.0`，以及首次发布时 npm 自动创建的占位版本
 > `0.0.0-stage`——**不要安装 `0.0.0-stage`**，它不是可用构建。`0.2.0` 新增了设置页（`dsh.client`
 > 与 `./client` 出口、`/dsh-boost/api` 路由、随包发布的 `lib/client.js`）与中英双语；`0.3.0` 新增
@@ -430,14 +430,16 @@ horizon 重放，并计入 `projection_horizon_reestimated`；`projection_horizo
 - `hasSpill`：宿主是否**提供** spill 后端（存在性，不是可用性）。服务缺失是 `false` +
   `ERR_HOST_NO_SPILL`；服务在但不提供 `saveText` 时它**仍是 `true`**，同时 `degraded` 带
   `ERR_HOST_SPILL_UNUSABLE`——能力事实在 `degraded` 里，不在这个布尔里。
-- `saved`：兼容旧消费者的 camelCase 账目对象（`substitution` / `substitutionAvoided` /
+- `saved`：给旧消费者的账目对象（`substitution` / `substitution_avoided` /
   `projectionGross` / `projectionNet` / `retrievals`），与顶层 snake_case 字段由同一次聚合派生。
+  它**不是全 camelCase**：`substitution_avoided` 与后来加的 `retrieval_legacy` 是 snake_case，
+  因为这两个键是在别的字段已定型之后追加的。按文档取 `substitutionAvoided` 会拿到 `undefined`。
   旧投影收据（pre-T23b）没有 `saved_projection_tokens` 时，按收据里的 legacy `saved` 字段回退计价。
   **两个和覆盖的收据集合可以不同**：下界只累加**同时**带两侧数值的收据，上界只看 `saved_input_tokens` 是否可读。
   这是故意的——写上下界时若一侧缺失就整体不计入下界，能保证下界永不超过上界；反过来只放大上界，只会让区间更宽。
   不要把两个数读成「同一批测量算了两次」。
   **两个替换数是一对区间，不是同一个量**：`substitution` 取被跳过请求的**下一**个真实请求的输入
-  （含被替换调用自己的结果，所以是**上界**）；`substitutionAvoided` 取计划那一次请求的
+  （含被替换调用自己的结果，所以是**上界**）；`substitution_avoided` 取计划那一次请求的
   `input + cacheRead + output`（不含被替换调用的结果，所以是**下界**）。真实节省落在两者之间。
   **三个投影字段各是什么**（它们不是同一个数的三种写法）：
   - `projection_gross_tokens`（顶层，一次性）：每条被投影回执**自己那一次**少掉的 token 之和。
@@ -590,9 +592,12 @@ spill，报它只会制造噪音）；但**收据通道**不看当前模式—�
 - **影子周不省 token**：只记账（协议段照注入、选择器照调用），推荐配置下每请求仍固定花
   778（`selected + []` 为 399）；它的产出是四个比例，不是省下的 token。
 - **v1 不评判「结果更好」**：只有 token 账目和一套**人工**的 20 任务回退流程（任务集不随包发布，
-  见 `docs/RELEASE.md` §3），没有任何质量指标；「替换后结果质量」在 v1 是不可判的。这套流程
-  本身也没交付完整：冒烟 runner（`test/regression/run.mjs`）与同一节的取回完整性检查都未实现，
-  `test/regression/` 只有 `.gitkeep`，因此 pass 谓词里的「无数据丢失」不变量在 v1 **未经核实**。
+  见 `docs/RELEASE.md` §3），没有任何质量指标；「替换后结果质量」在 v1 是不可判的。0.3.11 起
+  这套流程的两块自动化已交付：`test/regression/run.mjs`（冒烟 runner，`npm run test:regression`，
+  跑本地的 6 条任务）与 `test/regression/integrity.ts`（取回完整性检查，`npm test` 里跑）。
+  「无数据丢失」被核实到**插件看得见的边界**：落给 spill 的是完整原文、页脚点名的是后端返回的
+  那个 locator、页脚字节数闭合。宿主 `SpillBackend` 只写，字节是否真的还回来仍属宿主责任——
+  这条边界之外的「不丢」v1 无法证明。
 - **投影是截断，不是精炼**：它保留头尾、丢掉中段；账本里的 before/after token 差量的是
   「变短」，不是「变相关」。被丢掉的中段可能正是下一步决策要用的内容——`projection: 'on'`
   下原文可经页脚 locator 取回，但取回要花一次工具调用，且 v1 没有指标区分「精炼」与

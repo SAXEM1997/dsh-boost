@@ -52,7 +52,7 @@
   "HINT_PROJECTION_ON_SPILL": "投影需要 spill 后端：原文要落盘，否则截断后的文本就是唯一副本。宿主当前没解析出后端（`status.hasSpill` 为 false）。装一个（`dsh-spill-local` 或你们自己的实现）后重启。",
   "HINT_SAVED_LOWER": "下界是被跳过那次请求自己的总用量：它不含「后续还会回放多少次」，所以真实节省不低于这个数。",
   "HINT_SAVED_UPPER": "上界是「下一次请求的输入」：它把被替换调用的结果也算进了节省，所以真实节省不高于这个数。",
-  "HINT_SHADOW_MEANS": "影子模式：插件照常决策并记账，但不真的改动发给模型的内容。",
+  "HINT_SHADOW_MEANS": "影子模式只管替换：决策照常做、收据照常写，但不合成回合。投影是否改动回执由下面的投影开关单独决定——影子开着、投影为 on 时，回执仍在被截断。",
   "HINT_SUBSTITUTE_ON_ROLLBACK": "回滚：把「影子模式」勾回去并保存，替换立即停止；投影的设置不受影响。",
   "HINT_SUBSTITUTE_ON_THINKING": "第一次真替换之后盯一次含 `content[].thinking` 的 400。合成回合没有 `replayState`，宿主侧的转换会丢掉 thinking 块；当前路由是不是 Anthropic 兼容的 thinking 模式，在这台机器上查不出来，只能在真替换时观察。",
   "INTRO": "投影裁剪工具回执、确定性替换可推导的调用。下面的数字全部来自收据，不是估算的替代品：区间给出下界与上界，两者都不是精确值。",

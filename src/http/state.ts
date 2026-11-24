@@ -233,6 +233,14 @@ export function createStateHandler(deps: StateDeps, options: HandlerOptions = {}
       return
     }
 
+    // `/scope` exists but only accepts POST: a GET there is a method error, not
+    // a missing route. Reporting 404 made a caller think the path was gone,
+    // and the body's generic "version mismatch" text pointed at the wrong
+    // cause (review P3-10).
+    if (path === '/scope') {
+      writeJson(res, 405, { error: ERR_HTTP_METHOD })
+      return
+    }
     if (path !== '/state') {
       writeJson(res, 404, { error: ERR_HTTP_NOT_FOUND })
       return

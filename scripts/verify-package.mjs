@@ -85,6 +85,8 @@ import { fileURLToPath, pathToFileURL } from 'node:url'
 import { JSON_SCHEMA, load as loadYaml } from 'js-yaml'
 import semver from 'semver'
 
+import { CHECK_NAMES } from './checks.mjs'
+
 const root = join(dirname(fileURLToPath(import.meta.url)), '..')
 const pkg = JSON.parse(readFileSync(join(root, 'package.json'), 'utf8'))
 
@@ -872,6 +874,19 @@ function verify({ tarball, tarballName, packed, prebuilt }) {
     const secondaryInstalled = join(secondary, 'node_modules', 'dsh-boost')
     assertFile(join(secondaryInstalled, 'dist', 'index.js'), 'dist/index.js')
     runProbe(secondary, 'default', checks)
+
+    // The receipt says what ran; the shared list says what is supposed to run.
+    // A new check that nobody registered would otherwise ship with no negative
+    // case and no entry in the docs' count.
+    const executed = checks.map((check) => (check.install === null ? check.name : `${check.name} (${check.install})`))
+    const missing = CHECK_NAMES.filter((name) => !executed.includes(name))
+    const unexpected = executed.filter((name) => !CHECK_NAMES.includes(name))
+    if (missing.length > 0 || unexpected.length > 0) {
+      throw new Error(
+        `check list drifted from scripts/checks.mjs — not run: ${missing.join(', ') || 'none'}; ` +
+          `not listed: ${unexpected.join(', ') || 'none'}`,
+      )
+    }
 
     ok = true
     const bytes = statSync(tarball).size

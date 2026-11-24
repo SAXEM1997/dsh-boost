@@ -223,6 +223,13 @@ test('读路由不接受写方法', async () => {
   }
 })
 
+test('GET /scope → 405：路径存在但只接受 POST', async () => {
+  const server = await createServer()
+  const { status, body } = await server.request('GET', `${HTTP_API_PREFIX}/scope`, { host: LOOPBACK })
+  assert.equal(status, 405)
+  assert.equal(body.error, 'ERR_HTTP_METHOD')
+})
+
 test('未知子路径 → 404，且是 JSON', async () => {
   const server = await createServer()
   const { status, body } = await server.request('GET', `${HTTP_API_PREFIX}/nope`, { host: LOOPBACK })

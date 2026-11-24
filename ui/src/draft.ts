@@ -237,6 +237,20 @@ export function distillStateOf(config: BoostConfig | undefined): 'unknown' | 'ab
 }
 
 /**
+ * The degraded codes a status payload actually carries.
+ *
+ * The type says `string[]`, but the wire is untrusted: a host that sends an
+ * object here used to reach `codes.map` and take the page down. The guard has
+ * to live in a function so a test can drive the bad shape through it — a test
+ * that only asserts the fixture's own shape cannot fail when the guard goes
+ * away.
+ */
+export function degradedCodesOf(value: unknown): string[] {
+  const degraded = (value as { degraded?: unknown } | undefined)?.degraded
+  return Array.isArray(degraded) ? degraded.filter((code): code is string => typeof code === 'string') : []
+}
+
+/**
  * Receipt codes grouped by their family, for the counts panel.
  *
  * A flat list lets one runaway code (`skip:no-scope`, thousands) bury the rest,

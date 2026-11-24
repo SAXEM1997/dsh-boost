@@ -108,17 +108,25 @@ export const ERR_BOOST_INTERNAL = 'ERR_BOOST_INTERNAL'
  */
 export const ERR_BOOST_HTTP_MOUNT_FAILED = 'ERR_BOOST_HTTP_MOUNT_FAILED'
 
-/** Every scope failure code, for passing the store's codes through unchanged. */
-const SCOPE_CODES: ReadonlySet<string> = new Set([
-  ERR_SCOPE_UNKNOWN_VERSION,
-  ERR_SCOPE_FUTURE_VERSION,
-  ERR_SCOPE_PARSE_FAILED,
-  ERR_SCOPE_READ_FAILED,
-  ERR_SCOPE_WRITE_FAILED,
-  ERR_SCOPE_REVISION_CONFLICT,
-  ERR_SCOPE_LOCKED,
-  ERR_SCOPE_ABORTED,
-])
+/**
+ * Every scope failure code, for passing the store's codes through unchanged.
+ *
+ * A `Record<ScopeCode, true>` rather than a `Set`: the mapped type is
+ * exhaustive, so adding a member to `ScopeCode` fails to compile until it is
+ * listed here. A `Set<ScopeCode>` only says every member *here* is a
+ * `ScopeCode` — the direction that mattered, since a missing entry silently
+ * degrades to `ERR_BOOST_INTERNAL` (docs/RELEASE.md:380, the 0.2.3 defect).
+ */
+const SCOPE_CODE_TABLE: Record<ScopeCode, true> = {
+  [ERR_SCOPE_UNKNOWN_VERSION]: true,
+  [ERR_SCOPE_FUTURE_VERSION]: true,
+  [ERR_SCOPE_PARSE_FAILED]: true,
+  [ERR_SCOPE_READ_FAILED]: true,
+  [ERR_SCOPE_WRITE_FAILED]: true,
+  [ERR_SCOPE_REVISION_CONFLICT]: true,
+  [ERR_SCOPE_LOCKED]: true,
+  [ERR_SCOPE_ABORTED]: true,
+}
 
 /** Stable host degradation codes (design §9; the frozen set `status` reports). */
 const ERR_HOST_NO_SPILL = 'ERR_HOST_NO_SPILL'
@@ -242,11 +250,11 @@ const ERR_HOST_COMPLETE_SECTION = 'ERR_HOST_COMPLETE_SECTION'
  * `ERR_HOST_NO_SPILL_NOTICE` because both mean the same thing at the point of
  * use — the footer cannot be produced.
  *
- * `selector-unavailable` and `selector-error` are the selector's only two host
- * failures: no LLM/route, or a call that threw. Both mean "multi-candidate
- * plans will abstain" while single-candidate substitution keeps working, so
- * they share one warning code. `selector-abstain` is not a host fact and is not
- * mapped (review row 49).
+ * `selector-unavailable` is the selector's host fact: no LLM or no usable
+ * route. It maps to one warning code. `selector-error` — a call that threw — is
+ * deliberately **not** mapped: it is a transient failure, and turning it into a
+ * capability code would make `degraded` claim the host cannot select at all
+ * (review row 49, qr5#4). `selector-abstain` is not a host fact either.
  */
 const RECEIPT_DEGRADATION: ReadonlyArray<{ readonly code: string; readonly degraded: string }> = [
   { code: 'projection-skipped:no-spill', degraded: ERR_HOST_NO_SPILL },
@@ -1316,7 +1324,10 @@ function scopePatchOf(body: unknown): { ok: true; patch: ScopePatch } | { ok: fa
 function scopeCodeOf(error: unknown): ScopeCode | undefined {
   if (typeof error !== 'object' || error === null || !('code' in error)) return undefined
   const code = (error as { code?: unknown }).code
-  return typeof code === 'string' && SCOPE_CODES.has(code) ? (code as ScopeCode) : undefined
+  if (typeof code !== 'string') return undefined
+  // The set decides membership; the cast is the one place a `string` becomes a
+  // `ScopeCode`, and it only happens after `has()` says the value is a member.
+  return Object.hasOwn(SCOPE_CODE_TABLE, code) ? (code as ScopeCode) : undefined
 }
 
 /**

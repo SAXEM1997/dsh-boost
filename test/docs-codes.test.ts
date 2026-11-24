@@ -30,7 +30,17 @@ function sourceFiles(dir: string): string[] {
 function producedCodes(): string[] {
   const codes = new Set<string>()
   for (const file of sourceFiles(SRC)) {
-    for (const match of readFileSync(file, 'utf8').matchAll(/\bcode:\s*'([a-z][a-z0-9:._-]*)'/g)) {
+    const text = readFileSync(file, 'utf8')
+    // `code: '…'` — object-literal receipt fields.
+    for (const match of text.matchAll(/\bcode:\s*'([A-Za-z_][A-Za-z0-9:._-]*)'/g)) {
+      const code = match[1]
+      if (code !== undefined) codes.add(code)
+    }
+    // `ledgerEntry(ctx, 'skip', '…')` — the helper's third positional argument.
+    // Over half the skip codes are written this way, so scanning only the
+    // literal form left `not-admitted`, `steps-exhausted` and `no-candidate`
+    // outside the check (review P3-21).
+    for (const match of text.matchAll(/\bledgerEntry\(\s*[^,]+,\s*'[a-z]+'\s*,\s*'([A-Za-z_][A-Za-z0-9:._-]*)'/g)) {
       const code = match[1]
       if (code !== undefined) codes.add(code)
     }

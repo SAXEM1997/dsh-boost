@@ -52,7 +52,7 @@
   "HINT_PROJECTION_ON_SPILL": "Projection needs a spill backend: the original has to land somewhere, or the truncated text is the only copy. The host did not resolve one (`status.hasSpill` is false). Install one (`dsh-spill-local` or your own) and restart.",
   "HINT_SAVED_LOWER": "The lower bound is the skipped request's own total usage: it excludes how many more times it would have been replayed, so the true saving is at least this much.",
   "HINT_SAVED_UPPER": "The upper bound is the next request's input: it counts the replaced call's result as saved, so the true saving is at most this much.",
-  "HINT_SHADOW_MEANS": "Shadow mode: the plugin still decides and records receipts, but never changes what reaches the model.",
+  "HINT_SHADOW_MEANS": "Shadow mode governs substitution only: decisions and receipts still happen, but no turn is synthesized. Whether receipts are reshaped is the projection switch below — with shadow on and projection on, receipts are still truncated.",
   "HINT_SUBSTITUTE_ON_ROLLBACK": "To roll back, tick shadow mode again and save: substitution stops at once and the projection setting is untouched.",
   "HINT_SUBSTITUTE_ON_THINKING": "Watch for one 400 mentioning `content[].thinking` after the first real substitution. Synthesized turns carry no `replayState`, so the host-side conversion drops the thinking block; whether this route is an Anthropic-compatible thinking mode cannot be determined on this machine and only shows up on a real substitution.",
   "INTRO": "Projection trims tool receipts; deterministic substitution replaces derivable calls. Every number below comes from receipts, not from an estimate: the range gives a lower and an upper bound, and neither is exact.",

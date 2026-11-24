@@ -13,8 +13,9 @@
 # inside its own pack step, so a missing/ghost dist entry introduced after the
 # gate's build would be repaired or hidden instead of reported. The order is
 # one explicit build (`npm run ci`) -> verify the tree it produced -> publish;
-# package.json no longer ships a `prepare` hook, so `npm publish`'s own pack
-# does not rebuild either.
+# package.json ships `prepare` -> scripts/prepare-build.mjs, which builds only
+# when dist/ or lib/client.js is missing, so `npm publish`'s own pack repairs a
+# cold checkout and leaves a verified build alone.
 #
 # This used to be `npm publish --dry-run`, on the theory that the dry-run was
 # the same gate a maintainer runs. It is not: npm runs prepublishOnly first and

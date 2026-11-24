@@ -11,7 +11,7 @@
  * measurement.
  */
 import { copyOf, adviceFor, type Copy } from './copy'
-import { configOf, distillStateOf, envelopeOf, groupCounts, type CountGroup } from './draft'
+import { configOf, degradedCodesOf, distillStateOf, envelopeOf, groupCounts, type CountGroup } from './draft'
 import { useT } from './i18n'
 import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react'
 import { fetchState, type StateResult } from './api'
@@ -203,12 +203,9 @@ export function App() {
   const statusCode = statusRead.ok ? undefined : (statusRead.code ?? '')
 
   const saved = status?.saved
-  // The type says `degraded` is a string list, but the wire is untrusted: a
-  // host that sends an object here would reach `codes.map` and take the whole
-  // page down with a TypeError. Guard the shape, not just the absence.
-  const codes = Array.isArray(status?.degraded)
-    ? status.degraded.filter((code): code is string => typeof code === 'string')
-    : []
+  // The wire is untrusted; the guard lives in `degradedCodesOf` so a test can
+  // drive a malformed payload through it.
+  const codes = degradedCodesOf(status)
   const counts = status?.counts ?? {}
   const countGroups = groupCounts(counts as Record<string, number>)
   const configGroups = grouped(flatten(config))

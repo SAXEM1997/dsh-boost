@@ -32,6 +32,8 @@ import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'no
 import { tmpdir } from 'node:os'
 import { join, resolve, sep } from 'node:path'
 
+import { CHECK_NAMES } from './checks.mjs'
+
 const root = process.cwd()
 const MAX_BUFFER = 64 * 1024 * 1024
 
@@ -77,7 +79,7 @@ const CASES = [
     },
   },
   {
-    name: 'exports-targets',
+    name: 'exports-targets (ignore-scripts)',
     expect: /declared \. -> \.\/dist\/missing\.js does not exist/,
     mutate(dir, manifest) {
       manifest.exports = { '.': './dist/missing.js' }
@@ -96,8 +98,8 @@ const CASES = [
     },
   },
   {
-    name: 'bundle-patch',
-    expect: /dsh\.bundle\.patch|patch/i,
+    name: 'bundle-patch (ignore-scripts)',
+    expect: /dsh\.bundle\.patch must be a non-empty YAML array of patch entries/,
     mutate(dir, manifest) {
       const patch = manifest.dsh?.bundle?.patch
       if (typeof patch !== 'string') return false
@@ -122,7 +124,7 @@ const CASES = [
     },
   },
   {
-    name: 'typecheck-no-host-stubs',
+    name: 'typecheck-no-host-stubs (ignore-scripts)',
     expect: /consumer type check without host stubs failed/,
     mutate(dir, manifest) {
       const types = manifest.types ?? manifest.exports?.['.']?.types
@@ -162,7 +164,7 @@ const CASES = [
     },
   },
   {
-    name: 'typecheck',
+    name: 'typecheck (ignore-scripts)',
     expect: /consumer type check with host stubs failed/,
     mutate(dir, manifest) {
       const types = manifest.types ?? manifest.exports?.['.']?.types
@@ -287,6 +289,17 @@ function main() {
             `${result.output.split('\n').slice(0, 12).join('\n')}`,
         )
       }
+    }
+    // Coverage is two statements: every canonical check has a case, and every
+    // case ran. `ran.length === CASES.length` alone compares the list to itself.
+    const names = CASES.map((testCase) => testCase.name)
+    const uncovered = CHECK_NAMES.filter((name) => !names.includes(name))
+    const extra = names.filter((name) => !CHECK_NAMES.includes(name))
+    if (uncovered.length > 0 || extra.length > 0) {
+      failures += 1
+      console.error(
+        `no case for: ${uncovered.join(', ') || 'none'}; case with no check: ${extra.join(', ') || 'none'}`,
+      )
     }
     if (ran.length !== CASES.length) {
       failures += 1

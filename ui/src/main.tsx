@@ -136,19 +136,26 @@ export function apply(ctx: ClientContext): void {
   const slots = ctx.slots
   // `inject` returns its own disposer; hand both to the fiber so an HMR remount
   // or an unload takes the seat back out instead of stacking a second one.
-  const disposeInjection = slots.inject(SETTINGS_SLOT, () =>
-    slots.register(
-      {
-        name: SETTINGS_SLOT,
-        id: SETTINGS_ID,
-        order: 50,
-        // A thunk, not a string: the shell re-reads it when the locale changes,
-        // so the nav item follows the language without this plugin subscribing.
-        label: () => t('TITLE'),
-        inject: () => ({}),
-      },
-      App,
-    ),
-  )
+  const disposeInjection = slots.inject(SETTINGS_SLOT, () => {
+    const seat = {
+      name: SETTINGS_SLOT,
+      id: SETTINGS_ID,
+      order: 50,
+      // A thunk, not a string: the shell re-reads it when the locale changes,
+      // so the nav item follows the language without this plugin subscribing.
+      label: () => t('TITLE'),
+      inject: () => ({}),
+    }
+    try {
+      return slots.register(seat, App)
+    } catch (error) {
+      // A host that rejects the seat leaves the page permanently absent. Say so
+      // once with the reason: silent absence is indistinguishable from "the
+      // plugin is not installed", which is the wrong thing to debug (spec
+      // risk 4).
+      console.warn(`[${WARN_PREFIX}] settings section was rejected by the host:`, error)
+      return () => {}
+    }
+  })
   ctx.effect?.(() => disposeInjection, `${WARN_PREFIX}: settings section`)
 }

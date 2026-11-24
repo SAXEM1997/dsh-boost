@@ -86,13 +86,6 @@ export class DistillAttempts {
    *
    * Called synchronously by the request constructor, so the `llm/stream` hook
    * recognises the request the moment it arrives and drains it; the answer is
-   * read from `decide`'s own promise, not rebuilt here.
-   */
-  /**
-   * Record a request before it is sent.
-   *
-   * Called synchronously by the request constructor, so the `llm/stream` hook
-   * recognises the request the moment it arrives and drains it; the answer is
    * read from the call's own settlement, not rebuilt here.
    */
   register(options: object, call: CallIdentity): void {

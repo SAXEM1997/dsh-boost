@@ -178,7 +178,7 @@ mkdir -p "$DSH_HOME"
 # 在仓库根目录求版本，tarball 文件名随之变化；手工下载的包直接写绝对路径
 TARBALL="/path/to/dsh-boost-$(node -p "require('./package.json').version").tgz"
 dsh plugin --profile accept add "$TARBALL"
-# 或本地 checkout 目录；从 registry 安装时写 dsh-boost@^0.2.0 --registry=https://registry.npmjs.org/
+# 或本地 checkout 目录；从 registry 安装时写 dsh-boost@^0.3.13 --registry=https://registry.npmjs.org/
 # 确认宿主确实把这一行并入了装配计划：
 dsh --profile accept --dump-config | grep -A2 'id: dsh-boost'
 ```
@@ -247,7 +247,7 @@ for (const [id, w] of Object.entries(s.tables.workspaces)) console.log(id, w.pat
 验证顺序：
 
 1. `curl -s http://127.0.0.1:<port>/dsh-boost/api/state` 的 `config.data.distillation` 应当有六个键（`enabled`、`families`、`triggerChars`、`maxOutputTokens`、`timeoutMs`、`route`）。
-2. 页面那一节渲染六行 + 六行运行态（`calls`/`tokens`/`adopted`/`rejected`/`fallback`/送去蒸馏的字符数）。
+2. 页面那一节渲染八行运行态（`calls`/`tokens`/`input_chars`/`adopted`/`rejected`/`fallback`/`saved_tokens`/`spilled_bytes`），与 README 的蒸馏表一致。
 3. `enabled` 为 `false` 时**不渲染**危险提示——它只在真开着时出现，避免「它现在是开的」的错觉。
 4. 把 `enabled` 改成 `true` 后重启宿主，提示出现；`status.distill.calls` 随超阈值回执增长。
 
@@ -361,6 +361,11 @@ tarball 会拉进 `dsh-spill-policy@rc.5` 并 `ERESOLVE`（当时实测 exit 1�
 “更早的 API”：
 
 - `0.3.13` — 当前 `latest`；`status.distill` 分账（`saved_tokens`/`spilled_bytes`）、蒸馏基线补页脚
+- `0.3.12` — 发布门负例补到十二个 check 实例；完整性检查的「能失败」用例改走注入接缝
+- `0.3.11` — 取回完整性检查与冒烟 runner（`test/regression/`）
+- `0.3.10` — 发布门逐组负例（`verify:negatives`）
+- `0.3.9` — 蒸馏：截断视图收敛成一份、基线用真实 locator、`spilled_bytes` 只在真写过时上报
+- `0.3.8` — 设置页：退出码等信号行在截断后仍保留
 - `0.3.7` — 文档：版本清单不再记条数，改为指向 `npm view`
 - `0.3.6` — 未知原因的墓碑不再冻结回执、临时文件按 pid 存活判定
 - `0.3.5` — 回放次数改回 `1 + 剩余步数`、采用保留 §5.4-4 信号行、墓碑只认已知原因
@@ -394,7 +399,7 @@ tarball 会拉进 `dsh-spill-policy@rc.5` 并 `ERESOLVE`（当时实测 exit 1�
   它低于 `0.1.0`，所以 `^0.1.0` **不会**选中它，`latest` 也不是它。
 
 **写成 `^0.2.0` 而不是 `^0.1.4`**：`^` 不跨大版本，`^0.1.4` 永远解析不到 `0.2.0`，所以从 `0.1.x`
-升上来必须显式写 `@^0.2.0`；`^0.2.0` 表达的是“至少含 0.2.0 的修复”，镜像在发布后短暂滞后时它会
+升上来必须显式写 `@^0.3.13`；`^0.2.0` 表达的是“至少含 0.2.0 的修复”，镜像在发布后短暂滞后时它会
 解析失败，而不是悄悄装回没有设置页的旧构建。在意 registry 时显式传
 `--registry=https://registry.npmjs.org/`。
 
@@ -750,8 +755,8 @@ DSH 宿主后的行为、§3 的 20 任务回退流程（人工）、§5 的统�
 - [ ] 在**要打 tag 的那个 commit** 上 `npm run verify:package` exit 0（§1）：exact allowlist（无多余/缺失条目，含 `dsh.bundle.patch` 指向的文件）、`dist/index.js` guard、所有 `exports`/`main`/`types` 与 `dsh.bundle.patch` 目标存在、主安装 `--ignore-scripts` 与次安装（生命周期脚本启用）都成功、两次安装的 import/require/locale 探针通过（en 与 zh）、tiny TS consumer 的 `tsc --noEmit` 通过（缺/错 `.d.ts` 会红）
 - [ ] 该 commit 的 `git status --short` 为空；`verify:package` 只证明工作树或给定 tarball，不证明 commit 状态
 - [ ] `prepublishOnly`（`npm run ci && npm run verify:package -- --prebuilt`）在发布前整体跑过一遍；明确知道 `npm publish --ignore-scripts` 和 `npm publish <tgz>` 会绕过它（§6.3）
-- [ ] CI 在同一个 commit 上绿；明确知道它只跑 `ci` + `verify:package`、不跑 `npm publish`，`v*` tag 不会上传（§6.1）
-- [ ] `dsh plugin --profile <name> add dsh-boost@^0.2.1 --registry=https://registry.npmjs.org/`（或本地路径/tarball）成功，`--dump-config` 里有 `id: dsh-boost` 行
+- [ ] CI 在同一个 commit 上绿；明确知道它跑 `ci` + `verify:package` + `verify:negatives`、不跑 `npm publish`，`v*` tag 不会上传（§6.1）
+- [ ] `dsh plugin --profile <name> add dsh-boost@^0.3.13 --registry=https://registry.npmjs.org/`（或本地路径/tarball）成功，`--dump-config` 里有 `id: dsh-boost` 行
 - [ ] 测试工作区已写入 `scope.workspaceIds`，`shadow: true`、`projection: 'on'` 经 `boost status` 确认
 - [ ] no-tokenmeter 门按 §2.1 承担：单元测试注入 `hasTokenMeter: false` 锁定预期（替换拒绝、投影可用、账目 `unknown`、`ERR_HOST_NO_TOKENMETER`）；活宿主复核仅在确要部署缺该服务的宿主时做，先验健康态，再把 `shadow` 设为 `false` 验拒绝收据（影子模式下只有 `status.degraded` 可观察，不能算过门）
 - [ ] no-spill 门按 §2.2 完整跑过：移除的是 spill **后端**（`dsh-spill-local`），观察到超限回执不投影、`projection-skipped:no-spill`、`ERR_HOST_NO_SPILL`；只移除 `dsh-spill-policy`（宿主的 token 预算保留策略插件，从宿主树解析）的话得到的是 `projection-skipped:no-footer` 与 `ERR_HOST_NO_SPILL_NOTICE`
