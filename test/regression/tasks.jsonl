@@ -1,0 +1,6 @@
+{"id":"bash-error-in-middle","family":"bash","lines":60,"expect":{"applied":true,"shrink":true,"pointsLocator":true}}
+{"id":"read-long-file","family":"read","lines":80,"expect":{"applied":true,"shrink":true,"pointsLocator":true}}
+{"id":"grep-many-hits","family":"grep","lines":40,"expect":{"applied":true,"shrink":true,"pointsLocator":true}}
+{"id":"glob-long-list","family":"glob","lines":50,"expect":{"applied":true,"shrink":true,"pointsLocator":true}}
+{"id":"ssh-remote-log","family":"ssh","lines":70,"expect":{"applied":true,"shrink":true,"pointsLocator":true}}
+{"id":"bash-tiny","family":"bash","lines":1,"expect":{"applied":false}}

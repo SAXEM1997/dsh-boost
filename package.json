@@ -1,6 +1,6 @@
 {
   "name": "dsh-boost",
-  "version": "0.3.10",
+  "version": "0.3.11",
   "description": "Cut DSH token usage by projecting tool receipts and substituting deterministic read-only calls.",
   "type": "module",
   "license": "Apache-2.0",
@@ -39,13 +39,14 @@
     "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.test.json && tsc -p tsconfig.client.json",
     "test": "node scripts/run-tests.mjs",
     "stats": "node scripts/session-stats.mjs",
-    "ci": "npm run typecheck && npm test && npm run build",
+    "ci": "npm run typecheck && npm test && npm run test:regression && npm run build",
     "verify:package": "node scripts/verify-package.mjs",
     "prepublishOnly": "npm run ci && npm run verify:package -- --prebuilt",
     "prepare": "node scripts/prepare-build.mjs",
     "build:client": "vite build --config ui/vite.config.ts --mode client",
     "dev:ui": "vite --config ui/vite.config.ts",
-    "verify:negatives": "node scripts/gate-negatives.mjs"
+    "verify:negatives": "node scripts/gate-negatives.mjs",
+    "test:regression": "node --import tsx test/regression/run.mjs"
   },
   "devDependencies": {
     "@deepseek-ai/dsh-llm": "0.2.2-rc.4",

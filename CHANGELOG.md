@@ -8,6 +8,18 @@ This file records user-visible changes. Format follows Keep a Changelog; version
 Design rationale lives in `docs/superpowers/specs/`; the release-acceptance procedure is in
 `docs/RELEASE.md`.
 
+## [0.3.11] - 2026-11-24
+
+### 新增
+
+- 取回完整性检查（issue #17）：`test/regression/integrity.ts` 对每个配置了投影的族断言三件事——落给 spill 后端的是**完整原文**（逐字节）、页脚点名的就是后端返回的 locator、页脚里的省略字节数等于两个窗口之外的部分。接进 `npm test`，并有一条「换成截断后的头段就立刻红」的用例证明它真的能失败。
+- 冒烟 runner：`npm run test:regression` 跑 `test/regression/tasks.jsonl` 的 6 条合成任务，逐族打印 `view 原始→视图B, omitted N, stored M`。进 `npm run ci`。
+
+### 说明
+
+- 边界如实写进发布说明：宿主 `SpillBackend` 是**只写**的，「宿主真的把字节还回来」插件看不见，仍属宿主责任。这条检查覆盖的是插件自己那一半——「无数据丢失」从 v1 起一直未核实的部分，现在核实到能看见的边界为止。
+- 20 条真实回放语料**仍不交付**（2026-11-18 用户否决的是语料，见 `docs/RELEASE.md` 文首）；`tasks.jsonl` 是合成的 6 条，不冒充任务集。
+
 ## [0.3.10] - 2026-11-24
 
 ### 新增

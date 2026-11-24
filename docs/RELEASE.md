@@ -8,10 +8,10 @@
 3. 影子周脚本的跑法、`session-snapshot.json` 的来源与复算方式；
 4. CI 到底做什么、不做什么，lockfile 的 China mirror 怎么处理，以及 npm 的发布旁路（§6）。
 
-> 记录在案的决定：本项目**不附带** 20 任务回放集，也不提供 `test/regression/run.mjs`。用户明确
-> 否决的是"搭回放集"的**语料**部分（2026-11-18）；这条豁免**只免除语料**。冒烟 runner 与
-> locator 取回完整性检查**不需要语料**，不在这条豁免内——当前两者都未交付。因此第 3 节只规定
-> 过程与判据，**不伪造任务集**。
+> 记录在案的决定：本项目**不附带** 20 任务回放集。用户明确否决的是"搭回放集"的**语料**部分
+> （2026-11-18），这条豁免**只免除语料**。冒烟 runner 与 locator 取回完整性检查按裁决并不需要
+> 语料，且**已交付**（0.3.11）：`npm run test:regression` 跑 6 条合成任务，`test/regression/
+> integrity.test.ts` 把同样的断言接进 `npm test`。因此第 3 节仍只规定过程与判据，**不伪造语料**。
 
 ---
 
@@ -357,10 +357,10 @@ tarball 会拉进 `dsh-spill-policy@rc.5` 并 `ERESOLVE`（当时实测 exit 1�
   **`0.2.3-rc.4` / `0.2.3-rc.5` / `0.2.3` 都在区间外**：它们会告警一次，但仍照常加载——`0.2.3-rc.5`
   与本插件触及的九个包逐字节相同（见 §6），所以那条告警说的是「没验证过」，不是「会坏」。
 
-安装规格：**`dsh-boost@^0.3.10`**。版本清单以 `npm view dsh-boost versions --registry=https://registry.npmjs.org/` 为准——这里不记条数，因为每发一版它就会过期一次；其中 `0.0.0-stage` 是 npm 自动创建的占位版本，不要把它当成
+安装规格：**`dsh-boost@^0.3.11`**。版本清单以 `npm view dsh-boost versions --registry=https://registry.npmjs.org/` 为准——这里不记条数，因为每发一版它就会过期一次；其中 `0.0.0-stage` 是 npm 自动创建的占位版本，不要把它当成
 “更早的 API”：
 
-- `0.3.10` — 当前 `latest`；`status.distill` 分账（`saved_tokens`/`spilled_bytes`）、蒸馏基线补页脚
+- `0.3.11` — 当前 `latest`；`status.distill` 分账（`saved_tokens`/`spilled_bytes`）、蒸馏基线补页脚
 - `0.3.7` — 文档：版本清单不再记条数，改为指向 `npm view`
 - `0.3.6` — 未知原因的墓碑不再冻结回执、临时文件按 pid 存活判定
 - `0.3.5` — 回放次数改回 `1 + 剩余步数`、采用保留 §5.4-4 信号行、墓碑只认已知原因
@@ -755,12 +755,15 @@ DSH 宿主后的行为、§3 的 20 任务回退流程（人工）、§5 的统�
 - [ ] 两条降级路径都保留 status/收据证据；验收中出现的每个稳定码都按 §2.5 的矩阵处置并留证（含 `ERR_HOST_NO_SPILL_NOTICE` / `ERR_HOST_VERSION_MISMATCH` / `ERR_BOOST_SECTION_REGISTER_FAILED`，以及已有的 `ERR_RECEIPTS_UNREADABLE` / `ERR_RECEIPTS_TRUNCATED` / `ERR_HOST_COMPLETE_SECTION` / `ERR_SCOPE_ABORTED` / `ERR_HOST_SPILL_FAILING` / `ERR_BOOST_PARTIAL_MOUNT`）；同时确认 `status.data.receipts_stopped` 为 `false`（为 `true` 表示收据已连续写失败 3 次、替换被整体拒绝）
 - [ ] 第一次开启替换的真实回合检查 `content[].thinking` 400（不是影子周）；若有，替换在该路由关闭
 - [ ] `npm run --silent stats` 在干净 clone 上可复算 §5.2 的聚合（口径对应设计稿 §2.1）
-- [ ] 发布侧：`npm publish` 走 `publishConfig.registry`（registry.npmjs.org、public）；用 `npm view dsh-boost dist-tags --registry=https://registry.npmjs.org/` 确认 `latest` 是 `package.json` 里的版本（registry 上另有 npm 自动创建的 `0.0.0-stage` 占位版本，见 §2.4）；**必须带 `--registry`**，否则读到的是镜像的旧 `latest`；安装规格是 `dsh-boost@^0.3.10`
+- [ ] 发布侧：`npm publish` 走 `publishConfig.registry`（registry.npmjs.org、public）；用 `npm view dsh-boost dist-tags --registry=https://registry.npmjs.org/` 确认 `latest` 是 `package.json` 里的版本（registry 上另有 npm 自动创建的 `0.0.0-stage` 占位版本，见 §2.4）；**必须带 `--registry`**，否则读到的是镜像的旧 `latest`；安装规格是 `dsh-boost@^0.3.11`
 
-**未交付、因此不在上表可勾选范围：§3 的 20 任务门，以及同一节里的取回完整性检查。**
-`test/regression/` 只有 `.gitkeep`——本仓库不附带任务集，也不提供 `test/regression/run.mjs`
-（2026-11-18 用户明确否决“搭回放集”，见文首记录）。用户豁免的是**回放语料**；冒烟 runner 与
-取回完整性检查按裁决并不需要语料，但同样没有交付，这一项由项目自行记录为「欠」，不是「豁免」。
+**未交付、因此不在上表可勾选范围：§3 的 20 条真实任务语料。**
+`test/regression/` 提供的是 runner 与**合成**任务集（`tasks.jsonl`，6 条），不是 20 条真实回放
+（2026-11-18 用户明确否决“搭回放集”的语料部分，见文首记录）。runner 与取回完整性检查已于
+0.3.11 交付：前者 `npm run test:regression`，后者 `test/regression/integrity.ts` 的三条断言
+（落库的是完整原文、页脚点名返回的 locator、被省字节与两个窗口闭合），并接进 `npm test`。
+「无数据丢失」这条不变量因此**已核实到插件能看见的边界**——宿主 `SpillBackend` 是只写的，
+「宿主真的把字节还回来」仍属宿主的责任。
 要执行它，维护者必须自备恰好 20 条任务，按 §3 的步骤与 pass 谓词跑两轮（基线 `shadow: true` +
 `projection: 'off'`；开启轮 `projection: 'on'`），结论只写“过门 / 未过门”。这一项无法由仓库内容
 核对，所以不放进可勾选清单：勾选它等于声称跑过一份仓库里并不存在的任务集。
