@@ -10,7 +10,7 @@
 
 > 记录在案的决定：本项目**不附带** 20 任务回放集。用户明确否决的是"搭回放集"的**语料**部分
 > （2026-11-18），这条豁免**只免除语料**。冒烟 runner 与 locator 取回完整性检查按裁决并不需要
-> 语料，且**已交付**（0.3.13）：`npm run test:regression` 跑 6 条合成任务，`test/regression/
+> 语料，且**已交付**（0.3.11）：`npm run test:regression` 跑 6 条合成任务，`test/regression/
 > integrity.test.ts` 把同样的断言接进 `npm test`。因此第 3 节仍只规定过程与判据，**不伪造语料**。
 
 ---
@@ -153,7 +153,7 @@ git checkout lib/client.js             # 或 npm run build:client 重建
   不存在的包则加载**响亮失败**。四名一致是为了保住管理面的可寻址性。
 - `version` 必须存在，否则 `npm pack` 在第一步就报 `Invalid package, must have name and version`。
 - `files` 与实际布局一致：`scripts/`、`test/`、`src/` 是 dev-only，**不**进包（`files` 只带
-  `dist`、`locale`、`static`、`cordis.patch.yml`、两份 README、`LICENSE`、`NOTICE`）；`static/`
+  `lib`、`dist`、`locale`、`static`、`cordis.patch.yml`、两份 README、`LICENSE`、`NOTICE`）；`static/`
   只放 README 引用的图片——npm 页面渲染 README 时用的是包里的相对路径，图片不进包就是坏图；`dist/` 由
   `npm run build`（clean + `tsc` + 客户端）构建；`prepare`（`scripts/prepare-build.mjs`）按缺失的那一半分别构建（git 安装用）——`dist/index.js` 与 `lib/client.js` 都在时是 no-op，所以 `npm publish` 的
   pack 步骤不会重建已构建的树；sourcemap 以 `inlineSources` 内联源码，装好的包没有 `src/`
@@ -355,7 +355,7 @@ tarball 会拉进 `dsh-spill-policy@rc.5` 并 `ERESOLVE`（当时实测 exit 1�
   **落在区间外**，插件告警 `ERR_HOST_VERSION_MISMATCH` 但**仍然加载**（advisory：版本不符是风险，
   不是 API 已改的证明；改名仍可能让插件失效）。区间内但不是验证过的 `0.2.2-rc.4`（如果将来有 `0.2.2-rc.5`）只记 info、不发码。
   **`0.2.3-rc.4` / `0.2.3-rc.5` / `0.2.3` 都在区间外**：它们会告警一次，但仍照常加载——`0.2.3-rc.5`
-  与本插件触及的九个包逐字节相同（见 §6），所以那条告警说的是「没验证过」，不是「会坏」。
+  与本插件触及的九个包逐字节相同（见 §2.4.1），所以那条告警说的是「没验证过」，不是「会坏」。
 
 安装规格：**`dsh-boost@^0.3.13`**。版本清单以 `npm view dsh-boost versions --registry=https://registry.npmjs.org/` 为准——这里不记条数，因为每发一版它就会过期一次；其中 `0.0.0-stage` 是 npm 自动创建的占位版本，不要把它当成
 “更早的 API”：
@@ -418,8 +418,7 @@ tarball 会拉进 `dsh-spill-policy@rc.5` 并 `ERESOLVE`（当时实测 exit 1�
 
 #### `0.2.3-rc.5` 逐字节复核（2026-11-21）
 
-`0.2.3-rc.5` 落在 `engines.dsh` 区间**外**（会告警 `ERR_HOST_VERSION_MISMATCH`），但它在本插件触及的九个宿主包里与验证过的 rc.4 逐字节相同——所以那条告警表示「没验证」，不表示「跑不了」。这条断言可以复跑：
-这条断言可以复跑（需要能访问 registry；无 `DIFF` 输出即九个包的 `lib/` 全部相同）：
+`0.2.3-rc.5` 落在 `engines.dsh` 区间**外**（会告警 `ERR_HOST_VERSION_MISMATCH`），但它在本插件触及的九个宿主包里与验证过的 rc.4 逐字节相同——所以那条告警表示「没验证」，不表示「跑不了」。这条断言可以复跑（需要能访问 registry；无 `DIFF` 输出即九个包的 `lib/` 全部相同）：
 
 ```bash
 export npm_config_cache=/tmp/npmcache   # 本仓库验收环境的缓存位置；普通环境可省略
@@ -482,7 +481,7 @@ JSON 体返回一个码，页面据码决定说什么。`ERR_CLIENT_*` 是页面
 | `ERR_SCOPE_WRITE_FAILED` | `/scope` 写失败 `code`（HTTP 500） | scope 文件**写不进去**：`writeAtomic` 落盘或 `ensureDirectory` 建目录失败（权限、磁盘满、IO）。与 `ERR_SCOPE_READ_FAILED` 分开，因为基线仍然有效、草稿仍然可用——建议「重新读取」会丢掉一份好草稿 | 查目录权限与剩余空间；改好后原样重试，不需要重读 |
 | `ERR_SCOPE_REVISION_CONFLICT` | `scope-set` / `shadow` 失败 `code`（**不在** `degraded` 里） | 调用方的 `baseRevision` 已过期；CAS 拒绝，未覆盖 | 重读 `status` 取当前 `revision` 后重试 |
 | `ERR_SCOPE_LOCKED` | `scope-set` / `shadow` 失败 `code` | 两种情形共用这个码：**锁被另一个写者持有**（未判定为陈旧，也未到 10 分钟接管阈值），或**锁文件根本创建不出来/写不进去**（目录只读、磁盘满、`.lock` 被一个目录占住）。两种情形本次写入都未发生。插件**不等待**：判定为 `'held'` 时立即抛 | 先排除「锁文件建不出来」——查 `<dshHome>/boost` 的写权限、剩余空间与同名异常条目；确认是并发写者才重试。60 s 陈旧 / 10 min 接管是分类阈值，不是等待时间 |
-| `ERR_SCOPE_ABORTED` | `scope-set` / `shadow` 失败 `code` | 调用方的取消信号打断了 `boost` 写入；锁已释放、`scope.json` 原样未动，无残留 | 重读 `status` 取当前 `revision` 后重试即可 |
+| `ERR_SCOPE_ABORTED` | **任何** `boost` 子命令失败 `code`（`runBoost` 在分派之前就检查信号，所以 `status` / `scope-get` 也会返回它） | 调用方的取消信号打断了这次调用。写命令下锁已释放、`scope.json` 原样未动；只读命令下没有任何副作用 | 重新调用即可；写命令重读 `status` 取当前 `revision` 后重试 |
 | `ERR_BOOST_UNKNOWN_CMD` | `boost` 工具失败 `code` | `cmd` 不在 `status` / `scope-get` / `scope-set` / `shadow` 里 | 改传四个子命令之一 |
 | `ERR_BOOST_INVALID_ARGS` | `boost` 工具失败 `code` | `baseRevision` 缺失或不是非负整数（`scope-set` / `shadow`） | 从 `status` 取整数 revision 再传 |
 | `ERR_BOOST_INVALID_BODY` | `boost` 工具失败 `code` | `body` 形状/类型不对；`scope-set` 带了保留字段 `version` / `revision`；`shadow` 的 body 不是布尔 | 按工具 schema 重写 body |
@@ -534,7 +533,7 @@ JSON 体返回一个码，页面据码决定说什么。`ERR_CLIENT_*` 是页面
 | `distill-rejected:not-worth-it` | 回本预判否决：`最乐观节省（截断视图 − 页脚，含被保留的信号行）×（1 + 剩余步数）` 不大于 `回执输入 + 输出预算`。这条回执无论蒸成什么样都赚不回那次调用（典型是剩余步数很少的会话末段）。回执没有可比的截断视图（未过窗口、超 256 KiB、或窗口不会缩短它）或估算器答不出价格时，这道门**弃权**，不会记成本码 | 预期行为。**不钉墓碑**：视界随会话增长，下次同一回执会重新判断。只在宿主同时提供估算器与剩余步数时生效，两者缺一则这道门关闭 |
 | `distill-rejected:not-smaller` | 蒸馏正文 + 页脚按 UTF-8 字节不短于同回执的截断视图，净赚为负，不采用。**这是唯一「原文已经落盘再被拒」的路径**：比较需要真实页脚，页脚要命名产物，而宿主 spill 后端没有删除能力——被弃的原文会留下，收据上的 `distill_spilled_bytes` 是它唯一的痕迹，`status.distill.spilled_bytes` 按它汇总 | 正常门；持续出现说明该族的正文太长（`maxOutputTokens` 没约束住），收紧它；`spilled_bytes` 长期增长说明该调大 `triggerChars` 或调小 `maxOutputTokens` |
 
-| `distill`（采用） | 采用时写入的是 `kind:'projection'`、`code:'projected'` 的收据，`mode:'adopted'`，带 `distill_calls`/`distill_tokens`/`distill_omitted_bytes`/`distill_bytes`/`distill_saved_tokens` | 无需处置；`boost status` 的 `distill.calls/tokens/adopted` 由它汇总。`adopted` 数的是**采用次数**（含读表重放，那时 `distill_calls` 为 `0`），所以它可能大于 `calls`——`calls` 只数真花掉的调用 |
+| `projected`（`mode:'adopted'`，即「蒸馏被采用」；**`distill` 是决策名，不是收据码**） | 收据本身是 `kind:'projection'`、`code:'projected'`，带 `distill_calls`/`distill_tokens`/`distill_omitted_bytes`/`distill_bytes`/`distill_saved_tokens` | 无需处置；`boost status` 的 `distill.calls/tokens/adopted` 由它汇总。`adopted` 数的是**采用次数**（含读表重放，那时 `distill_calls` 为 `0`），所以它可能大于 `calls`——`calls` 只数真花掉的调用。`rejected` 同样含墓碑重放（一次重放写一条 `mode:'rejected'` 的 skip 收据），只有 `fallback` 不含 |
 | `distill-late` | 一次超时调用迟到落盘后另写的收据，`kind:'skip'`、`mode:'late'`、`distill_calls:0`。只把 `distill_tokens` 与 `distill_input_chars` 加进 `status.distill`，`calls` 与结局计数留在超时那条上 | 无需处置；出现它说明该回执的答案迟到但落盘了，下次渲染会直接采用 |
 | `dispatch-rejected` | 合成派发的工具名/参数与决定不符（防篡改检查），该次派发被拒、队列已清 | 到达的调用不是插件决定的那一个；查是否有别的写入者或中间层改了参数 |
 | `pruned-reset` / `compaction-reset` | `llm/stream` 或 `tools/post-execute` 时锚点无法验证：历史被 pruner 裁掉（`pruned-reset`），或锚定回执已不在/被压缩替换（`compaction-reset`）；写一条 `kind:'reset'` 收据，队列与锚点清空后放行 | 压缩/裁剪后的预期重置；替换在下一回合重新开始 |

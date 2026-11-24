@@ -54,7 +54,8 @@ dsh plugin --profile <name> add /absolute/path/to/dsh-boost
 
 包是 ESM（`"type": "module"`），`exports` 的 `.` 条目同时映射 `require` / `default`：Node ≥ 24.9
 下 `require('dsh-boost')` 与 `import` 加载同一份代码，装好的包里**不做任何构建**（`files` 只带
-`dist`、`locale`、`cordis.patch.yml`、两份 README、`LICENSE`、`NOTICE`，不带 `src/`；`dist` 的
+`lib`（客户端 bundle）、`dist`（其中内部 `.d.ts` 不发，只留三个公开入口声明）、`locale`、
+`static`、`cordis.patch.yml`、两份 README、`LICENSE`、`NOTICE`，不带 `src/`；`dist` 的
 sourcemap 内联了源码）。
 
 包里的 `dsh.bundle.patch` 指向 `cordis.patch.yml`，所以安装后宿主会把它登记为 profile 的一个
@@ -143,8 +144,10 @@ I/O、路径是目录等）——那不是正常的首次状态，要先修掉�
   `"unknown"`（不是 0），`degraded` 带 `ERR_HOST_NO_ESTIMATOR`；此时 `estimate_kind` 仍可能是
   `"host"`，因为 token meter 服务还在——两件事不要混。
 - `data.hasSpill` 为 `true`（宿主**提供** spill 服务的存在性）。它**不表示可用**：服务在但
-  没有 `saveText` 时仍是 `true`，`degraded` 会带 `ERR_HOST_SPILL_UNUSABLE`。打开
-  `projection: 'on'` 前要同时看这两个字段；只看 `hasSpill` 会把一个不可用的后端当成可用。
+  没有 `saveText` 时仍是 `true`，`degraded` 会带 `ERR_HOST_SPILL_UNUSABLE`。这两个字段要
+  一起看，但**没有「打开前先检查」这回事**：`ERR_HOST_SPILL_UNUSABLE` 只在 `projection: 'on'`
+  时才映射进 `degraded`，所以翻开关之前它结构性不可见。顺序是**先开、立刻查**；只看
+  `hasSpill` 会把一个不可用的后端当成可用。
 - `data.counts` 一开始通常为空——但**控制调用自己也计数**：可见工作区为空时，`boost`
   自己的调用同样要过 post-execute 的 scope 门（那里没有 boost 豁免，豁免只在工具注册层），
   每条记一次 `skip:no-scope`。正常工具调用后会累积，例如出现 `projection-shadow` 条目。
@@ -238,9 +241,10 @@ token，它只产出下一节的四个比例；`selected + []` 下协议段为�
    `retrievalUpperBound`（**已观测取回率的下界，不是取回损害的上界**；影子期没有真正投影，
    结构上恒为 `0`）。
 3. **打开投影**：投影的放行不靠影子标签（依据是可见性契约：原文可经页脚取回；v1 没有
-   误截检测器）。先确认 `status.data.hasSpill` 为 `true` **且** `degraded` 不含
-   `ERR_HOST_SPILL_UNUSABLE`——前者只证明宿主**提供**服务，后者才说明服务可用；再保持
-   `shadow: true`，把 `projection` 改成 `'on'`：
+   误截检测器）。保持 `shadow: true`，把 `projection` 改成 `'on'`，**翻完之后**再查
+   `status.data.hasSpill` 为 `true` 且 `degraded` 不含 `ERR_HOST_SPILL_UNUSABLE`——顺序不能反：
+   `ERR_HOST_SPILL_UNUSABLE` 只在 `projection: 'on'` 时才进 `degraded`，翻之前它结构性不可见
+   （`docs/RELEASE.md` §4 把「先检查再开」列为无效顺序）。`hasSpill` 只证明宿主**提供**服务：
 
    ```json
    { "cmd": "scope-set", "body": { "projection": "on" }, "baseRevision": 1 }
@@ -331,7 +335,8 @@ token，它只产出下一节的四个比例；`selected + []` 下协议段为�
 
 ### Bundle patch
 
-`cordis.patch.yml` 只有一条 `insert`，落在 profile root 上：
+`cordis.patch.yml` 只有一条 `insert`，落在 profile root 上（下面是最能说明形状的节选；
+完整的 `config` 还带 `distillation` 块——见[蒸馏](#蒸馏distillation默认关闭)一节）：
 
 ```yaml
 - insert:
@@ -349,6 +354,7 @@ token，它只产出下一节的四个比例；`selected + []` 下协议段为�
         stepsPerTurn: 8
         horizonSteps: 20
         historyTurns: 5
+        distillation: { enabled: false, ... }   # 完整键名见蒸馏一节
 ```
 
 宿主对顶层 `insert` 行**不做任何 id/name 匹配**：加载器（cordis-plugin-include 的

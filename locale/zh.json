@@ -85,7 +85,7 @@
   "PROJECTION_ON": "开启（真替换）",
   "PROJECTION_SHADOW": "影子（只记账）",
   "RETRY": "重试",
-  "SAVED": "与页面上次读到或保存时的文档一致。页面不会轮询：别处（例如让模型调用 boost）改了 scope，这里要重新读取才看得到。",
+  "SAVED": "与页面上次读到或保存时的文档一致。页面不会轮询：别处（例如让模型调用 boost）改了 scope，只有下一次读取失败（或你重新打开页面）才会反映出来。",
   "SECTION_CONFIG": "生效配置",
   "SECTION_COUNTS": "收据计数",
   "SECTION_SCOPE": "作用域",

@@ -85,7 +85,7 @@
   "PROJECTION_ON": "On (real substitution)",
   "PROJECTION_SHADOW": "Shadow (record only)",
   "RETRY": "Retry",
-  "SAVED": "Matches the document as this page last read or saved it. The page does not poll: if something else changes the scope (say, the model runs boost), reload to see it.",
+  "SAVED": "Matches the document as last read or saved. The page does not poll: a change made elsewhere (e.g. through the boost tool) shows up on the next failed read, or when you reopen the page.",
   "SECTION_CONFIG": "Effective config",
   "SECTION_COUNTS": "Receipt counts",
   "SECTION_SCOPE": "Scope",

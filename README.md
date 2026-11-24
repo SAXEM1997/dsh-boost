@@ -80,8 +80,9 @@ dsh plugin --profile <name> add dsh-boost@^0.3.13 --registry=https://registry.np
    ```
 
 3. 影子一周：保持 `shadow: true`、`projection: "shadow"`，照常工作。
-4. 确认 `hasSpill` 为 `true` **且** `degraded` 不含 `ERR_HOST_SPILL_UNUSABLE`，把
-   `projection` 设为 `"on"`。
+4. 把 `projection` 设为 `"on"`，**然后**再确认 `hasSpill` 为 `true` 且 `degraded` 不含
+   `ERR_HOST_SPILL_UNUSABLE`。顺序不能反：那个码只在 `projection: 'on'` 时才进 `degraded`，
+   翻开关之前它结构性看不到——先检查再开是一个永远通过的检查。
 5. 影子报告可接受后，把 `shadow` 设为 `false`；第一次真正替换后按
    [`docs/RELEASE.md`](docs/RELEASE.md) §4 盯 `content[].thinking` 的 400。
 
@@ -121,7 +122,7 @@ workspace UUID，不是路径；找不到时单用户机器可以用 `"mode": "g
 
 ## 深入
 
-这些文档在仓库里，不在 npm tarball 里（`files` 只带 `dist`、`locale`、`static`、`cordis.patch.yml`、两份
+这些文档在仓库里，不在 npm tarball 里（`files` 只带 `lib`、`dist`、`locale`、`static`、`cordis.patch.yml`、两份
 README、`LICENSE`、`NOTICE`；`src/` 也不进包，`dist` 的 sourcemap 内联了源码）。在 npm 页面上
 请从仓库读取。
 
