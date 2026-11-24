@@ -264,12 +264,14 @@ const GROUP_ORDER: CountGroup['key'][] = ['substitute', 'projection', 'distill',
  * cost of keeping those two names.
  */
 const FAMILY_ALIAS: Record<string, CountGroup['key']> = {
+  // The code that means "the replacement happened".
   substituted: 'substitute',
-  substitution: 'substitute',
+  // Written by `distillReceiptCode()` at the adopt site, and by the ordinary
+  // projection path — it never carries a separator, so it used to land in
+  // `other`.
   projected: 'projection',
-  projection: 'projection',
+  // `kind:'distill'` writes this bare code, so it cannot be split either.
   distill: 'distill',
-  skipped: 'skip',
 }
 
 export function groupCounts(counts: Record<string, number>): CountGroup[] {
