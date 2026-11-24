@@ -464,7 +464,9 @@
 }
 
 .boost-settings__count-group > summary:hover {
-  color: color-mix(in srgb, currentColor 100%, transparent);
+  /* A 100%-of-currentColor mix is a no-op; the summary is already a native
+     disclosure, so the cursor and the marker carry the affordance. */
+  background: color-mix(in srgb, currentColor 6%, transparent);
 }
 
 .boost-settings__count-total {

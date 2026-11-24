@@ -190,6 +190,9 @@ test('groupCounts 按前缀分组，组内降序，组间顺序固定', () => {
     'projection-skipped:no-spill': 3,
     'substitute-settled': 12,
     'substitute': 4,
+    // The two codes that mean the thing happened, and carry no separator.
+    'substituted': 5,
+    'projected': 3,
     'distill-rejected:not-smaller': 1,
     'guard-trivial': 7,
     'not a number': Number.NaN,
@@ -200,17 +203,19 @@ test('groupCounts 按前缀分组，组内降序，组间顺序固定', () => {
     ['substitute', 'projection', 'distill', 'skip', 'other'],
   )
   const substitute = groups.find((group) => group.key === 'substitute')
-  assert.equal(substitute?.total, 16, 'the group total is the sum of its rows')
+  assert.equal(substitute?.total, 21, 'the group total is the sum of its rows, aliases included')
+  const projection = groups.find((group) => group.key === 'projection')
+  assert.equal(projection?.total, 6, 'projected is a projection, not an "other"')
   assert.deepEqual(
     substitute?.rows.map((row) => row.code),
-    ['substitute-settled', 'substitute'],
+    ['substitute-settled', 'substituted', 'substitute'],
     'rows are ordered by count, descending',
   )
   assert.equal(groups.find((group) => group.key === 'skip')?.total, 9620)
   assert.equal(groups.find((group) => group.key === 'other')?.rows[0]?.code, 'guard-trivial')
   assert.equal(
     groups.reduce((sum, group) => sum + group.total, 0),
-    9647,
+    9655,
     'a NaN count is dropped, everything else is counted exactly once',
   )
 })

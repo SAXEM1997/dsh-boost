@@ -143,5 +143,7 @@
   "LABEL_COUNTS_GROUP_SKIP": "Skips",
   "LABEL_COUNTS_GROUP_OTHER": "Other",
   "LABEL_COUNTS_TOTAL": "Total",
-  "HINT_COUNTS_GROUPED": "Grouped by receipt-code prefix; codes in a group mean similar things, expand for the per-code counts."
+  "HINT_COUNTS_GROUPED": "Grouped by receipt-code prefix; shares are of all receipts and add up. A large \"skip\" group usually means this workspace is not selected.",
+  "LABEL_SAVED_LEGACY": "Legacy retrieval cost",
+  "HINT_SAVED_LEGACY": "Retrievals recorded before 0.3 did not split content from call cost; this is their historical cost. It exists so the two rows above add up to the net."
 }

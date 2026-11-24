@@ -469,6 +469,14 @@ export interface BoostStatus {
      * cost must never silently become zero (review R3).
      */
     projectionNet: number | 'unknown'
+    /**
+     * Σ `retrievalCost` over receipts written before `retrieval_content_tokens`
+     * existed, replayed by their own horizon.
+     *
+     * Omitted when `0`. Present only when `projectionNet` is a number: an
+     * `unknown` net has no terms to explain.
+     */
+    retrieval_legacy?: number
     /** Number of `kind:'projection'` receipts marked `retrieved: true`. */
     retrievals: number
     /**
@@ -1187,6 +1195,13 @@ async function statusCommand(deps: BoostDeps): Promise<BoostResult<BoostStatus>>
       : {
           retrievalContent: totals.retrievalContentReplay,
           retrievalCalls: totals.retrievalCallTokens,
+          // The third subtracted term, and the only one that exists solely for
+          // receipts written before `retrieval_content_tokens`: without it the
+          // two rows above do not add up to `projectionGross - projectionNet`,
+          // and a reader concludes the arithmetic is broken (review P0-1).
+          // Omitted when zero, so a store with no legacy receipt shows only the
+          // two terms that actually applied.
+          ...(totals.legacyRetrievalCost === 0 ? {} : { retrieval_legacy: totals.legacyRetrievalCost }),
         }),
   }
   const data: BoostStatus = {

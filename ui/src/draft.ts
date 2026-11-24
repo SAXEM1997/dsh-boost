@@ -237,13 +237,12 @@ export function distillStateOf(config: BoostConfig | undefined): 'unknown' | 'ab
 }
 
 /**
- * Receipt codes grouped by their prefix, for the counts panel.
+ * Receipt codes grouped by their family, for the counts panel.
  *
  * A flat list lets one runaway code (`skip:no-scope`, thousands) bury the rest,
  * and the reader cannot tell which kinds of event the number is even made of.
- * The group is the part before the first `:`; codes without one land in
- * `other`. Order is by descending total, then by name, so the shape is stable
- * between renders.
+ * Group order is fixed by `GROUP_ORDER` so the shape is stable between renders;
+ * rows inside a group are by descending count, then by code.
  */
 export interface CountGroup {
   key: 'substitute' | 'projection' | 'distill' | 'skip' | 'other'
@@ -255,15 +254,34 @@ export interface CountGroup {
 
 const GROUP_ORDER: CountGroup['key'][] = ['substitute', 'projection', 'distill', 'skip', 'other']
 
+/**
+ * Codes that name a family without carrying its prefix.
+ *
+ * `substituted` and `projected` are the two codes that mean the thing actually
+ * happened — the only receipts that record a saving — and neither can be split
+ * on a separator, so they used to fall into `other` and get collapsed by
+ * default (review P0-2). A receipt code is a contract: an alias here is the
+ * cost of keeping those two names.
+ */
+const FAMILY_ALIAS: Record<string, CountGroup['key']> = {
+  substituted: 'substitute',
+  substitution: 'substitute',
+  projected: 'projection',
+  projection: 'projection',
+  distill: 'distill',
+  skipped: 'skip',
+}
+
 export function groupCounts(counts: Record<string, number>): CountGroup[] {
   const groups = new Map<CountGroup['key'], { code: string; count: number }[]>()
   for (const [code, count] of Object.entries(counts)) {
     if (typeof count !== 'number' || !Number.isFinite(count)) continue
     // Receipt codes are `<family>[-<detail>][:<reason>]` — `substitute-settled`,
     // `projection-skipped:no-spill`, `skip:no-scope`. The family is the leading
-    // word, so the split is on the first `-` or `:`, not on `:` alone.
+    // word, so the split is on the first `-` or `:`, not on `:` alone. The
+    // aliases cover the two codes that carry no separator at all.
     const lead = code.split(/[-:]/, 1)[0] as CountGroup['key']
-    const key = GROUP_ORDER.includes(lead) ? lead : 'other'
+    const key = GROUP_ORDER.includes(lead) ? lead : (FAMILY_ALIAS[code] ?? 'other')
     const rows = groups.get(key) ?? []
     rows.push({ code, count })
     groups.set(key, rows)

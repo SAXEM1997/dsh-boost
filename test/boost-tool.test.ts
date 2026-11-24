@@ -797,6 +797,11 @@ test('unpriced retrieval makes the net unknown instead of free', async () => {
   assert.equal(status.projection_unpriced_retrievals, 1)
   assert.equal(status.saved.projectionNet, 'unknown')
   assert.equal(status.projection_net_tokens, 'unknown')
+  // An unknown net has no terms to explain, so they are absent rather than 0:
+  // a 0 would claim "nothing was subtracted" about a number nobody computed.
+  assert.equal('retrievalContent' in status.saved, false)
+  assert.equal('retrievalCalls' in status.saved, false)
+  assert.equal('retrieval_legacy' in status.saved, false)
 })
 
 test('pre-schema retrievalCost is subtracted once, never read as free', async () => {
@@ -828,6 +833,9 @@ test('pre-schema retrievalCost is subtracted once, never read as free', async ()
   assert.equal(status.projection_unpriced_retrievals, 0)
   // The legacy field was already a replay-aware total; subtract it directly.
   assert.equal(status.saved.projectionNet, 100 * 21 - 30)
+  // The pre-schema cost is a third subtracted term; without it the two rows on
+  // the page would not add up to gross − net.
+  assert.equal(status.saved.retrieval_legacy, 30)
   assert.equal(status.projection_net_tokens, 100 * 21 - 30)
 })
 

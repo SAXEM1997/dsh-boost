@@ -143,5 +143,7 @@
   "LABEL_COUNTS_GROUP_SKIP": "跳过",
   "LABEL_COUNTS_GROUP_OTHER": "其它",
   "LABEL_COUNTS_TOTAL": "合计",
-  "HINT_COUNTS_GROUPED": "按收据码前缀分组；同一组的码含义相近，展开看逐条计数。"
+  "HINT_COUNTS_GROUPED": "按收据码前缀分组；占比是占全部收据的比例，可相加。「跳过」很大通常意味着这个工作区没被选中。",
+  "LABEL_SAVED_LEGACY": "旧版取回成本",
+  "HINT_SAVED_LEGACY": "0.3 之前写入的取回收据没有拆分内容与调用，这一项是它们的历史成本；有它才让上面两行与净额对得上。"
 }

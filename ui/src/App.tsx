@@ -263,6 +263,9 @@ export function App() {
               {saved?.retrievalCalls === undefined ? null : (
                 <Row label={c.LABEL_SAVED_RETRIEVAL_CALLS} value={tokens(c, saved.retrievalCalls)} />
               )}
+              {saved?.retrieval_legacy === undefined ? null : (
+                <Row label={c.LABEL_SAVED_LEGACY} value={tokens(c, saved.retrieval_legacy)} hint={c.HINT_SAVED_LEGACY} />
+              )}
               <Row label={c.LABEL_RETRIEVALS} value={tokens(c, saved?.retrievals)} />
               <Row label={c.LABEL_OVERHEAD} value={tokens(c, status?.fixedOverheadTokens)} hint={c.HINT_OVERHEAD} />
               <Row
