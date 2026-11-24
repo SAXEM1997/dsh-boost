@@ -514,7 +514,7 @@ JSON 体返回一个码，页面据码决定说什么。`ERR_CLIENT_*` 是页面
 | `substitution-unavailable` | 替换因环境原因没跑：`platform-unsupported`（win32）、`no-step`（步进时钟缺失）、`no-queue`（没有待发队列）、`queue-failed`（入队抛错，预算已花） | 看 `reason`：win32 是预期；`no-step`/`no-queue` 说明宿主事件缺失，按 `ERR_HOST_NO_AGENT_PRE_STEP` 排查 |
 | `not-admitted` | 已定价但被该步的准入判定拒绝（省得不够）；`reason:'no-estimator'` 是拿不到估算器 | 正常预算行为；`no-estimator` 见 `ERR_HOST_NO_TOKENMETER` / `ERR_HOST_NO_ESTIMATOR` |
 | `skip:no-scope` | 当前工作区不在作用域内（`selected` 模式下没勾选，或注册表里没有它），投影与替换都不跑 | 预期行为；设置页「作用域」里勾上工作区，或切 `global` |
-| `projection-skipped:no-spill` / `no-footer` / `spill-failed` / `footer-failed`（`footer-failed` 是页脚**渲染时抛错**，`no-footer` 是渲染器**根本解析不到**） | 投影被跳过：没有 spill 后端、页脚通知模块缺失、后端每次写都失败、或页脚产不出来。原文完整保留 | 依次对应 `ERR_HOST_NO_SPILL` / `ERR_HOST_NO_SPILL_NOTICE` / `ERR_HOST_SPILL_FAILING` / `ERR_HOST_NO_SPILL_NOTICE`；投影从不删原文，所以不投影的代价只是没省下 |
+| `projection-skipped:no-spill` / `projection-skipped:no-footer` / `projection-skipped:spill-failed` / `projection-skipped:footer-failed`（最后一个是页脚**渲染时抛错**，`no-footer` 是渲染器**根本解析不到**） | 投影被跳过：没有 spill 后端、页脚通知模块缺失、后端每次写都失败、或页脚产不出来。原文完整保留 | 依次对应 `ERR_HOST_NO_SPILL` / `ERR_HOST_NO_SPILL_NOTICE` / `ERR_HOST_SPILL_FAILING` / `ERR_HOST_NO_SPILL_NOTICE`；投影从不删原文，所以不投影的代价只是没省下 |
 | `substituted` | **替换真的发生了**：合成回合已派发。一条计划一条，正文带计划目标与守卫 | 无需处置；这是唯一记录「省下来了」的替换收据，`substitute-settled` 随后给出数字 |
 | `substitute-settled` | **结算**：被跳过的那次调用省下多少。`saved_input_tokens`（上界）、`avoided_total_tokens`（下界）、`output_tokens` | 无需处置；`boost status` 的 `saved.substitution*` 由它汇总。合成时写的那条 `substituted` 不带数字 |
 | `guard-trivial` / `no-candidate` | 计划里没有可提交的候选（守卫全不过 / 白名单外） | 模型写的计划不可用；看 `boost status` 的 `counts` 判断是常态还是异常 |
