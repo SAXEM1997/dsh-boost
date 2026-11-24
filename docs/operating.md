@@ -445,8 +445,13 @@ horizon 重放，并计入 `projection_horizon_reestimated`；`projection_horizo
   - `projectionGross`（`saved` 里，重放口径）：每条回执的节省乘以**它自己的** `(1 + horizon)` 再求和。
     它是净额的被减数，所以和上面那个数不同；每条收据在决策时钉住自己的 `horizon_steps`，
     旧收据没有这个字段时按当前视界重估，并在 `projection_horizon_reestimated` 里报数。
-  - `projectionNet`：`重放毛额 − 取回内容成本 − 取回调用成本`。取回成本按模型对 spill locator
-    发起的 `read`/`grep` 计价；有取回但无法定价时它是 `'unknown'`，不是 0。
+  - `projectionNet`：`重放毛额 − 取回内容成本 − 取回调用成本 − 旧版取回成本`。取回成本按模型对
+    spill locator 发起的 `read`/`grep` 计价；有取回但无法定价时它是 `'unknown'`，不是 0。
+  - `retrievalContent` / `retrievalCalls` / `retrieval_legacy`：**净额实际减掉的三项**，与
+    `projectionNet` 同一次聚合派生，所以 `projectionGross − projectionNet` 恰好等于三者之和。
+    前两项是 `retrieval_content_tokens`（按收据自己的视界回放）与 `retrieval_call_tokens`；
+    `retrieval_legacy` 只统计 0.3 之前写入、没有拆分内容与调用的取回收据，**为 0 时整个键省略**。
+    净额为 `'unknown'` 时三个键**都省略而不是置 0**——0 等于宣称「这一项没花钱」，而这些数没人算过。
   - `retrievals`：模型对 spill locator 的取回次数（读一次 spill 算一次）。
 
 `projection: 'on'` 时，完整原文在替换发生**之前**写入宿主的 spill 后端，页脚 locator 可以用
