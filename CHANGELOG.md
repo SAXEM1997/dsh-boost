@@ -8,6 +8,20 @@ This file records user-visible changes. Format follows Keep a Changelog; version
 Design rationale lives in `docs/superpowers/specs/`; the release-acceptance procedure is in
 `docs/RELEASE.md`.
 
+## [0.3.13] - 2026-11-24
+
+### 修复（设置页收据面板，#16 评审）
+
+- **两个「真的发生了」的码被归错组**：`substituted` 与 `projected` 不含分隔符，按前缀切分会落进 `other` 并被默认折叠——而那两条正是唯一记录「省了多少」的收据。改为显式别名表；测试夹具补这两个码（此前夹具里没有它们，归错组永远暴露不出来）。
+- **净额等式算不平**：`legacyRetrievalCost` 是第三个被减项，只展示两项时 `retrievalContent + retrievalCalls ≠ gross − net`。新增 `saved.retrieval_legacy`（为 0 时省略）与对应的页面行。
+- 计数面板显示占比（与行同分母，可相加），默认折叠 `skip` 与 `other`；`<0.1%` 不再渲染成 `0.0%`。
+- 补断言「net 为 `unknown` 时三键都缺席」——此前把它改成「永远包含」测试仍全绿。
+- `groupCounts` 的注释说「按总数降序」，实现是按固定组序；hover 规则用了 100% currentColor 混 0% 透明（no-op）。
+
+### 文档
+
+- 新增 `docs/research/2026-11-24-tool-ordering-authority.md`：定序权威的一手调研（8 篇论文，逐条标到节/表），结论是引入「守卫门控的短链 K=3」而不是一次定序，并给出可证伪的实验设计（issue #12）。
+
 ## [0.3.12] - 2026-11-24
 
 ### 修复
