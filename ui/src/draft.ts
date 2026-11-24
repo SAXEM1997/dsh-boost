@@ -248,7 +248,9 @@ export function distillStateOf(config: BoostConfig | undefined): 'unknown' | 'ab
 export interface CountGroup {
   key: 'substitute' | 'projection' | 'distill' | 'skip' | 'other'
   total: number
-  rows: { code: string; count: number }[]
+  /** Share of all counted receipts, 0–1. A group at 99% is telling you something. */
+  share: number
+  rows: { code: string; count: number; share: number }[]
 }
 
 const GROUP_ORDER: CountGroup['key'][] = ['substitute', 'projection', 'distill', 'skip', 'other']
@@ -266,8 +268,18 @@ export function groupCounts(counts: Record<string, number>): CountGroup[] {
     rows.push({ code, count })
     groups.set(key, rows)
   }
+  const all = [...groups.values()].flat().reduce((sum, row) => sum + row.count, 0)
   return GROUP_ORDER.filter((key) => groups.has(key)).map((key) => {
     const rows = (groups.get(key) ?? []).sort((left, right) => right.count - left.count || left.code.localeCompare(right.code))
-    return { key, total: rows.reduce((sum, row) => sum + row.count, 0), rows }
+    const total = rows.reduce((sum, row) => sum + row.count, 0)
+    // Shares are computed against the same denominator the rows use, so a group
+    // showing 99.9% means "almost every receipt this store holds", not "almost
+    // every receipt in this group".
+    return {
+      key,
+      total,
+      share: all === 0 ? 0 : total / all,
+      rows: rows.map((row) => ({ ...row, share: all === 0 ? 0 : row.count / all })),
+    }
   })
 }

@@ -218,5 +218,7 @@ test('groupCounts 按前缀分组，组内降序，组间顺序固定', () => {
 test('groupCounts 对空载荷与未知前缀都给出稳定的形状', () => {
   assert.deepEqual(groupCounts({}), [])
   const unknown = groupCounts({ 'weird:prefix': 2 })
-  assert.deepEqual(unknown, [{ key: 'other', total: 2, rows: [{ code: 'weird:prefix', count: 2 }] }])
+  assert.deepEqual(unknown, [
+    { key: 'other', total: 2, share: 1, rows: [{ code: 'weird:prefix', count: 2, share: 1 }] },
+  ])
 })

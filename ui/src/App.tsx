@@ -124,6 +124,14 @@ function Degraded({ codes, unavailable }: { codes: readonly string[]; unavailabl
   )
 }
 
+/** A share as a short percentage; tiny shares read `<0.1%` rather than `0.0%`. */
+function percent(share: number): string {
+  if (!Number.isFinite(share) || share <= 0) return ''
+  const value = share * 100
+  if (value < 0.1) return ' <0.1%'
+  return ` ${value.toFixed(value >= 10 ? 0 : 1)}%`
+}
+
 /** The group's display name; `other` is the bucket for codes with no prefix. */
 function groupLabel(c: Copy, key: CountGroup['key']): string {
   switch (key) {
@@ -303,16 +311,29 @@ export function App() {
               <>
                 <p className="boost-settings__hint">{c.HINT_COUNTS_GROUPED}</p>
                 {countGroups.map((group) => (
-                  <details key={group.key} className="boost-settings__count-group" open={group.key !== 'other'}>
+                  <details
+                    key={group.key}
+                    className="boost-settings__count-group"
+                    // `skip` is the one group whose size is usually a single code
+                    // firing thousands of times (`skip:no-scope`); leaving it open
+                    // buries every group an operator can act on.
+                    open={group.key !== 'skip' && group.key !== 'other'}
+                  >
                     <summary>
-                      <span>{groupLabel(c, group.key)}</span>
+                      <span>
+                        {groupLabel(c, group.key)}
+                        <span className="boost-settings__count-share">{percent(group.share)}</span>
+                      </span>
                       <span className="boost-settings__count-total">{group.total.toLocaleString()}</span>
                     </summary>
                     <ul className="boost-settings__counts">
                       {group.rows.map((row) => (
                         <li key={row.code}>
                           <code>{row.code}</code>
-                          <span>{row.count.toLocaleString()}</span>
+                          <span>
+                            {row.count.toLocaleString()}
+                            <span className="boost-settings__count-share">{percent(row.share)}</span>
+                          </span>
                         </li>
                       ))}
                     </ul>
