@@ -24,31 +24,31 @@
 `dsh plugin` 要求指定 profile，剩下的参数原样转发给该 profile 目录里的 pnpm：
 
 ```bash
-# 从 registry 安装：npmjs 上的 latest 是 0.4.4（本仓库 .npmrc 与 lockfile
+# 从 registry 安装：npmjs 上的 latest 是 0.4.5（本仓库 .npmrc 与 lockfile
 # 也已钉在 npmjs，见下）
-dsh plugin --profile <name> add dsh-boost@^0.4.4 --registry=https://registry.npmjs.org/
+dsh plugin --profile <name> add dsh-boost@^0.4.5 --registry=https://registry.npmjs.org/
 
 # 或从本地 checkout 安装（先构建；dist/ 不入库）
 npm run build
 dsh plugin --profile <name> add /absolute/path/to/dsh-boost
 ```
 
-例如 web profile：`dsh plugin --profile web add dsh-boost@^0.4.4 --registry=https://registry.npmjs.org/`。
+例如 web profile：`dsh plugin --profile web add dsh-boost@^0.4.5 --registry=https://registry.npmjs.org/`。
 `dsh plugin` 把操作转发给 pnpm，所以 pnpm 必须在 PATH 上。
 
 ### 版本与 registry
 
-> **`^0.4.4` 是当前的安全钉法。** `registry.npmjs.org` 上 `latest` 是 `0.4.4`，历史版本依次是
+> **`^0.4.5` 是当前的安全钉法。** `registry.npmjs.org` 上 `latest` 是 `0.4.5`，历史版本依次是
 > `0.4.1`、`0.4.0`、`0.3.14`、`0.3.13`、`0.3.12`、`0.3.11`、`0.3.10`、`0.3.9`、`0.3.8`、`0.3.7`、`0.3.6`、`0.3.5`、`0.3.4`、`0.3.3`、`0.3.2`、`0.3.1`、`0.3.0`、`0.2.7`、`0.2.6`、`0.2.5`、`0.2.4`、`0.2.3`、`0.2.2`、`0.2.1`、`0.2.0`、
 > `0.1.4`、`0.1.3`、`0.1.2`、`0.1.1`、`0.1.0`，以及首次发布时 npm 自动创建的占位版本
 > `0.0.0-stage`——**不要安装 `0.0.0-stage`**，它不是可用构建。`0.2.0` 新增了设置页（`dsh.client`
 > 与 `./client` 出口、`/dsh-boost/api` 路由、随包发布的 `lib/client.js`）与中英双语；`0.3.0` 新增
 > 回执蒸馏（默认关闭），`0.3.2` 修了「每次蒸馏都被自己抽干」的缺陷，`0.3.4` 让产物跨会话保留并加了回本预判，`0.3.5` 修正回放次数与信号行，`0.3.6` 修掉未知墓碑冻结回执，`0.3.8` 把蒸馏的节省与被弃原文分开记账，`0.4.0` 让 `boost` 工具随作用域隐藏（作用域外每请求省 399），`0.4.1` 补上 PTC 与去重的两个分母，`0.4.2` 交付质量仪的装置——**`0.3.0`/`0.3.1` 的蒸馏从未
 > 生效过**，要用就装 `0.3.2` 及以上。`0.1.4` 及更早**没有设置页**，`^0.1.4` 也不会解析到 `0.3.x`
-> （`^` 不跨大版本），所以从 `0.1.x`/`0.2.x` 升上来要显式写 `@^0.4.4`。本仓库已把 `.npmrc` 与
+> （`^` 不跨大版本），所以从 `0.1.x`/`0.2.x` 升上来要显式写 `@^0.4.5`。本仓库已把 `.npmrc` 与
 > lockfile 钉在 npmjs，但**你机器上的全局 npm 配置**可能仍指向一个尚未同步 `0.4.4` 的镜像：那是
 > 本机配置，不是本仓库的状态。在意 registry 时显式传 `--registry=https://registry.npmjs.org/`；
-> 镜像滞后时 `@^0.4.4` 会在同步前解析失败。
+> 镜像滞后时 `@^0.4.5` 会在同步前解析失败。
 
 ### 包装形态与重启
 
@@ -563,11 +563,18 @@ horizon 重放，并计入 `projection_horizon_reestimated`；`projection_horizo
 | `ERR_HTTP_FORBIDDEN` | 路由响应体（403） | 同源栅栏拒绝：`Host` 既非 loopback 也不在 `webStartup.trustedHosts` 里，或 `sec-fetch-site: cross-site`，或 `Origin` 与 `Host` 不同 authority，或 `Origin` 解析不了 |
 | `ERR_HTTP_METHOD` | 路由响应体（405） | 对 `/state` 发了写，或对 `/scope` 发了 `GET`/`HEAD`/`POST` 以外的方法 |
 | `ERR_HTTP_BODY` | 路由响应体（400） | 写请求的体不是合法 JSON，或超过 64 KiB |
+| `ERR_HTTP_UNAUTHORIZED` | 路由响应体（401） | 宿主自己的准入检查拒绝了这次请求（`connection.admit` 返回 401），或那次检查抛错——抛错按拒绝处理。响应体只有这个码 |
 | `ERR_HTTP_NOT_FOUND` | 路由响应体（404） | 前缀匹配上了但子路径不认识：页面与服务端版本不一致 |
 | `ERR_HTTP_INTERNAL` | 路由响应体（500） | 读 `status`/`scope` 时宿主服务的 getter 抛错；四块内容一个都不返回 |
 | `ERR_HTTP_WORKSPACES_UNAVAILABLE` | 路由响应体（`workspaces.available === false`） | 没有注册表，或 `list()` 抛错：页面禁用保存并说明「读不到」，不渲染空列表 |
 | `ERR_CLIENT_NETWORK` | 页面（不经网络） | 页面读不到路由：可能没挂上 |
 | `ERR_CLIENT_SHAPE` | 页面（不经网络） | 路由返回的体本页读不懂：版本不匹配 |
+
+**两道闸，顺序不能换**：先问宿主要说法（`ctx.get('connection').admit(req)`），再走本插件
+的同源栅栏。宿主那道管的是「这个调用者被允许吗」——浏览器 cookie 或 API token；`webServer.register`
+把整条响应的生命周期交给 handler，**不会**替你跑这道检查，所以路由自己不调就是裸的。没有
+`connection` 服务的宿主（老版本、无头部署）只有本插件这道栅栏，页面照常工作；那道检查抛错按
+**拒绝**处理，不按放行。
 
 `Host` 白名单是**防 DNS rebinding** 的：攻击者控制的域名解析到本服务器时，浏览器自己的请求
 看起来就是同源，而 `Host` 是 rebinding 伪造不了的那个头。**读放行缺失 `Origin` 而写要求它**：

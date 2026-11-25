@@ -8,6 +8,24 @@ This file records user-visible changes. Format follows Keep a Changelog; version
 Design rationale lives in `docs/superpowers/specs/`; the release-acceptance procedure is in
 `docs/RELEASE.md`.
 
+## [0.4.5] - 2026-11-26
+
+设置页的数据路由补上宿主自己的准入检查。
+
+- **`webServer.register` 不跑准入。** 它把整条响应的生命周期交给 handler，所以路由不自己调
+  `connection.admit(req)` 就是裸的：能连上端口的东西都能读写 `scope.json`。此前只有本插件的
+  同源栅栏（`Host` 白名单 + 写要求 `Origin`），管得住跨站与 DNS rebinding，管不住「同机上的
+  另一个进程」。
+- 现在两道闸串联：先问宿主要说法（浏览器 cookie / API token），再走同源栅栏。宿主没有
+  `connection` 服务时不改变行为；那道检查**抛错按拒绝处理**，不按放行。
+- 新码 `ERR_HTTP_UNAUTHORIZED`（401，响应体只有这个码，不含任何状态）。`403` 仍归
+  `ERR_HTTP_FORBIDDEN`，两者分工写在 `docs/operating.md`。
+- 这个缺陷是插件市场评审指出的（PR #18619 合并时，维护者在条目里补了一句「它的 HTTP 路由没有
+  DSH 的访问检查」）。声明属实，已修。
+- 一条环境事实：本机装的 `dsh-client-connection@0.2.2-rc.5` 里 `isAuthenticated()` 被
+  `/* dsh-noauth */` 打桩成恒真，所以在这个宿主上准入只生效到栅栏那一层；换到开启鉴权的宿主，
+  它才真正拦人。
+
 ## [0.4.4] - 2026-11-24
 
 A/B 跑法（`docs/quality-runbook.md`）、它需要的最后一块机械动作，以及通读两轴对 0.4.2/0.4.3 的

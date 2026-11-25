@@ -34,6 +34,7 @@ export { HTTP_API_PREFIX } from '../shared/api-prefix.js'
 export const ERR_HTTP_METHOD = 'ERR_HTTP_METHOD'
 export const ERR_HTTP_NOT_FOUND = 'ERR_HTTP_NOT_FOUND'
 export const ERR_HTTP_FORBIDDEN = 'ERR_HTTP_FORBIDDEN'
+export const ERR_HTTP_UNAUTHORIZED = 'ERR_HTTP_UNAUTHORIZED'
 export const ERR_HTTP_WORKSPACES_UNAVAILABLE = 'ERR_HTTP_WORKSPACES_UNAVAILABLE'
 export const ERR_HTTP_INTERNAL = 'ERR_HTTP_INTERNAL'
 export const ERR_HTTP_BODY = 'ERR_HTTP_BODY'
@@ -155,6 +156,18 @@ export interface HandlerOptions {
    * empty list — every LAN-hosted request 403 for the life of the process.
    */
   trustedHosts?: () => readonly string[]
+  /**
+   * The host's own admission verdict for this request, when the deployment has
+   * one.
+   *
+   * `webServer.register` hands the handler the whole response lifecycle and
+   * applies no access check of its own, so a route that skips this is reachable
+   * by anything that can reach the port. The fence below answers "is this the
+   * same origin"; this answers "is the caller allowed at all" — a DSH peer
+   * cookie or API token on deployments that require one. Returning `undefined`
+   * means the host has no such service, and the fence is the whole check.
+   */
+  admit?: (req: HttpRequestLike) => { rejection?: number } | undefined
 }
 
 /** The largest write body accepted; a scope document is a few hundred bytes. */
@@ -207,6 +220,21 @@ export function createStateHandler(deps: StateDeps, options: HandlerOptions = {}
   const trustedHosts = (): readonly string[] => options.trustedHosts?.() ?? []
 
   return async function handle(req: HttpRequestLike, res: HttpResponseLike): Promise<void> {
+    // The host's admission first: when it says no, the request never reaches
+    // state, not even to read it.
+    let admission: { rejection?: number } | undefined
+    try {
+      admission = options.admit?.(req)
+    } catch {
+      // A check that cannot run must not read as "allowed".
+      admission = { rejection: 401 }
+    }
+    const rejection = admission?.rejection
+    if (typeof rejection === 'number') {
+      writeJson(res, rejection, { error: rejection === 403 ? ERR_HTTP_FORBIDDEN : ERR_HTTP_UNAUTHORIZED })
+      return
+    }
+
     const method = req.method ?? 'GET'
     const isWrite = method !== 'GET' && method !== 'HEAD'
     // Reads admit an absent `Origin` (a same-origin GET never carries one, and

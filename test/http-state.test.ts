@@ -60,7 +60,13 @@ interface Server {
  * case is the same helper with the service left out.
  */
 async function createServer(
-  options: { webServer?: boolean; trustedHosts?: string[]; inject?: boolean } = {},
+  options: {
+    webServer?: boolean
+    trustedHosts?: string[]
+    inject?: boolean
+    /** The host's own admission verdict; absent means the host has no such service. */
+    connection?: unknown
+  } = {},
 ): Promise<Server> {
   const dir = await mkdtemp(join(tmpdir(), 'dsh-boost-http-'))
   const root = join(dir, 'boost')
@@ -87,6 +93,7 @@ async function createServer(
       if (name === 'workspaceRegistry') return registry
       if (name === 'webServer') return options.webServer === false ? undefined : webServer
       if (name === 'webStartup') return { trustedHosts: options.trustedHosts ?? [] }
+      if (name === 'connection') return options.connection
       if (name === 'llm') return undefined
       return undefined
     },
@@ -403,4 +410,45 @@ test('写：未知写路径 → 404', async () => {
     JSON.stringify({ body: true, baseRevision: 0 }),
   )
   assert.equal(status, 404)
+})
+
+test('host admission rejection is answered before any state is read', async () => {
+  const server = await createServer({ connection: { admit: () => ({ rejection: 401 }) } })
+  const response = await server.request('GET', `${HTTP_API_PREFIX}/state`, { host: LOOPBACK })
+  assert.equal(response.status, 401)
+  assert.equal(response.body.error, 'ERR_HTTP_UNAUTHORIZED')
+  // Not even a partial projection: the body carries the code and nothing else.
+  assert.deepEqual(Object.keys(response.body), ['error'])
+})
+
+test('host admission rejection stops a write before the document moves', async () => {
+  const server = await createServer({ connection: { admit: () => ({ rejection: 401 }) } })
+  const response = await server.request(
+    'POST',
+    `${HTTP_API_PREFIX}/scope`,
+    { host: LOOPBACK, origin: `http://${LOOPBACK}`, 'content-type': 'application/json' },
+    JSON.stringify({ mode: 'global', workspaceIds: [], shadow: false, projection: 'on', baseRevision: 0 }),
+  )
+  assert.equal(response.status, 401)
+  const after = await server.readScope()
+  assert.equal(after.mode, 'selected')
+  assert.equal(after.projection, 'shadow')
+})
+
+test('an admission check that throws is a refusal, not permission', async () => {
+  const server = await createServer({
+    connection: {
+      admit: () => {
+        throw new Error('connection service is broken')
+      },
+    },
+  })
+  const response = await server.request('GET', `${HTTP_API_PREFIX}/state`, { host: LOOPBACK })
+  assert.equal(response.status, 401)
+})
+
+test('a host with no admission service still serves the page', async () => {
+  const server = await createServer({})
+  const response = await server.request('GET', `${HTTP_API_PREFIX}/state`, { host: LOOPBACK })
+  assert.equal(response.status, 200)
 })

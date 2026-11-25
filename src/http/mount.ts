@@ -29,6 +29,39 @@ export interface HttpContextLike {
   get?: (name: string) => unknown
 }
 
+/**
+ * The host's admission verdict, when this generation of the host has one.
+ *
+ * `dsh-client-connection` exposes `admit(request)` (and `requestRejection`,
+ * which is the same call reduced to the rejection): it applies the host's own
+ * Host/Origin fence and then requires an authenticated peer — a browser cookie
+ * or an API token. `webServer.register` does not run it for us, so a route that
+ * omits this is reachable by anything that can reach the port.
+ *
+ * Absent, or throwing, stays conservative: no service means the plugin's own
+ * fence is the whole check (older hosts, headless deployments), and a service
+ * that throws is treated as a refusal rather than as permission.
+ */
+function resolveAdmission(ctx: HttpContextLike): ((req: never) => { rejection?: number } | undefined) | undefined {
+  let connection: { admit?: (req: unknown) => unknown } | undefined
+  try {
+    connection = ctx.get?.('connection') as typeof connection
+  } catch {
+    return undefined
+  }
+  const admit = connection?.admit
+  if (typeof admit !== 'function') return undefined
+  return (req) => {
+    try {
+      const admission = admit.call(connection, req) as { rejection?: unknown } | undefined
+      const rejection = admission?.rejection
+      return typeof rejection === 'number' ? { rejection } : undefined
+    } catch {
+      return { rejection: 401 }
+    }
+  }
+}
+
 /** Where the deployment declared its trusted hosts, across host generations. */
 function resolveTrustedHosts(ctx: HttpContextLike): readonly string[] {
   for (const service of ['webStartup', 'webRuntime']) {
@@ -70,7 +103,13 @@ export function registerHttpApi(
         warn(`${ERR_BOOST_HTTP_MOUNT_FAILED}: webServer resolved to undefined; settings page has no data route`)
         return
       }
-      const handler = createStateHandler(deps, { trustedHosts: () => resolveTrustedHosts(ctx) })
+      const handler = createStateHandler(deps, {
+        trustedHosts: () => resolveTrustedHosts(ctx),
+        ...(() => {
+          const admit = resolveAdmission(ctx)
+          return admit === undefined ? {} : { admit: admit as never }
+        })(),
+      })
       dispose = webServer.register({ kind: 'prefix', path: HTTP_API_PREFIX, handler })
     })
   } catch (error) {
