@@ -178,7 +178,7 @@ mkdir -p "$DSH_HOME"
 # 在仓库根目录求版本，tarball 文件名随之变化；手工下载的包直接写绝对路径
 TARBALL="/path/to/dsh-boost-$(node -p "require('./package.json').version").tgz"
 dsh plugin --profile accept add "$TARBALL"
-# 或本地 checkout 目录；从 registry 安装时写 dsh-boost@^0.4.7 --registry=https://registry.npmjs.org/
+# 或本地 checkout 目录；从 registry 安装时写 dsh-boost@^0.4.8 --registry=https://registry.npmjs.org/
 # 确认宿主确实把这一行并入了装配计划：
 dsh --profile accept --dump-config | grep -A2 'id: dsh-boost'
 ```
@@ -364,10 +364,10 @@ tarball 会拉进 `dsh-spill-policy@rc.5` 并 `ERESOLVE`（当时实测 exit 1�
   **`0.2.3-rc.4` / `0.2.3-rc.5` / `0.2.3` 都在区间外**：它们会告警一次，但仍照常加载——`0.2.3-rc.5`
   与本插件触及的九个包逐字节相同（见 §2.4.1），所以那条告警说的是「没验证过」，不是「会坏」。
 
-安装规格：**`dsh-boost@^0.4.7`**。版本清单以 `npm view dsh-boost versions --registry=https://registry.npmjs.org/` 为准——这里不记条数，因为每发一版它就会过期一次；其中 `0.0.0-stage` 是 npm 自动创建的占位版本，不要把它当成
+安装规格：**`dsh-boost@^0.4.8`**。版本清单以 `npm view dsh-boost versions --registry=https://registry.npmjs.org/` 为准——这里不记条数，因为每发一版它就会过期一次；其中 `0.0.0-stage` 是 npm 自动创建的占位版本，不要把它当成
 “更早的 API”：
 
-- `0.4.7` — 当前 `latest`；发版改为 tag 驱动的 workflow（npm + GitHub Release）
+- `0.4.8` — 当前 `latest`；发版改为 tag 驱动的 workflow（npm + GitHub Release）
 - `0.4.6` — 准入改为每请求解析，边角 fail-closed 收紧
 - `0.4.5` — 设置页路由补上宿主的准入检查（`ERR_HTTP_UNAUTHORIZED`）
 - `0.4.4` — A/B 跑法（`docs/quality-runbook.md`）与 `task` 字段
@@ -415,12 +415,12 @@ tarball 会拉进 `dsh-spill-policy@rc.5` 并 `ERESOLVE`（当时实测 exit 1�
   它低于 `0.1.0`，所以 `^0.1.0` **不会**选中它，`latest` 也不是它。
 
 **写成 `^0.2.0` 而不是 `^0.1.4`**：`^` 不跨大版本，`^0.1.4` 永远解析不到 `0.2.0`，所以从 `0.1.x`
-升上来必须显式写 `@^0.4.7`；`^0.2.0` 表达的是“至少含 0.2.0 的修复”，镜像在发布后短暂滞后时它会
+升上来必须显式写 `@^0.4.8`；`^0.2.0` 表达的是“至少含 0.2.0 的修复”，镜像在发布后短暂滞后时它会
 解析失败，而不是悄悄装回没有设置页的旧构建。在意 registry 时显式传
 `--registry=https://registry.npmjs.org/`。
 
 本仓库的 `.npmrc` 与 `package-lock.json` 已钉在 `registry.npmjs.org`（与 `publishConfig` 同一个
-源），CI 断言 lockfile 里不残留 `registry.npmmirror.com`。发布者执行 `npm publish` 即可
+源），CI 断言 lockfile 里每一条 `resolved` 都是 `https://registry.npmjs.org/`（且集合非空）。发布者执行 `npm publish` 即可
 （`prepublishOnly` 跑 `ci` + `verify:package -- --prebuilt`）。
 
 建议（可选，不属于发布门）：给占位版本加一条弃用说明，让误装的人看到原因——
@@ -722,32 +722,44 @@ tool share 变动约 ±1.3pp。这是选择边界差，不是公式差；设计�
 
 ### 6.0 发版是打 tag，不是手跑命令
 
-`.github/workflows/release.yml` 在 `push` 一个 `v*` tag 时跑完整条发布链：
+**步骤以 `.github/workflows/release.yml` 为准，本节是导读。** 那条链在 `push` 一个 `v*` tag 时跑：
 
 1. tag 必须等于 `package.json` 的版本（否则 `npm publish` 会发出另一个版本，而 tag 与 release 说的是这个）；
-2. `docs/releases/v<版本>.md` 必须存在——**它就是 release body**，先中后英，所以发版说明在仓库里可评审，而不是事后在网页上敲；
-3. 两份 README 与 `docs/RELEASE.md`/`docs/operating.md` 的安装钉法必须写这个版本（npm 服务的是 tarball 里那份 README，发完再改就永久过期）；
-4. `npm run ci` + `verify:package -- --prebuilt` + `verify:negatives`；
-5. `npm publish`（版本已在 registry 上则跳过，重跑安全）；
-6. 用 `npm pack` 取**已发布的**字节，与 registry 的 `dist.shasum` 比对，再 `gh release create` 并把 tarball 以两个名字挂上去：`dsh-boost-<版本>.tgz`（存档）与 `dsh-boost.tgz`（`releases/latest/download/dsh-boost.tgz` 解析到的那个）；
-7. 断言 `https://github.com/<repo>/releases/latest/download/dsh-boost.tgz` 返回 200（新挂的 asset 有几分钟不可下载，所以重试）。
-
-`--latest` 是显式传的，不交给 gh 的「按日期与版本自动挑」：那个 URL 解析到**被标记为 latest 的
-那个 release**，所以乱序创建的 release（补历史、给旧 tag 重跑）会把它悄悄移到没有 asset 的
-release 上。补历史时必须收尾 `gh release edit v<最新> --latest`，并复查那条 URL 仍是 200——
-本仓库补 `v0.4.0`–`v0.4.6` 时就是这样把 latest 从 0.4.7 挪到了 0.4.6（后者没有 asset，URL 立刻 404），
-一条 `gh release edit` 改回来。
+2. tag 指向的 commit 必须**在 `main` 上**——分支保护已经让 `main` 的每一次合并都过 `release-gate`，所以「这棵树是绿的」就等价于「这个 commit 在 main 上」；
+3. `docs/releases/v<版本>.md` 必须存在——**它就是 release body**，先中后英，所以发版说明在仓库里可评审，而不是事后在网页上敲；
+4. 两份 README 与 `docs/RELEASE.md`/`docs/operating.md` 的安装钉法必须写这个版本（npm 服务的是 tarball 里那份 README，发完再改就永久过期）；
+5. `npm ci`，然后 `npm run ci`（早失败，且 step 名说的是门不是 publish），再 `verify:negatives`（十二个改坏的 tarball）；
+6. `npm publish`——它自己会再跑一遍 `prepublishOnly`（`ci` + `verify:package --prebuilt`），那一遍才是**验证要发布的字节**的那遍：`ci` 开头会删 `dist/` 重建，所以第 5 步验过的树并不是发出去的树。所以一个 tag 上完整门跑两次，第 5 步买的是「失败时 step 名准确」与 `dist/`；
+7. 用 `npm pack` 取**已发布的**字节，与 registry 的 `dist.shasum` 比对，再建 release 并把 tarball 以两个名字挂上去：`dsh-boost-<版本>.tgz`（存档）与 `dsh-boost.tgz`（`releases/latest/download/dsh-boost.tgz` 解析到的那个）；
+8. 断言 latest 就是这一版（`gh release view --json tagName`），且那条 URL 下载回来的字节与第 7 步的 sha1 相同——只断言 200 不够：另一个 release 的 asset 也会 200。
 
 顺序不能倒：GitHub Release 是在宣布一个可安装的版本，先建 release 再发布，等于让发布页指向一个 npm 还没接受（或已拒绝）的 tarball。
 
+**重试预算按实测定，不按感觉定。** registry 的元数据与 tarball 之间有滞后：0.4.7 那次 `npm pack` 失败十次、第十一次才成功，总耗时 5 分 03 秒，而当时的预算是 5 分 30 秒。现在两条循环各留 20 分钟，且最后一次失败后不再 `sleep`。
+
+**`--latest` 是显式传的。** 它买到的是「正向发布必定是 latest」，**不是**「补历史安全」：`gh release create` 无条件把新 release 标为 latest，补建旧版本的页面照样会把 latest 挪过去。补历史必须收尾 `gh release edit v<最新> --latest`，并复查那条 URL 仍是 200：补建的旧版本页面往往没有 asset，latest 一旦落到它上面，那条 URL 立刻 404。
+
+**重跑**：先 `gh run rerun <run-id>`。它复用的是**那个 run 记下的 workflow 定义**，所以改了 yml 再 rerun 不生效；要让新 yml 生效只能重推 tag，而重推 tag 只在版本**尚未发布**时才安全（见下）。`workflow_dispatch` 提供一个 `dry_run`（默认开），跑完整条门然后在 publish 前停下——workflow 只监听 tag 的话，它直到出事那天才第一次被执行。
+
+**三种状态被区分对待**，因为只有前两种值得重跑：
+
+| registry | GitHub Release | 动作 |
+|---|---|---|
+| 未发布 | 无 | 发布，再建 release |
+| 已发布 | 无 | 跳过发布，建 release（这是真正的恢复路径） |
+| 已发布 | 有 | **拒绝**。重跑到这一步只可能意味着 tag 被移动过——那会让 tag 指向的树与已发布的字节不一致，而 release 页看起来完全正常。要修就发新版本，不要重指旧 tag |
+
+**已发布的 tag 不可移动。** npm 的版本不可覆盖，所以移动 tag 不会改变任何人装到的东西，只会让仓库与 registry 说法不同。同理，registry 的元数据可见比 tarball 可下载早几分钟：这段时间里 `npm view` 会 404，而 `npm publish` 会先跑完整套门再撞 409——重跑前先确认版本真的还没发布。
+
 需要的 secret 只有 `NPM_TOKEN`（granular token，`dsh-boost` 这个包的 read+write，且允许 bypass 2FA）。
-`GITHUB_TOKEN` 由 Actions 注入，`permissions: contents: write` 只给它上传 asset 的权限。
+`GITHUB_TOKEN` 由 Actions 注入。`permissions: contents: write` 是建 release 与上传 asset 要求的最小权限里最宽的一档——它同时允许 push 内容、删 release，而同一个 job 里还跑着 `npm ci` 与包内 lifecycle 脚本。因此 checkout 不持久化凭据（`persist-credentials: false`），token 只出现在显式声明了它的两步里。
 
 ### 6.1 workflow 做什么、不做什么
 
 `.github/workflows/ci.yml` 在 `push` 到 `main` 与 `pull_request` 时跑一个 job：
 
-- 断言 `package-lock.json` 里没有 `registry.npmmirror.com`（§6.2），然后 `npm ci --registry=https://registry.npmjs.org/`；
+- 断言 `package-lock.json` 里**每一条** `resolved` 都恰好是 `https://registry.npmjs.org/` 开头（其它 host、
+  `http://`、以及**空集**都算失败），然后 `npm ci --registry=https://registry.npmjs.org/`；
 - 跑 `npm run ci`（typecheck + `npm test` + `test:regression` + clean build），再跑
   `npm run verify:package -- --prebuilt`——这正是 `prepublishOnly` 的两条命令，按同一顺序显式执行，
   所以 §1 的整道门在 CI 里跑；最后跑 `npm run verify:negatives`，把打包好的 tarball 逐一改坏，
@@ -756,8 +768,9 @@ release 上。补历史时必须收尾 `gh release edit v<最新> --latest`，�
 - 权限只有 `contents: read`，没有 registry token，也**没有**任何 `npm publish` 调用（连
   `--dry-run` 都没有）：npm 要先跑完 `prepublishOnly` 才检查 registry，`--dry-run` 只会让每次
   push 在几分钟绿灯后以 `You cannot publish over the previously published versions: <当前版本>` 变红；
-- **`v*` tag 不归它管**（§6.0）。tag 走 `release.yml`，那条链自己跑同一道门；两个 workflow 都监听
-  tag 会让一次发版跑两遍套件。
+- **`v*` tag 不归它管**（§6.0）。tag 走 `release.yml`，那条链自己跑同一道门（它内部本来就跑两遍：
+  显式一遍、`prepublishOnly` 一遍）。再让 `ci.yml` 也监听 tag 只会多出**第三**遍，而那一遍不发布、
+  不权威，唯一作用是让一次发版红在两条流水线上。
 
 注意：§1 的次安装会执行包内 lifecycle 脚本；`pull_request` 上也会执行。runner 是临时的、
 没有 registry token，但这仍是在跑不可信代码——不要给这个 job 加 secrets 或写权限。
@@ -776,7 +789,8 @@ mirror 准备的；内部 GitLab remote 不执行它们（见 yml 文件头）�
 `.npmrc` 与 `package-lock.json` 都钉在 `registry.npmjs.org`——与 `publishConfig.registry` 同一个
 源。旧版这里写的是「lockfile 钉 npmmirror、runner 上 sed 重写」，代价是**发布校验查的是镜像**：
 镜像的 `latest` 滞后，于是 `npm view` 看到 0.1.0、而 npmjs 上已经是 0.1.1，一次失败的发布可以
-看起来是成功的。现在没有重写步骤，CI 改为**断言**：lockfile 里出现 `registry.npmmirror.com` 即
+看起来是成功的。现在没有重写步骤，CI 改为**断言**：lockfile 里出现任何非 `https://registry.npmjs.org/`
+的 `resolved` 即
 失败。代价一句话：CI 依赖公网 npmjs，npmjs 不可达时直接红、没有镜像兜底。
 
 ### 6.3 包内无法修复的旁路
@@ -800,15 +814,16 @@ mirror 准备的；内部 GitLab remote 不执行它们（见 yml 文件头）�
 - [ ] 在**要打 tag 的那个 commit** 上 `npm run verify:package` exit 0（§1）：exact allowlist（无多余/缺失条目，含 `dsh.bundle.patch` 指向的文件）、`dist/index.js` guard、所有 `exports`/`main`/`types` 与 `dsh.bundle.patch` 目标存在、主安装 `--ignore-scripts` 与次安装（生命周期脚本启用）都成功、两次安装的 import/require/locale 探针通过（en 与 zh）、tiny TS consumer 的 `tsc --noEmit` 通过（缺/错 `.d.ts` 会红）
 - [ ] 该 commit 的 `git status --short` 为空；`verify:package` 只证明工作树或给定 tarball，不证明 commit 状态
 - [ ] `prepublishOnly`（`npm run ci && npm run verify:package -- --prebuilt`）在发布前整体跑过一遍；明确知道 `npm publish --ignore-scripts` 和 `npm publish <tgz>` 会绕过它（§6.3）
-- [ ] CI 在同一个 commit 上绿；明确知道它跑 `ci` + `verify:package` + `verify:negatives`、不跑 `npm publish`，`v*` tag 不会上传（§6.1）
-- [ ] `dsh plugin --profile <name> add dsh-boost@^0.4.7 --registry=https://registry.npmjs.org/`（或本地路径/tarball）成功，`--dump-config` 里有 `id: dsh-boost` 行
+- [ ] CI 在同一个 commit 上绿；明确知道 `ci.yml` 跑 `ci` + `verify:package` + `verify:negatives`、**不**发布，`v*` tag 由 `release.yml` 发布并建 GitHub Release（§6.1）
+- [ ] tag push 后盯 `release.yml` 那个 run 跑到最后一步的字节断言通过，而不是看到 `npm publish` 成功就离开
+- [ ] `dsh plugin --profile <name> add dsh-boost@^0.4.8 --registry=https://registry.npmjs.org/`（或本地路径/tarball）成功，`--dump-config` 里有 `id: dsh-boost` 行
 - [ ] 测试工作区已写入 `scope.workspaceIds`，`shadow: true`、`projection: 'on'` 经 `boost status` 确认
 - [ ] no-tokenmeter 门按 §2.1 承担：单元测试注入 `hasTokenMeter: false` 锁定预期（替换拒绝、投影可用、账目 `unknown`、`ERR_HOST_NO_TOKENMETER`）；活宿主复核仅在确要部署缺该服务的宿主时做，先验健康态，再把 `shadow` 设为 `false` 验拒绝收据（影子模式下只有 `status.degraded` 可观察，不能算过门）
 - [ ] no-spill 门按 §2.2 完整跑过：移除的是 spill **后端**（`dsh-spill-local`），观察到超限回执不投影、`projection-skipped:no-spill`、`ERR_HOST_NO_SPILL`；只移除 `dsh-spill-policy`（宿主的 token 预算保留策略插件，从宿主树解析）的话得到的是 `projection-skipped:no-footer` 与 `ERR_HOST_NO_SPILL_NOTICE`
 - [ ] 两条降级路径都保留 status/收据证据；验收中出现的每个稳定码都按 §2.5 的矩阵处置并留证（含 `ERR_HOST_NO_SPILL_NOTICE` / `ERR_HOST_VERSION_MISMATCH` / `ERR_BOOST_SECTION_REGISTER_FAILED`，以及已有的 `ERR_RECEIPTS_UNREADABLE` / `ERR_RECEIPTS_TRUNCATED` / `ERR_HOST_COMPLETE_SECTION` / `ERR_SCOPE_ABORTED` / `ERR_HOST_SPILL_FAILING` / `ERR_BOOST_PARTIAL_MOUNT`）；同时确认 `status.data.receipts_stopped` 为 `false`（为 `true` 表示收据已连续写失败 3 次、替换被整体拒绝）
 - [ ] 第一次开启替换的真实回合检查 `content[].thinking` 400（不是影子周）；若有，替换在该路由关闭
 - [ ] `npm run --silent stats` 在干净 clone 上可复算 §5.2 的聚合（口径对应设计稿 §2.1）
-- [ ] 发布侧：`npm publish` 走 `publishConfig.registry`（registry.npmjs.org、public）；用 `npm view dsh-boost dist-tags --registry=https://registry.npmjs.org/` 确认 `latest` 是 `package.json` 里的版本（registry 上另有 npm 自动创建的 `0.0.0-stage` 占位版本，见 §2.4）；**必须带 `--registry`**，否则读到的是镜像的旧 `latest`；安装规格是 `dsh-boost@^0.4.7`
+- [ ] 发布侧：`npm publish` 走 `publishConfig.registry`（registry.npmjs.org、public）；用 `npm view dsh-boost dist-tags --registry=https://registry.npmjs.org/` 确认 `latest` 是 `package.json` 里的版本（registry 上另有 npm 自动创建的 `0.0.0-stage` 占位版本，见 §2.4）；**必须带 `--registry`**，否则读到的是镜像的旧 `latest`；安装规格是 `dsh-boost@^0.4.8`
 
 **未交付、因此不在上表可勾选范围：§3 的 20 条真实任务语料。**
 `test/regression/` 提供的是 runner 与**合成**任务集（`tasks.jsonl`，6 条），不是 20 条真实回放

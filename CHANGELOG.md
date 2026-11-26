@@ -8,6 +8,22 @@ This file records user-visible changes. Format follows Keep a Changelog; version
 Design rationale lives in `docs/superpowers/specs/`; the release-acceptance procedure is in
 `docs/RELEASE.md`.
 
+## [0.4.8] - 2026-11-26
+
+发版链在 0.4.7 第一次真跑后暴露的问题。全是发布路径本身，不涉及运行时行为。
+
+- 一个 tag 上的完整门从三遍降到两遍（显式一遍 + `prepublishOnly` 一遍），并写清两遍各买到什么。
+- registry 传播窗口：`npm view` 与 `npm pack` 读同一份滞后元数据，「已发布则跳过」在发布后几分钟内为假；
+  状态判定改为重试询问，预算从 5m30s（实测需求 5m03s）提到 20 分钟。
+- 重跑分三态，第三种（已发布且有 release）**拒绝**——那只可能是 tag 被移动过。
+- 新增 `workflow_dispatch`（`dry_run` 默认开）与「tag 的 commit 必须在 `main` 上」前置检查。
+- latest 断言改为比字节（`tagName` + 下载 sha1），只查 200 会把别的 release 的 asset 当成功。
+- release 已存在时刷新 body；补 `concurrency`、`persist-credentials: false`、钉法改锚定正则。
+- `test/release-workflow.test.ts` 改为解析 YAML 并按 id/name 定位 step（子串搜索曾被 `run` 里的注释误导）。
+- 删掉最弱的一份安装钉法检查；`scripts/README.md` 从钉法清单移出（它一个钉法都没有，空集通过）。
+- 更正 `docs/releases/v0.4.2.md` 的归属错误（`task` 字段是 0.4.4 才加的），GitHub 上那条已发布的 body 同步更正。
+- 两处 banner 示例里的裸版本号改成 `<version>`。
+
 ## [0.4.7] - 2026-11-26
 
 发版从「手工跑命令」变成「打 tag」。
@@ -23,7 +39,7 @@ Design rationale lives in `docs/superpowers/specs/`; the release-acceptance proc
 - 补齐 `v0.4.0`–`v0.4.6` 七个 GitHub Release，说明取自 CHANGELOG 并按中英双语写进
   `docs/releases/`；更早的版本只有 tag（`0.1.x`–`0.3.x` 不补）。
 - 新增 `test/release-workflow.test.ts`：trigger、门的内容、本版本有双语说明三条不变式；并把
-  「四份文档都写当前版本」从发布门提前到 `npm test`。
+  「四份文档都写当前版本」在 `npm test` 里也钉了一遍（发布门里那条仍在，它在 `npm ci` 之前，五秒内失败）。
 - 第一次打 tag 就抓到了这条链的第一类静默失效：`package.json` 还是 0.4.6 而 tag 是 `v0.4.7`，
   workflow 在第一步就红，没有发出任何东西。
 
