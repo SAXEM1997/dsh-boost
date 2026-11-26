@@ -732,6 +732,12 @@ tool share 变动约 ±1.3pp。这是选择边界差，不是公式差；设计�
 6. 用 `npm pack` 取**已发布的**字节，与 registry 的 `dist.shasum` 比对，再 `gh release create` 并把 tarball 以两个名字挂上去：`dsh-boost-<版本>.tgz`（存档）与 `dsh-boost.tgz`（`releases/latest/download/dsh-boost.tgz` 解析到的那个）；
 7. 断言 `https://github.com/<repo>/releases/latest/download/dsh-boost.tgz` 返回 200（新挂的 asset 有几分钟不可下载，所以重试）。
 
+`--latest` 是显式传的，不交给 gh 的「按日期与版本自动挑」：那个 URL 解析到**被标记为 latest 的
+那个 release**，所以乱序创建的 release（补历史、给旧 tag 重跑）会把它悄悄移到没有 asset 的
+release 上。补历史时必须收尾 `gh release edit v<最新> --latest`，并复查那条 URL 仍是 200——
+本仓库补 `v0.4.0`–`v0.4.6` 时就是这样把 latest 从 0.4.7 挪到了 0.4.6（后者没有 asset，URL 立刻 404），
+一条 `gh release edit` 改回来。
+
 顺序不能倒：GitHub Release 是在宣布一个可安装的版本，先建 release 再发布，等于让发布页指向一个 npm 还没接受（或已拒绝）的 tarball。
 
 需要的 secret 只有 `NPM_TOKEN`（granular token，`dsh-boost` 这个包的 read+write，且允许 bypass 2FA）。

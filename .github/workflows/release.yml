@@ -22,6 +22,11 @@
 #      version-specific name. `releases/latest/download/dsh-boost.tgz` is what a
 #      version-independent install URL resolves to; a versioned name 404s there.
 #
+# `--latest` is explicit rather than left to gh's date-and-version heuristic:
+# `releases/latest/download/dsh-boost.tgz` resolves against whichever release is
+# marked latest, so a release created out of order (a backfill, a re-run for an
+# older tag) would silently move that URL onto a release with no asset on it.
+#
 # Re-running is safe. npm rejects a republished version with a 409, so the
 # publish step first asks the registry whether the version is already there and
 # skips if it is; the release steps are idempotent (`view || create`, `upload
@@ -148,7 +153,7 @@ jobs:
             || gh release create "v$VERSION" \
                  --title "v$VERSION" \
                  --notes-file "docs/releases/v$VERSION.md" \
-                 --verify-tag
+                 --verify-tag --latest
 
       - name: attach both tarball names
         env:
