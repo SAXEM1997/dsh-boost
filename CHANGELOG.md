@@ -8,6 +8,15 @@ This file records user-visible changes. Format follows Keep a Changelog; version
 Design rationale lives in `docs/superpowers/specs/`; the release-acceptance procedure is in
 `docs/RELEASE.md`.
 
+## [0.4.9] - 2026-11-26
+
+0.4.8 的发布链跑到最后一步才红：publish、release、两个 asset 都成功，最后那条字节断言缺 `GH_TOKEN`。
+
+- 最后一条字节断言补 `GH_TOKEN`（它是唯一调用 `gh` 却没声明 token 的 step）。
+- 「已发布且有 release 就拒绝」换成按 `gitHead` 判定：原规则判断对、处置错——它把「发布成功、后面某步失败」
+  这种最该重跑的情形也挡了。npm 记 `gitHead`，所以 tag 是否被移动可验证而非假设。
+- 两条回归测试：调用 `gh` 的 step 必须带 token；状态步必须比 `gitHead`。
+
 ## [0.4.8] - 2026-11-26
 
 发版链在 0.4.7 第一次真跑后暴露的问题。全是发布路径本身，不涉及运行时行为。
