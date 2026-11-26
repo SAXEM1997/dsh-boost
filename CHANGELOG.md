@@ -8,6 +8,13 @@ This file records user-visible changes. Format follows Keep a Changelog; version
 Design rationale lives in `docs/superpowers/specs/`; the release-acceptance procedure is in
 `docs/RELEASE.md`.
 
+## [0.4.10] - 2026-11-27
+
+发版说明的格式固定为变更清单。插件本身没有改动。
+
+- 发版说明改为「一个 PR 一行」的变更清单格式：开头一段总结，随后每个 PR 一行，机制与实测数据归 PR 与 issue；
+  规则写入 `AGENTS.md` 与 `docs/RELEASE.md` §6.0，机械可查的部分由 `test/release-workflow.test.ts` 钉住（#24）。
+
 ## [0.4.9] - 2026-11-26
 
 0.4.8 的发布链跑到最后一步才红：publish、release、两个 asset 都成功，最后那条字节断言缺 `GH_TOKEN`。

@@ -21,6 +21,7 @@ single-context：根 `GLOSSARY.md` + `docs/adr/`。见 `docs/agents/domain.md`�
 - **改动一律走 PR**：`main` 受保护、禁止直接 push。每项改动开一个分支 + PR，squash merge。
 - **一个 PR 一件事**：PR 标题就是发版说明里的那一行。一个 PR 里塞进两件互不相关的事，发版时只能写成两行里选一行，或者写成一行半。
 - **例外只有两类**：发布流水线自身的修复（`.github/workflows/`、`docs/releases/`、`docs/RELEASE.md` §6）、以及必须立刻上的热修。两者都要事后补一条 issue 记账，说明为什么绕过了 PR。
+- **发版说明是一份变更清单，不是诊断报告**：`docs/releases/v<版本>.md` 开头一段总结（陈述事实与范围，不用感叹号、营销词、未验证承诺），随后变更项**每个 PR 一行**——一个 PR 里改了十处也只占一行。机制、根因、实测数据归 PR 与 issue，正文不放。中英双语，先中后英。
 - **打 tag 前 `main` 的 CI 必须是绿的**：`release.yml` 自己会再跑一遍门，但那条门是「打出去的字节对不对」，不是「这次合并能不能进」。红着的 `main` 上打 tag，等于把红灯记到发布账上。
 
 ## 工程约定
