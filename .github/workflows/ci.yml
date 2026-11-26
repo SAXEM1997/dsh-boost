@@ -24,8 +24,10 @@
 # after several minutes of green work. The two commands below are exactly what
 # prepublishOnly runs; no --force, and nothing is uploaded.
 #
-# It never publishes: there is no npm publish invocation, no registry token,
-# and a `v*` tag does not upload anything. See docs/RELEASE.md §6.
+# It never publishes: there is no npm publish invocation and no registry token.
+# Tags are owned by release.yml, which runs this same gate and then publishes —
+# gating a tag here as well would run the suite twice for one release. See
+# docs/RELEASE.md §6.
 #
 # `.npmrc` and the committed lockfile resolve every tarball to
 # registry.npmjs.org — the same registry `publishConfig` publishes to. The gate
@@ -38,7 +40,6 @@ name: ci
 on:
   push:
     branches: [main]
-    tags: ['v*']
   pull_request:
 
 permissions:

@@ -1,0 +1,180 @@
+# Tag-driven release: gate → npm publish → GitHub Release.
+#
+# Pushing `vX.Y.Z` is the whole trigger. The tag must name the version in
+# `package.json`, and `docs/releases/vX.Y.Z.md` must exist — that file IS the
+# release body, so the notes are reviewable in the repository instead of being
+# typed into a web form after the fact.
+#
+# WHY THE ORDER IS gate → publish → release, and not the reverse: a GitHub
+# Release announces an installable version. Creating it first means the release
+# page can point at a tarball npm has not accepted yet (or rejected outright),
+# which is the one failure a reader cannot see.
+#
+# THREE STEPS FAIL SILENTLY WHEN SKIPPED (same list cherry-bridge keeps, and
+# the reason each check below exists):
+#
+#   1. The tag and `package.json` disagree. `npm publish` then publishes the
+#      version in `package.json` while the tag and the release announce another.
+#   2. The README install pins are not bumped before publishing. npm serves the
+#      README captured in the tarball, so a pin bumped afterwards is stale on
+#      the npm page for that version, permanently.
+#   3. The GitHub Release is missing, or the tarball is attached only under a
+#      version-specific name. `releases/latest/download/dsh-boost.tgz` is what a
+#      version-independent install URL resolves to; a versioned name 404s there.
+#
+# Re-running is safe. npm rejects a republished version with a 409, so the
+# publish step first asks the registry whether the version is already there and
+# skips if it is; the release steps are idempotent (`view || create`, `upload
+# --clobber`). That matters because the failure most likely to need a retry —
+# registry propagation — happens *after* the irreversible step.
+#
+# The gate runs twice on purpose: once explicitly, and once inside `npm publish`
+# through `prepublishOnly`. The explicit run is what makes `verify:negatives`
+# (the twelve corrupted-tarball cases) part of the release; the implicit run is
+# npm's own and is deliberately NOT bypassed with `--ignore-scripts`.
+name: release
+
+on:
+  push:
+    tags: ['v*']
+
+# `contents: write` uploads the release asset. Everything else is read-only.
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24.9.0
+          registry-url: 'https://registry.npmjs.org'
+          cache: npm
+
+      - name: the tag names the version in package.json
+        run: |
+          set -euo pipefail
+          VERSION=$(node -p "require('./package.json').version")
+          TAG="${GITHUB_REF_NAME}"
+          [ "v$VERSION" = "$TAG" ] || {
+            echo "::error::tag $TAG does not match package.json version $VERSION"
+            exit 1
+          }
+          echo "releasing $VERSION"
+
+      - name: the release notes for this version exist
+        run: |
+          set -euo pipefail
+          VERSION=$(node -p "require('./package.json').version")
+          NOTES="docs/releases/v$VERSION.md"
+          [ -s "$NOTES" ] || {
+            echo "::error file=$NOTES::missing — the release body is this file, in Chinese then English"
+            exit 1
+          }
+          echo "$NOTES: $(wc -l < "$NOTES") lines"
+
+      - name: the README install pins name the version being published
+        run: |
+          set -euo pipefail
+          VERSION=$(node -p "require('./package.json').version")
+          for f in README.md README.en.md docs/RELEASE.md docs/operating.md; do
+            grep -q "dsh-boost@\^$VERSION" "$f" \
+              || { echo "::error file=$f::missing the @^$VERSION install pin"; exit 1; }
+          done
+
+      - run: npm ci --registry=https://registry.npmjs.org/
+
+      # The same two commands `prepublishOnly` runs, so a failure here names the
+      # gate rather than surfacing as a publish error. `--prebuilt` is
+      # load-bearing: it makes the pack step describe the tree this build
+      # produced instead of rebuilding it, so a ghost or missing dist entry is
+      # reported rather than repaired.
+      - run: npm run ci && npm run verify:package -- --prebuilt
+
+      # The gate must be able to fail: twelve corrupted tarballs, each asserting
+      # its own check's failure text.
+      - run: npm run verify:negatives
+
+      - name: publish, unless this version is already on the registry
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          set -euo pipefail
+          VERSION=$(node -p "require('./package.json').version")
+          if npm view "dsh-boost@$VERSION" version >/dev/null 2>&1; then
+            echo "dsh-boost@$VERSION is already published; skipping (re-run path)"
+          else
+            npm publish
+          fi
+
+      # Registry metadata can be visible minutes before the tarball is
+      # downloadable, so `npm pack` is retried rather than trusted once. Taking
+      # the PUBLISHED bytes and comparing the registry's own shasum is what
+      # makes the asset provably the artefact users install — a rebuild would
+      # only be a hope that the tarball is reproducible.
+      - name: take the published tarball, byte for byte
+        run: |
+          set -euo pipefail
+          VERSION=$(node -p "require('./package.json').version")
+          for attempt in $(seq 1 12); do
+            if npm pack "dsh-boost@$VERSION" >/dev/null 2>&1; then
+              EXPECTED=$(npm view "dsh-boost@$VERSION" dist.shasum)
+              ACTUAL=$(sha1sum "dsh-boost-$VERSION.tgz" | cut -d' ' -f1)
+              if [ "$ACTUAL" = "$EXPECTED" ]; then
+                echo "sha1 $ACTUAL matches the registry"
+                cp "dsh-boost-$VERSION.tgz" dsh-boost.tgz
+                exit 0
+              fi
+              echo "::error::sha1 $ACTUAL != registry $EXPECTED"
+              exit 1
+            fi
+            echo "attempt $attempt: tarball not downloadable yet"
+            sleep 30
+          done
+          echo "::error::dsh-boost@$VERSION never became downloadable"
+          exit 1
+
+      - name: create the GitHub Release (idempotent)
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          VERSION=$(node -p "require('./package.json').version")
+          gh release view "v$VERSION" >/dev/null 2>&1 \
+            || gh release create "v$VERSION" \
+                 --title "v$VERSION" \
+                 --notes-file "docs/releases/v$VERSION.md" \
+                 --verify-tag
+
+      - name: attach both tarball names
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          VERSION=$(node -p "require('./package.json').version")
+          # The versioned name is the archive; the bare name is what
+          # releases/latest/download/dsh-boost.tgz resolves to.
+          gh release upload "v$VERSION" "dsh-boost-$VERSION.tgz" dsh-boost.tgz --clobber
+
+      # A freshly uploaded asset is not instantly downloadable (observed
+      # 504s for minutes on other repos), so this is retried — a single curl
+      # turns a propagation delay into a red run for a complete release.
+      - name: the version-independent asset answers 200
+        run: |
+          set -euo pipefail
+          URL="https://github.com/${GITHUB_REPOSITORY}/releases/latest/download/dsh-boost.tgz"
+          for attempt in $(seq 1 6); do
+            CODE=$(curl -sL -o /dev/null -w '%{http_code}' "$URL" || echo 000)
+            if [ "$CODE" = "200" ]; then
+              echo "$URL → 200 (attempt $attempt)"
+              exit 0
+            fi
+            echo "attempt $attempt → $CODE"
+            sleep 20
+          done
+          echo "::error::$URL never answered 200"
+          exit 1

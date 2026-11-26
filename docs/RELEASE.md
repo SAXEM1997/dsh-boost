@@ -719,9 +719,26 @@ tool share 变动约 ±1.3pp。这是选择边界差，不是公式差；设计�
 
 ## 6. CI 与发布旁路
 
+### 6.0 发版是打 tag，不是手跑命令
+
+`.github/workflows/release.yml` 在 `push` 一个 `v*` tag 时跑完整条发布链：
+
+1. tag 必须等于 `package.json` 的版本（否则 `npm publish` 会发出另一个版本，而 tag 与 release 说的是这个）；
+2. `docs/releases/v<版本>.md` 必须存在——**它就是 release body**，先中后英，所以发版说明在仓库里可评审，而不是事后在网页上敲；
+3. 两份 README 与 `docs/RELEASE.md`/`docs/operating.md` 的安装钉法必须写这个版本（npm 服务的是 tarball 里那份 README，发完再改就永久过期）；
+4. `npm run ci` + `verify:package -- --prebuilt` + `verify:negatives`；
+5. `npm publish`（版本已在 registry 上则跳过，重跑安全）；
+6. 用 `npm pack` 取**已发布的**字节，与 registry 的 `dist.shasum` 比对，再 `gh release create` 并把 tarball 以两个名字挂上去：`dsh-boost-<版本>.tgz`（存档）与 `dsh-boost.tgz`（`releases/latest/download/dsh-boost.tgz` 解析到的那个）；
+7. 断言 `https://github.com/<repo>/releases/latest/download/dsh-boost.tgz` 返回 200（新挂的 asset 有几分钟不可下载，所以重试）。
+
+顺序不能倒：GitHub Release 是在宣布一个可安装的版本，先建 release 再发布，等于让发布页指向一个 npm 还没接受（或已拒绝）的 tarball。
+
+需要的 secret 只有 `NPM_TOKEN`（granular token，`dsh-boost` 这个包的 read+write，且允许 bypass 2FA）。
+`GITHUB_TOKEN` 由 Actions 注入，`permissions: contents: write` 只给它上传 asset 的权限。
+
 ### 6.1 workflow 做什么、不做什么
 
-`.github/workflows/ci.yml` 在 `push` 到 `main`、`v*` tag 和 `pull_request` 时跑一个 job：
+`.github/workflows/ci.yml` 在 `push` 到 `main` 与 `pull_request` 时跑一个 job：
 
 - 断言 `package-lock.json` 里没有 `registry.npmmirror.com`（§6.2），然后 `npm ci --registry=https://registry.npmjs.org/`；
 - 跑 `npm run ci`（typecheck + `npm test` + `test:regression` + clean build），再跑
@@ -732,14 +749,20 @@ tool share 变动约 ±1.3pp。这是选择边界差，不是公式差；设计�
 - 权限只有 `contents: read`，没有 registry token，也**没有**任何 `npm publish` 调用（连
   `--dry-run` 都没有）：npm 要先跑完 `prepublishOnly` 才检查 registry，`--dry-run` 只会让每次
   push 在几分钟绿灯后以 `You cannot publish over the previously published versions: <当前版本>` 变红；
-- `v*` tag **不会**把任何东西推到 registry；打 tag 只是再跑一遍这几条命令。
+- **`v*` tag 不归它管**（§6.0）。tag 走 `release.yml`，那条链自己跑同一道门；两个 workflow 都监听
+  tag 会让一次发版跑两遍套件。
 
 注意：§1 的次安装会执行包内 lifecycle 脚本；`pull_request` 上也会执行。runner 是临时的、
 没有 registry token，但这仍是在跑不可信代码——不要给这个 job 加 secrets 或写权限。
 
-它**不**检查：真实发布所需的认证/2FA、registry 的 `latest` dist-tag、provenance/签名、装进真实
-DSH 宿主后的行为、§3 的 20 任务回退流程（人工）、§5 的统计复算。workflow 是为公共 GitHub mirror 准备的；
-内部 GitLab remote 不执行它（见 yml 文件头）。
+`ci.yml` **不**检查：registry 的 `latest` dist-tag、provenance/签名、装进真实 DSH 宿主后的行为、
+§3 的 20 任务回退流程（人工）、§5 的统计复算。`release.yml` 补上 dist-tag 之外的那一半（发布与
+GitHub Release），但仍不做 provenance——`npm publish` 没有带 `--provenance`，因为那要求
+`id-token: write` 且会把构建元数据写进 registry，属于另一次决策。两个 workflow 都是为公共 GitHub
+mirror 准备的；内部 GitLab remote 不执行它们（见 yml 文件头）。
+
+历史：`0.4.0` 之前的 tag 只有 tag，没有 GitHub Release；`docs/releases/` 从 `v0.4.0` 起往回补齐了
+七个版本的发版说明，更早的版本不补。
 
 ### 6.2 registry：一个源，而不是两个
 
@@ -761,8 +784,8 @@ DSH 宿主后的行为、§3 的 20 任务回退流程（人工）、§5 的统�
 时执行，非零退出会中止发布；但 `postpack` 看不到最终上传的那个 tarball，所以它不能替代对发布产物
 的验收（而且 `--ignore-scripts` 与 `npm publish <tgz>` 会连它一起跳过）。真正的门仍是
 `verify:package`。因此发布顺序只有一个：在**要打 tag 的那个 commit** 上运行
-`npm run verify:package`（exit 0），确认 `git status --short` 干净后打 tag，再从同一个 checkout
-执行不带 flags 的 `npm publish`；不要用 `--ignore-scripts`，不要发布手工 tarball。
+`npm run verify:package`（exit 0），确认 `git status --short` 干净后打 tag 并 push——`release.yml`
+会在这条链里再跑一次同样的门，然后发布；不要用 `--ignore-scripts`，不要发布手工 tarball。
 
 ## 7. 发布检查清单
 
