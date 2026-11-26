@@ -36,6 +36,13 @@ function producedCodes(): string[] {
       const code = match[1]
       if (code !== undefined) codes.add(code)
     }
+    // `export const ERR_HTTP_UNAUTHORIZED = 'ERR_HTTP_UNAUTHORIZED'` — the HTTP
+    // surface's codes are exported constants, not `code:` literals, so a code
+    // added only there used to escape this scan entirely (review P3-5).
+    for (const match of text.matchAll(/export const (ERR_HTTP_[A-Z_]+) = '[A-Z_]+'/g)) {
+      const code = match[1]
+      if (code !== undefined) codes.add(code)
+    }
     // `ledgerEntry(ctx, 'skip', '…')` — the helper's third positional argument.
     // Over half the skip codes are written this way, so scanning only the
     // literal form left `not-admitted`, `steps-exhausted` and `no-candidate`

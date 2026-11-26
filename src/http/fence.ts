@@ -5,7 +5,11 @@
  * path namespace. Any page the operator's browser loads from any origin can
  * POST to this server, and the host's SPA is not the only client that can. The
  * read route returns the full scope document, so "only the settings page talks
- * to it" has to be enforced here or nowhere.
+ * to it" has to be enforced here — or, before this fence, by the host's own
+ * admission check (`connection.admit`), which this plugin now asks first when
+ * the deployment has one. That check answers "is this caller authenticated";
+ * this fence answers "is this the same origin". A host with no such service
+ * falls back to this fence alone, which is why both exist.
  *
  * Two confused-deputy paths are closed:
  *

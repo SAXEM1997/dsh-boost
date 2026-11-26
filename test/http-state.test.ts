@@ -412,27 +412,54 @@ test('写：未知写路径 → 404', async () => {
   assert.equal(status, 404)
 })
 
-test('host admission rejection is answered before any state is read', async () => {
+test('host admission rejection answers 401 and names only the code', async () => {
   const server = await createServer({ connection: { admit: () => ({ rejection: 401 }) } })
   const response = await server.request('GET', `${HTTP_API_PREFIX}/state`, { host: LOOPBACK })
   assert.equal(response.status, 401)
-  assert.equal(response.body.error, 'ERR_HTTP_UNAUTHORIZED')
-  // Not even a partial projection: the body carries the code and nothing else.
-  assert.deepEqual(Object.keys(response.body), ['error'])
+  assert.deepEqual(response.body, { error: 'ERR_HTTP_UNAUTHORIZED' })
+})
+
+test('host admission runs before the fence, so its verdict wins on an untrusted Host', async () => {
+  const server = await createServer({ connection: { admit: () => ({ rejection: 401 }) } })
+  // The fence would answer 403 for this Host; a 401 proves admission ran first.
+  const response = await server.request('GET', `${HTTP_API_PREFIX}/state`, { host: 'evil.example' })
+  assert.equal(response.status, 401)
+  assert.deepEqual(response.body, { error: 'ERR_HTTP_UNAUTHORIZED' })
+})
+
+test('a 403 verdict keeps the fence code rather than the auth code', async () => {
+  const server = await createServer({ connection: { admit: () => ({ rejection: 403 }) } })
+  const response = await server.request('GET', `${HTTP_API_PREFIX}/state`, { host: LOOPBACK })
+  assert.equal(response.status, 403)
+  assert.deepEqual(response.body, { error: 'ERR_HTTP_FORBIDDEN' })
+})
+
+test('a verdict this route has no code for answers 500, not an auth failure', async () => {
+  const server = await createServer({ connection: { admit: () => ({ rejection: 418 }) } })
+  const response = await server.request('GET', `${HTTP_API_PREFIX}/state`, { host: LOOPBACK })
+  assert.equal(response.status, 500)
+  assert.deepEqual(response.body, { error: 'ERR_HTTP_INTERNAL' })
 })
 
 test('host admission rejection stops a write before the document moves', async () => {
   const server = await createServer({ connection: { admit: () => ({ rejection: 401 }) } })
+  // A *valid* envelope: with a malformed one the handler would answer 400 on its
+  // own, and "the document did not move" would prove nothing about admission.
   const response = await server.request(
     'POST',
     `${HTTP_API_PREFIX}/scope`,
     { host: LOOPBACK, origin: `http://${LOOPBACK}`, 'content-type': 'application/json' },
-    JSON.stringify({ mode: 'global', workspaceIds: [], shadow: false, projection: 'on', baseRevision: 0 }),
+    JSON.stringify({
+      body: { mode: 'global', workspaceIds: [], shadow: false, projection: 'on' },
+      baseRevision: 0,
+    }),
   )
   assert.equal(response.status, 401)
+  assert.deepEqual(response.body, { error: 'ERR_HTTP_UNAUTHORIZED' })
   const after = await server.readScope()
   assert.equal(after.mode, 'selected')
   assert.equal(after.projection, 'shadow')
+  assert.equal(after.revision, 0)
 })
 
 test('an admission check that throws is a refusal, not permission', async () => {
@@ -445,6 +472,7 @@ test('an admission check that throws is a refusal, not permission', async () => 
   })
   const response = await server.request('GET', `${HTTP_API_PREFIX}/state`, { host: LOOPBACK })
   assert.equal(response.status, 401)
+  assert.deepEqual(response.body, { error: 'ERR_HTTP_UNAUTHORIZED' })
 })
 
 test('a host with no admission service still serves the page', async () => {

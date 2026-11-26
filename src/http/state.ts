@@ -7,10 +7,14 @@
  * a strict schema turns `resolveConfig`'s clamp-and-warn into a load-time hard
  * failure). So the page reads through one prefix this plugin owns.
  *
- * NO AUTHENTICATION IS INHERITED. `webServer.register` performs none and
- * claims no path namespace, so `isTrustedWebRequest` is the whole boundary;
- * see `fence.ts` for what it closes and why an absent `Origin` is admitted on
- * reads but refused on writes.
+ * NO AUTHENTICATION IS INHERITED: `webServer.register` performs none and
+ * claims no path namespace. So two gates run, in this order — the host's own
+ * admission (`HandlerOptions.admit`, when the deployment has that service: a
+ * DSH peer cookie or API token) and then the plugin's browser fence
+ * (`isTrustedWebRequest`, see `fence.ts` for what it closes and why an absent
+ * `Origin` is admitted on reads but refused on writes). Neither is sufficient
+ * alone: the fence knows nothing about identity, and admission is a no-op on
+ * hosts that do not require one.
  *
  * EVERY FAILURE IS A STRUCTURED BODY. The page decides what to say from a
  * stable code, never from prose, so a handler here returns codes even when the
@@ -164,8 +168,12 @@ export interface HandlerOptions {
    * applies no access check of its own, so a route that skips this is reachable
    * by anything that can reach the port. The fence below answers "is this the
    * same origin"; this answers "is the caller allowed at all" — a DSH peer
-   * cookie or API token on deployments that require one. Returning `undefined`
-   * means the host has no such service, and the fence is the whole check.
+   * cookie or API token on deployments that require one.
+   *
+   * `undefined` means NO VERDICT — either the host has no such service, or it
+   * allowed the request. Both fall through to the fence, so a caller must not
+   * read `undefined` as "the check did not run". Any other value is a refusal;
+   * the only two the host's contract defines are 401 and 403.
    */
   admit?: (req: HttpRequestLike) => { rejection?: number } | undefined
 }
@@ -231,7 +239,16 @@ export function createStateHandler(deps: StateDeps, options: HandlerOptions = {}
     }
     const rejection = admission?.rejection
     if (typeof rejection === 'number') {
-      writeJson(res, rejection, { error: rejection === 403 ? ERR_HTTP_FORBIDDEN : ERR_HTTP_UNAUTHORIZED })
+      // 401 is the host's "not authenticated", 403 its "not trusted". Anything
+      // else is a verdict this route has no code for; reporting it as an auth
+      // failure would send the operator to the wrong place, so it answers 500.
+      if (rejection === 403) {
+        writeJson(res, 403, { error: ERR_HTTP_FORBIDDEN })
+      } else if (rejection === 401) {
+        writeJson(res, 401, { error: ERR_HTTP_UNAUTHORIZED })
+      } else {
+        writeJson(res, 500, { error: ERR_HTTP_INTERNAL })
+      }
       return
     }
 

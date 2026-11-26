@@ -58,12 +58,12 @@ Node.js `>=24.9.0`，DSH `>=0.2.2-rc.4 <0.2.3-0`（**区间**，不是精确钉�
 上可用；v1 面向 web profile。
 
 ```bash
-dsh plugin --profile <name> add dsh-boost@^0.4.5 --registry=https://registry.npmjs.org/
+dsh plugin --profile <name> add dsh-boost@^0.4.6 --registry=https://registry.npmjs.org/
 ```
 
 `dsh plugin` 要求指定 profile，其余参数转发给该 profile 里的 pnpm（所以 pnpm 必须在 PATH
 上）；本地 checkout 安装先 `npm run build`，再把绝对路径传给 `add`。npmjs 上的 `latest` 是
-`0.4.5`；镜像可能滞后，在意 registry 时显式带上 `--registry`。版本历史、镜像与
+`0.4.6`；镜像可能滞后，在意 registry 时显式带上 `--registry`。版本历史、镜像与
 `0.0.0-stage` 的坑见[运维](docs/operating.md#安装与版本)。装完**必须重启 DSH**（插件在宿主
 启动时加载）；web profile 就是重启 `dsh web`。
 
@@ -90,7 +90,7 @@ workspace UUID，不是路径；找不到时单用户机器可以用 `"mode": "g
 装好并启用后，宿主设置面板里会多出一节「Token 效率」（英文界面 “Token efficiency”）。它做
 三件事：看状态、改作用域、提示两个危险开关。投影切到 `on` 时提示 spill 前置条件，关影子时
 提示盯一次 `content[].thinking` 的 400；两处都给回滚办法，都**只提示不做硬门**。读不到数据时
-显示稳定码而不是空白表格；`curl <host>/dsh-boost/api/state` 返回同一份 JSON。
+显示稳定码而不是空白表格；带页面 cookie 的 `curl <host>/dsh-boost/api/state` 返回同一份 JSON；裸 `curl` 在开启鉴权的宿主上得到 `ERR_HTTP_UNAUTHORIZED`，那是预期。
 
 | 它做什么 | 内容 |
 |---|---|

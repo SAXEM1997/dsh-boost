@@ -67,12 +67,12 @@ Node.js `>=24.9.0` and DSH `>=0.2.2-rc.4 <0.2.3-0` (a **range**, not an exact pi
 POSIX-only; v1 targets the web profile.
 
 ```bash
-dsh plugin --profile <name> add dsh-boost@^0.4.5 --registry=https://registry.npmjs.org/
+dsh plugin --profile <name> add dsh-boost@^0.4.6 --registry=https://registry.npmjs.org/
 ```
 
 `dsh plugin` requires a profile and forwards the remaining arguments to pnpm in that profile
 directory (so pnpm must be on `PATH`); for a local checkout, run `npm run build` first and pass the
-absolute path to `add`. npmjs has `latest` at `0.4.5`; a mirror may lag, so pass `--registry`
+absolute path to `add`. npmjs has `latest` at `0.4.6`; a mirror may lag, so pass `--registry`
 explicitly when the registry matters. Version history, mirrors and the `0.0.0-stage` trap are in
 the [operations guide](docs/operating.md#安装与版本) (Chinese). **You must restart DSH after
 installing** (plugins load at host startup); for the web profile, restart `dsh web`.
@@ -108,7 +108,7 @@ section (「Token 效率」 in Chinese). It shows state, edits scope, and warns 
 switches: turning projection `on` shows the spill precondition, and turning shadow off shows the
 `content[].thinking` 400 to watch for. Both give a rollback and both are **advisory, never gates**.
 When the page cannot reach its data it shows a stable code instead of an empty table;
-`curl <host>/dsh-boost/api/state` returns the same JSON.
+`curl` with the page cookie returns the same JSON; a bare `curl` gets `ERR_HTTP_UNAUTHORIZED` on a host that requires auth, which is the expected result.
 
 | It does | Content |
 |---|---|

@@ -178,7 +178,7 @@ mkdir -p "$DSH_HOME"
 # 在仓库根目录求版本，tarball 文件名随之变化；手工下载的包直接写绝对路径
 TARBALL="/path/to/dsh-boost-$(node -p "require('./package.json').version").tgz"
 dsh plugin --profile accept add "$TARBALL"
-# 或本地 checkout 目录；从 registry 安装时写 dsh-boost@^0.4.5 --registry=https://registry.npmjs.org/
+# 或本地 checkout 目录；从 registry 安装时写 dsh-boost@^0.4.6 --registry=https://registry.npmjs.org/
 # 确认宿主确实把这一行并入了装配计划：
 dsh --profile accept --dump-config | grep -A2 'id: dsh-boost'
 ```
@@ -236,7 +236,14 @@ for (const [id, w] of Object.entries(s.tables.workspaces)) console.log(id, w.pat
 验证顺序（在 §2.0 之后跑）：
 
 1. 打开宿主设置面板，确认「Token 效率」一节在。不在的话先看 `status.degraded` 里有没有 `ERR_BOOST_PARTIAL_MOUNT`（提示段或钩子没挂上），再看宿主日志里有没有 `webServer`。
-2. `curl -s http://127.0.0.1:<port>/dsh-boost/api/state | head -c 200` 应当返回 `{"status":…,"scope":…,"workspaces":…,"config":…}` 四块。返回 `{"error":"ERR_HTTP_UNAUTHORIZED"}` 说明宿主的准入检查（`connection.admit`）拒绝了这次调用——没有携带页面 cookie 的裸 curl 在开启鉴权的宿主上就会这样。返回 `{"error":"ERR_HTTP_FORBIDDEN"}` 说明 `Host` 不在受信名单里（反向代理没透传 `Host`，或用了非 loopback 的地址而宿主没 `--trusted-host`）。
+2. 用**带 cookie 的** curl 读同一份 JSON：
+
+   ```bash
+   curl -s -c /tmp/dsh.cookies "http://127.0.0.1:<port>/?token=<宿主启动时打印的 token>" -o /dev/null
+   curl -s -b /tmp/dsh.cookies http://127.0.0.1:<port>/dsh-boost/api/state | head -c 200
+   ```
+
+   应当返回 `{"status":…,"scope":…,"workspaces":…,"config":…}` 四块。**裸 curl（不带 cookie）在开启鉴权的宿主上一律返回 `{"error":"ERR_HTTP_UNAUTHORIZED"}`，那是预期，不是故障**：路由现在先问宿主的准入（`connection.admit`），只有拿到 cookie 或 API token 才往下走。本机打了 `dsh-noauth` 补丁的构建例外——那里 `isAuthenticated()` 恒真，裸 curl 也能读到。返回 `{"error":"ERR_HTTP_FORBIDDEN"}` 说明 `Host` 不在受信名单里（反向代理没透传 `Host`，或用了非 loopback 的地址而宿主没 `--trusted-host`）。
 3. 在页面上把「作用范围」改成「所有工作区」并保存，然后 `boost status` 的 `scope.mode` 应当立刻是 `global`。
 4. 制造一次冲突：页面不重读，另外用工具跑一次 `scope-set`，再在页面上保存——应当拿到 `ERR_SCOPE_REVISION_CONFLICT` 与一个显式的「重新读取」按钮，**草稿不被覆盖**。
 
@@ -357,10 +364,11 @@ tarball 会拉进 `dsh-spill-policy@rc.5` 并 `ERESOLVE`（当时实测 exit 1�
   **`0.2.3-rc.4` / `0.2.3-rc.5` / `0.2.3` 都在区间外**：它们会告警一次，但仍照常加载——`0.2.3-rc.5`
   与本插件触及的九个包逐字节相同（见 §2.4.1），所以那条告警说的是「没验证过」，不是「会坏」。
 
-安装规格：**`dsh-boost@^0.4.5`**。版本清单以 `npm view dsh-boost versions --registry=https://registry.npmjs.org/` 为准——这里不记条数，因为每发一版它就会过期一次；其中 `0.0.0-stage` 是 npm 自动创建的占位版本，不要把它当成
+安装规格：**`dsh-boost@^0.4.6`**。版本清单以 `npm view dsh-boost versions --registry=https://registry.npmjs.org/` 为准——这里不记条数，因为每发一版它就会过期一次；其中 `0.0.0-stage` 是 npm 自动创建的占位版本，不要把它当成
 “更早的 API”：
 
-- `0.4.5` — 当前 `latest`；设置页路由补上宿主的准入检查（`ERR_HTTP_UNAUTHORIZED`）
+- `0.4.6` — 当前 `latest`；准入改为每请求解析，边角 fail-closed 收紧
+- `0.4.5` — 设置页路由补上宿主的准入检查（`ERR_HTTP_UNAUTHORIZED`）
 - `0.4.4` — A/B 跑法（`docs/quality-runbook.md`）与 `task` 字段
 - `0.4.3` — 两轴复审修复：同一事实的三处副本统一、机械替换造成的版本归属回滚
 - `0.4.2` — 质量仪装置（`scripts/quality-tasks.mjs` / `quality-compare.mjs`）与 `docs/quality.md`
@@ -406,7 +414,7 @@ tarball 会拉进 `dsh-spill-policy@rc.5` 并 `ERESOLVE`（当时实测 exit 1�
   它低于 `0.1.0`，所以 `^0.1.0` **不会**选中它，`latest` 也不是它。
 
 **写成 `^0.2.0` 而不是 `^0.1.4`**：`^` 不跨大版本，`^0.1.4` 永远解析不到 `0.2.0`，所以从 `0.1.x`
-升上来必须显式写 `@^0.4.5`；`^0.2.0` 表达的是“至少含 0.2.0 的修复”，镜像在发布后短暂滞后时它会
+升上来必须显式写 `@^0.4.6`；`^0.2.0` 表达的是“至少含 0.2.0 的修复”，镜像在发布后短暂滞后时它会
 解析失败，而不是悄悄装回没有设置页的旧构建。在意 registry 时显式传
 `--registry=https://registry.npmjs.org/`。
 
@@ -497,7 +505,7 @@ JSON 体返回一个码，页面据码决定说什么。`ERR_CLIENT_*` 是页面
 | `ERR_HOST_NO_AGENT_REQUEST` | 加载日志警告（一次） | `llm/stream` 前没观察到 `agent/request`；selector 路由捕获不到，多候选替换会 fail-closed | 宿主事件已废弃/移除；升级宿主，或只用单候选替换 |
 | `ERR_HOST_NO_SYSTEM_PROMPT_ASSEMBLE` | 加载日志警告（一次） | 首个 `agent/pre-step` 到达前从未观察到 `system-prompt/assemble`：协议段无法预热/打补丁（事件可能被改名或移除）。事件名同时进 `missingMounts`，所以 `status.degraded` 里看到的是 `ERR_BOOST_PARTIAL_MOUNT` | 核对宿主提示装配事件；升级宿主，或接受协议段不可用 |
 | `ERR_HOST_NO_AGENT_PRE_STEP` | 加载日志警告（一次） | 首个**主** `llm/stream` 前没有该会话的 `agent/pre-step`：步进时钟无法推进，替换不可能（带 `purpose` 的辅助请求不触发）。同样进 `missingMounts` | 升级宿主；此宿主上替换不可用，投影仍可用 |
-| `ERR_HTTP_UNAUTHORIZED` | 设置页路由的响应体（401） | 宿主自己的准入检查拒绝了这次请求（`connection.admit` 返回 401），或那次检查抛错——抛错按拒绝处理。响应体只有这个码，不含任何状态 | 页面的 cookie/API token 失效或被撤销；重新打开宿主给出的地址。宿主没有 `connection` 服务时不会出现这个码 |
+| `ERR_HTTP_UNAUTHORIZED` | 设置页路由的响应体（401） | 宿主自己的准入检查拒绝了这次请求（`connection.admit` 返回 401），或那次检查抛错——抛错按拒绝处理。宿主返回 403 时用 `ERR_HTTP_FORBIDDEN`；返回其它状态时用 `ERR_HTTP_INTERNAL`（500），不冒认证失败。响应体只有这个码，不含任何状态 | 页面的 cookie/API token 失效或被撤销；重新打开宿主给出的地址。宿主没有 `connection` 服务时不会出现这个码 |
 | `ERR_HTTP_FORBIDDEN` | 设置页路由的响应体（403） | 请求被同源栅栏拒绝：`Host` 既不是 loopback 也不在宿主的 `trustedHosts` 里；或 `sec-fetch-site: cross-site`；或 `Origin` 与 `Host` 指向不同的 authority；或 `Origin` 在但解析不了 | 用受信的 Host 打开页面（宿主启动时的 `--trusted-host`）；反向代理没把 `Host` 透传过来时，页面与路由看到的是两个 authority |
 | `ERR_HTTP_METHOD` | 设置页路由的响应体（405） | 对 `/state` 发了写，或对 `/scope` 发了 `GET`/`HEAD`/`POST` 以外的方法 | 检查调用方；这不是权限问题，是路由不提供那种方法 |
 | `ERR_HTTP_BODY` | 设置页路由的响应体（400） | 写请求的体不是合法 JSON，或超过 64 KiB | 检查调用方；页面自己不会发出这种请求 |
@@ -763,14 +771,14 @@ DSH 宿主后的行为、§3 的 20 任务回退流程（人工）、§5 的统�
 - [ ] 该 commit 的 `git status --short` 为空；`verify:package` 只证明工作树或给定 tarball，不证明 commit 状态
 - [ ] `prepublishOnly`（`npm run ci && npm run verify:package -- --prebuilt`）在发布前整体跑过一遍；明确知道 `npm publish --ignore-scripts` 和 `npm publish <tgz>` 会绕过它（§6.3）
 - [ ] CI 在同一个 commit 上绿；明确知道它跑 `ci` + `verify:package` + `verify:negatives`、不跑 `npm publish`，`v*` tag 不会上传（§6.1）
-- [ ] `dsh plugin --profile <name> add dsh-boost@^0.4.5 --registry=https://registry.npmjs.org/`（或本地路径/tarball）成功，`--dump-config` 里有 `id: dsh-boost` 行
+- [ ] `dsh plugin --profile <name> add dsh-boost@^0.4.6 --registry=https://registry.npmjs.org/`（或本地路径/tarball）成功，`--dump-config` 里有 `id: dsh-boost` 行
 - [ ] 测试工作区已写入 `scope.workspaceIds`，`shadow: true`、`projection: 'on'` 经 `boost status` 确认
 - [ ] no-tokenmeter 门按 §2.1 承担：单元测试注入 `hasTokenMeter: false` 锁定预期（替换拒绝、投影可用、账目 `unknown`、`ERR_HOST_NO_TOKENMETER`）；活宿主复核仅在确要部署缺该服务的宿主时做，先验健康态，再把 `shadow` 设为 `false` 验拒绝收据（影子模式下只有 `status.degraded` 可观察，不能算过门）
 - [ ] no-spill 门按 §2.2 完整跑过：移除的是 spill **后端**（`dsh-spill-local`），观察到超限回执不投影、`projection-skipped:no-spill`、`ERR_HOST_NO_SPILL`；只移除 `dsh-spill-policy`（宿主的 token 预算保留策略插件，从宿主树解析）的话得到的是 `projection-skipped:no-footer` 与 `ERR_HOST_NO_SPILL_NOTICE`
 - [ ] 两条降级路径都保留 status/收据证据；验收中出现的每个稳定码都按 §2.5 的矩阵处置并留证（含 `ERR_HOST_NO_SPILL_NOTICE` / `ERR_HOST_VERSION_MISMATCH` / `ERR_BOOST_SECTION_REGISTER_FAILED`，以及已有的 `ERR_RECEIPTS_UNREADABLE` / `ERR_RECEIPTS_TRUNCATED` / `ERR_HOST_COMPLETE_SECTION` / `ERR_SCOPE_ABORTED` / `ERR_HOST_SPILL_FAILING` / `ERR_BOOST_PARTIAL_MOUNT`）；同时确认 `status.data.receipts_stopped` 为 `false`（为 `true` 表示收据已连续写失败 3 次、替换被整体拒绝）
 - [ ] 第一次开启替换的真实回合检查 `content[].thinking` 400（不是影子周）；若有，替换在该路由关闭
 - [ ] `npm run --silent stats` 在干净 clone 上可复算 §5.2 的聚合（口径对应设计稿 §2.1）
-- [ ] 发布侧：`npm publish` 走 `publishConfig.registry`（registry.npmjs.org、public）；用 `npm view dsh-boost dist-tags --registry=https://registry.npmjs.org/` 确认 `latest` 是 `package.json` 里的版本（registry 上另有 npm 自动创建的 `0.0.0-stage` 占位版本，见 §2.4）；**必须带 `--registry`**，否则读到的是镜像的旧 `latest`；安装规格是 `dsh-boost@^0.4.5`
+- [ ] 发布侧：`npm publish` 走 `publishConfig.registry`（registry.npmjs.org、public）；用 `npm view dsh-boost dist-tags --registry=https://registry.npmjs.org/` 确认 `latest` 是 `package.json` 里的版本（registry 上另有 npm 自动创建的 `0.0.0-stage` 占位版本，见 §2.4）；**必须带 `--registry`**，否则读到的是镜像的旧 `latest`；安装规格是 `dsh-boost@^0.4.6`
 
 **未交付、因此不在上表可勾选范围：§3 的 20 条真实任务语料。**
 `test/regression/` 提供的是 runner 与**合成**任务集（`tasks.jsonl`，6 条），不是 20 条真实回放

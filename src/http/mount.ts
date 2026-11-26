@@ -16,7 +16,7 @@
  */
 import { HTTP_API_PREFIX } from '../shared/api-prefix.js'
 import { ERR_BOOST_HTTP_MOUNT_FAILED } from '../tools/boost.js'
-import { createStateHandler, type StateDeps } from './state.js'
+import { createStateHandler, type HttpRequestLike, type StateDeps } from './state.js'
 
 /** The one service this plugin needs from the host's web composition. */
 interface WebServerLike {
@@ -32,33 +32,44 @@ export interface HttpContextLike {
 /**
  * The host's admission verdict, when this generation of the host has one.
  *
- * `dsh-client-connection` exposes `admit(request)` (and `requestRejection`,
- * which is the same call reduced to the rejection): it applies the host's own
+ * `dsh-client-connection` exposes `admit(request)`: it applies the host's own
  * Host/Origin fence and then requires an authenticated peer — a browser cookie
  * or an API token. `webServer.register` does not run it for us, so a route that
  * omits this is reachable by anything that can reach the port.
  *
- * Absent, or throwing, stays conservative: no service means the plugin's own
- * fence is the whole check (older hosts, headless deployments), and a service
- * that throws is treated as a refusal rather than as permission.
+ * The lookup is per REQUEST, not once at mount, for the same reason
+ * `trustedHosts` is a thunk: `connection` is provided by a sibling fiber that
+ * may activate after `webServer` does (it awaits `BrowserAuth.create` first),
+ * and a service captured at mount would either be `undefined` forever — the
+ * route silently unguarded — or a disposed instance that answers 401 to
+ * everything after a reload. Two silent failures, both worse than a lookup.
+ *
+ * Absent stays permissive (older hosts, headless deployments, where our own
+ * fence is the whole check); a lookup or a verdict that THROWS refuses, because
+ * a check that cannot run must not read as permission.
  */
-function resolveAdmission(ctx: HttpContextLike): ((req: never) => { rejection?: number } | undefined) | undefined {
-  let connection: { admit?: (req: unknown) => unknown } | undefined
+function admissionOf(
+  ctx: HttpContextLike,
+  req: HttpRequestLike,
+): { rejection?: number } | undefined {
+  let connection: { admit?: unknown } | undefined
   try {
     connection = ctx.get?.('connection') as typeof connection
   } catch {
-    return undefined
+    return { rejection: 401 }
   }
   const admit = connection?.admit
   if (typeof admit !== 'function') return undefined
-  return (req) => {
-    try {
-      const admission = admit.call(connection, req) as { rejection?: unknown } | undefined
-      const rejection = admission?.rejection
-      return typeof rejection === 'number' ? { rejection } : undefined
-    } catch {
-      return { rejection: 401 }
-    }
+  try {
+    const admission = (admit as (request: unknown) => { rejection?: unknown } | undefined).call(connection, req)
+    const rejection = admission?.rejection
+    if (rejection === undefined) return undefined
+    // A numeric verdict is passed through for the handler to map (401 / 403 /
+    // anything else). A malformed one — a string, a renamed field, a Promise —
+    // is a refusal rather than permission: the one unrecoverable direction.
+    return typeof rejection === 'number' ? { rejection } : { rejection: 401 }
+  } catch {
+    return { rejection: 401 }
   }
 }
 
@@ -105,10 +116,7 @@ export function registerHttpApi(
       }
       const handler = createStateHandler(deps, {
         trustedHosts: () => resolveTrustedHosts(ctx),
-        ...(() => {
-          const admit = resolveAdmission(ctx)
-          return admit === undefined ? {} : { admit: admit as never }
-        })(),
+        admit: (req) => admissionOf(ctx, req),
       })
       dispose = webServer.register({ kind: 'prefix', path: HTTP_API_PREFIX, handler })
     })

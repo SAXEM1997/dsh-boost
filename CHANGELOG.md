@@ -8,6 +8,29 @@ This file records user-visible changes. Format follows Keep a Changelog; version
 Design rationale lives in `docs/superpowers/specs/`; the release-acceptance procedure is in
 `docs/RELEASE.md`.
 
+## [0.4.6] - 2026-11-26
+
+0.4.5 的准入接线是错的：它在**挂载时**取一次 `connection`，之后再没重新解析。
+
+- **晚激活 = 永久无准入。** `connection` 由兄弟 fiber 提供，且它自己要先 `await
+  BrowserAuth.create(...)` 才 `super(ctx,'connection')`；`webServer` 先就绪时那次 `ctx.get` 拿到
+  `undefined`，这条路由整个进程都不再有准入，且没有任何告警。同一个文件里 `trustedHosts` 早就因为
+  同样的坑写成了 thunk——这次我在 `connection` 上又踩了一遍。
+- **重载 = 永久 401。** 连接插件 reload/dispose 后手里是旧 service，`admit` 因 `disposed` 恒返 401，
+  页面一直坏到 boost 自己重载。
+- 两处都改成**每请求解析一次**。顺带把 fail-open 的边角收紧：`ctx.get` 抛错 → 401（此前是放行，
+  与注释里「抛错即拒绝」相反）；畸形 verdict（字符串、缺字段、Promise）→ 401；宿主返回 401/403
+  之外的数字 → 500 `ERR_HTTP_INTERNAL`，不再冒充认证失败。
+- 删掉 `(req: never)` 与 `admit as never` 两处断言（它们把参数逆变错误和宿主签名变化一起藏了）。
+- `src/http/{state,fence}.ts` 的文件头还在说「没有继承任何认证，栅栏就是全部边界」，改成两道闸。
+- 测试补到能证伪：403 保住 `ERR_HTTP_FORBIDDEN`、未知数字走 500、非受信 `Host` + 401（证明准入
+  先于栅栏）、拒绝写的请求改用**合法**信封（此前用的是畸形体，那条「文档没动」的断言恒真）。
+- 文档：`ERR_HTTP_FORBIDDEN` 行写明它有两个来源（宿主 `connection.trustedHosts` 与本插件栅栏）；
+  软依赖表补 `connection` 行；`README`×2 与 `RELEASE` 的裸 `curl` 说法改成「需要页面 cookie」并给出
+  取 cookie 的两条命令；`docs-codes` 测试改为扫描 `export const ERR_HTTP_*`（此前这类码不受门保护）。
+- 版本串：`how-it-works` 与 `scripts/README` 的 banner 例子里还写 `0.4.4`，`operating` 的镜像句仍说
+  「尚未同步 0.4.4」——`docs-version` 抓不住裸版本号，这条是人工补的。
+
 ## [0.4.5] - 2026-11-26
 
 设置页的数据路由补上宿主自己的准入检查。
