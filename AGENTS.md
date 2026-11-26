@@ -16,6 +16,13 @@ Issue 在 GitHub（`SAXEM1997/dsh-boost`），用 `gh` CLI；`origin` 是内网 
 
 single-context：根 `GLOSSARY.md` + `docs/adr/`。见 `docs/agents/domain.md`。
 
+## 交付流程
+
+- **改动一律走 PR**：`main` 受保护、禁止直接 push。每项改动开一个分支 + PR，squash merge。
+- **一个 PR 一件事**：PR 标题就是发版说明里的那一行。一个 PR 里塞进两件互不相关的事，发版时只能写成两行里选一行，或者写成一行半。
+- **例外只有两类**：发布流水线自身的修复（`.github/workflows/`）、以及必须立刻上的热修。两者都要事后补一条 issue 记账，说明为什么绕过了 PR。
+- **打 tag 前 `main` 的 CI 必须是绿的**：`release.yml` 自己会再跑一遍门，但那条门是「打出去的字节对不对」，不是「这次合并能不能进」。红着的 `main` 上打 tag，等于把红灯记到发布账上。
+
 ## 工程约定
 
 - **常驻文档只写当前状态与稳定规则**，变更历史进 `CHANGELOG.md`，git 历史为最终账本。
