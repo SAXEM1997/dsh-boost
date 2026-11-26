@@ -40,15 +40,14 @@
 # succeeded), and the budget here was 5m30s — 27 seconds of margin. Both loops
 # now allow 20 minutes, and `sleep` is skipped after the final attempt.
 #
-# RE-RUNNING IS SAFE ONLY WHERE IT IS MEANINGFUL. Three states are told apart:
-#   not published            → publish, then create the release
-#   published, no release    → skip publish, create the release (real recovery)
-#   published AND released   → REFUSE: there is nothing to recover, and a
-#                              re-run here means the tag moved, which would
-#                              leave the tag's tree and the published bytes
-#                              disagreeing while the release page looks fine.
-# The first two are why the failure most likely to need a retry — registry
-# propagation — happens after the irreversible step.
+# RE-RUNS ARE IDEMPOTENT AND THEY ARE VERIFIED, NOT ASSUMED. Every step after
+# the gate is conditional on state it reads first, so a re-run finishes a
+# partially-completed release instead of colliding with it. The one thing a
+# re-run cannot be allowed to do is paper over a MOVED TAG: that leaves the
+# tagged tree and the published bytes disagreeing while the release page looks
+# fine. npm records `gitHead`, so the question "was this version built from the
+# commit this tag names?" has an answer that does not depend on trusting the
+# tag, and a mismatch is a hard error.
 name: release
 
 on:
@@ -183,9 +182,21 @@ jobs:
           echo "published=$published released=$released"
           echo "published=$published" >> "$GITHUB_OUTPUT"
           echo "released=$released" >> "$GITHUB_OUTPUT"
-          if [ "$published" = yes ] && [ "$released" = yes ] && [ "${{ inputs.dry_run }}" != "true" ]; then
-            echo "::error::v$VERSION is published and released — nothing to recover. A re-run here means the tag moved; publish a new version instead of re-pointing an existing one."
-            exit 1
+          # A published version names the commit it was built from, so a moved
+          # tag is detectable instead of merely suspected. This replaces an
+          # earlier blanket refusal of "published and released": that refusal
+          # was correct about the hazard and wrong about the remedy — it also
+          # blocked the legitimate re-run of a step that failed after publish.
+          if [ "$published" = yes ]; then
+            RECORDED=$(npm view "dsh-boost@$VERSION" gitHead 2>/dev/null || true)
+            if [ -z "$RECORDED" ]; then
+              echo "::warning::registry records no gitHead for $VERSION; cannot prove the tag did not move"
+            elif [ "$RECORDED" != "$GITHUB_SHA" ]; then
+              echo "::error::v$VERSION was published from $RECORDED but this tag points at $GITHUB_SHA. The tag moved; publish a new version instead of re-pointing an existing one."
+              exit 1
+            else
+              echo "v$VERSION was published from $GITHUB_SHA — the tag has not moved"
+            fi
           fi
 
       - name: publish
@@ -272,6 +283,8 @@ jobs:
       # another version's asset also answers 200.
       - name: latest points at this version, byte for byte
         if: inputs.dry_run != true
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
           VERSION=$(node -p "require('./package.json').version")

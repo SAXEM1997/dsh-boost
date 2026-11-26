@@ -126,6 +126,24 @@ test('the release is created with an explicit latest marker', () => {
     'the body must come from docs/releases/, not from a web form')
 })
 
+test('every step that calls gh carries a token', () => {
+  // 0.4.8's release run failed at the final verification step with `exit code 4`
+  // — gh refuses to run without GH_TOKEN — after the publish, the release and
+  // both assets had already succeeded. A workflow can be right about the
+  // irreversible part and still be wrong here.
+  for (const step of steps) {
+    if (!/\bgh (release|api)\b/.test(runOf(step))) continue
+    assert.equal(step.env?.['GH_TOKEN'], '${{ secrets.GITHUB_TOKEN }}',
+      `step ${JSON.stringify(step.name ?? step.uses)} calls gh without GH_TOKEN`)
+  }
+})
+
+test('a moved tag is detected from the registry, not assumed away', () => {
+  const state = byId('state')
+  assert.match(runOf(state), /gitHead/,
+    'without a gitHead comparison, a re-run cannot tell a moved tag from a retry')
+})
+
 test('the asset check compares bytes, not just a status code', () => {
   const check = byName('latest points at this version, byte for byte')
   assert.match(runOf(check), /sha1sum/, 'a 200 can be another version\'s asset')
