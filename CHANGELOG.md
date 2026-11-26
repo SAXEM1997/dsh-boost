@@ -44,7 +44,8 @@ Design rationale lives in `docs/superpowers/specs/`; the release-acceptance proc
 - 新码 `ERR_HTTP_UNAUTHORIZED`（401，响应体只有这个码，不含任何状态）。`403` 仍归
   `ERR_HTTP_FORBIDDEN`，两者分工写在 `docs/operating.md`。
 - 这个缺陷是插件市场评审指出的（PR #18619 合并时，维护者在条目里补了一句「它的 HTTP 路由没有
-  DSH 的访问检查」）。声明属实，已修。
+  DSH 的访问检查」）。声明属实，已接上——但**这一版的接线是错的**（挂载时快照，晚激活即永久无准入），
+  见 `0.4.6`。
 - 一条环境事实：本机装的 `dsh-client-connection@0.2.2-rc.5` 里 `isAuthenticated()` 被
   `/* dsh-noauth */` 打桩成恒真，所以在这个宿主上准入只生效到栅栏那一层；换到开启鉴权的宿主，
   它才真正拦人。
