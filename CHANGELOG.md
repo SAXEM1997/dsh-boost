@@ -8,6 +8,25 @@ This file records user-visible changes. Format follows Keep a Changelog; version
 Design rationale lives in `docs/superpowers/specs/`; the release-acceptance procedure is in
 `docs/RELEASE.md`.
 
+## [0.4.7] - 2026-11-26
+
+发版从「手工跑命令」变成「打 tag」。
+
+- 新增 `.github/workflows/release.yml`：`v*` tag 推上去后跑完整条门（tag 与 `package.json` 版本一致、
+  `docs/releases/v<版本>.md` 存在、四份文档的安装钉法写这个版本、`npm run ci` + `verify:package
+  -- --prebuilt` + `verify:negatives`），然后 `npm publish`、建 GitHub Release、挂两个名字的 tarball。
+- 发布后取**已发布的** tarball 与 registry 的 `dist.shasum` 比对再挂——重建只是「希望可复现」，
+  取已发布的字节才是那个产物本身。
+- 重跑安全：版本已在 registry 上就跳过发布，release 用 `view || create`，asset 用 `--clobber`。
+  最需要重试的失败（registry 传播延迟 5–13 分钟）发生在不可逆那一步之后，所以它必须能重跑。
+- `ci.yml` 不再监听 tag：tag 归 `release.yml`，两个都监听会让一次发版跑两遍套件。
+- 补齐 `v0.4.0`–`v0.4.6` 七个 GitHub Release，说明取自 CHANGELOG 并按中英双语写进
+  `docs/releases/`；更早的版本只有 tag（`0.1.x`–`0.3.x` 不补）。
+- 新增 `test/release-workflow.test.ts`：trigger、门的内容、本版本有双语说明三条不变式；并把
+  「四份文档都写当前版本」从发布门提前到 `npm test`。
+- 第一次打 tag 就抓到了这条链的第一类静默失效：`package.json` 还是 0.4.6 而 tag 是 `v0.4.7`，
+  workflow 在第一步就红，没有发出任何东西。
+
 ## [0.4.6] - 2026-11-26
 
 0.4.5 的准入接线是错的：它在**挂载时**取一次 `connection`，之后再没重新解析。
