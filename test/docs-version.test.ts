@@ -21,7 +21,9 @@ const DOCS: { file: string; label: string }[] = [
   { file: 'README.en.md', label: 'README.en' },
   { file: 'docs/RELEASE.md', label: 'RELEASE' },
   { file: 'docs/operating.md', label: 'operating' },
-  { file: 'scripts/README.md', label: 'scripts/README' },
+  // `scripts/README.md` used to be listed here and contained no pin at all, so
+  // its assertion passed on an empty set — a check that matched nothing read as
+  // a check that passed. It is dropped rather than given a pin it does not need.
 ]
 
 for (const { file, label } of DOCS) {
@@ -32,6 +34,9 @@ for (const { file, label } of DOCS) {
     // as the "you must bump the minor explicitly" explanation. Only the line
     // the package is currently on must name the current patch.
     const series = `^${VERSION.split('.').slice(0, 2).join('.')}.`
+    // A file that names no pin at all would otherwise pass every assertion
+    // below by having nothing to fail on.
+    assert.ok(pinned.length > 0, `${file} carries no install pin for this test to check`)
     const stale = pinned.filter((p) => p.startsWith(series) && p !== `^${VERSION}`)
     assert.deepEqual(stale, [], `${file} pins ${stale.join(', ')} but the package is ${VERSION}`)
   })

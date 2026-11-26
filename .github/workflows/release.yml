@@ -5,6 +5,11 @@
 # release body, so the notes are reviewable in the repository instead of being
 # typed into a web form after the fact.
 #
+# `workflow_dispatch` exists so the chain can be exercised WITHOUT a tag: a
+# workflow that only runs on tags is untested until the day it matters, and the
+# first real execution would be a production publish. Dispatch defaults to
+# `dry_run: true`, which runs every gate and stops before publishing.
+#
 # WHY THE ORDER IS gate → publish → release, and not the reverse: a GitHub
 # Release announces an installable version. Creating it first means the release
 # page can point at a tarball npm has not accepted yet (or rejected outright),
@@ -22,37 +27,66 @@
 #      version-specific name. `releases/latest/download/dsh-boost.tgz` is what a
 #      version-independent install URL resolves to; a versioned name 404s there.
 #
-# `--latest` is explicit rather than left to gh's date-and-version heuristic:
-# `releases/latest/download/dsh-boost.tgz` resolves against whichever release is
-# marked latest, so a release created out of order (a backfill, a re-run for an
-# older tag) would silently move that URL onto a release with no asset on it.
+# `--latest` is explicit rather than left to gh's heuristic, which is not a
+# heuristic: `gh release create` marks the new release latest UNCONDITIONALLY.
+# What the flag buys is that a forward release is always the one
+# `releases/latest/download/dsh-boost.tgz` resolves to, instead of depending on
+# a default that a future gh version may change. It does NOT make backfills
+# safe: creating an older release's page still moves `latest` onto it, and that
+# has to be undone by hand (docs/RELEASE.md §6.0).
 #
-# Re-running is safe. npm rejects a republished version with a 409, so the
-# publish step first asks the registry whether the version is already there and
-# skips if it is; the release steps are idempotent (`view || create`, `upload
-# --clobber`). That matters because the failure most likely to need a retry —
-# registry propagation — happens *after* the irreversible step.
+# THE RETRY BUDGETS ARE MEASURED, NOT GUESSED. npm's packument lagged the
+# publish by 5m03s on 0.4.7 (ten failed `npm pack` attempts before the eleventh
+# succeeded), and the budget here was 5m30s — 27 seconds of margin. Both loops
+# now allow 20 minutes, and `sleep` is skipped after the final attempt.
 #
-# The gate runs twice on purpose: once explicitly, and once inside `npm publish`
-# through `prepublishOnly`. The explicit run is what makes `verify:negatives`
-# (the twelve corrupted-tarball cases) part of the release; the implicit run is
-# npm's own and is deliberately NOT bypassed with `--ignore-scripts`.
+# RE-RUNNING IS SAFE ONLY WHERE IT IS MEANINGFUL. Three states are told apart:
+#   not published            → publish, then create the release
+#   published, no release    → skip publish, create the release (real recovery)
+#   published AND released   → REFUSE: there is nothing to recover, and a
+#                              re-run here means the tag moved, which would
+#                              leave the tag's tree and the published bytes
+#                              disagreeing while the release page looks fine.
+# The first two are why the failure most likely to need a retry — registry
+# propagation — happens after the irreversible step.
 name: release
 
 on:
   push:
     tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: 'Run every gate, then stop before publishing'
+        type: boolean
+        default: true
 
-# `contents: write` uploads the release asset. Everything else is read-only.
+# `contents: write` is what creating a release and uploading an asset requires,
+# and it is the widest permission this job needs — it also allows pushing and
+# deleting releases, so nothing here should be reachable by untrusted code.
+# `persist-credentials: false` on checkout keeps the token out of `.git/config`,
+# where `npm ci` install scripts and the repo's own test run could read it.
 permissions:
   contents: write
+
+# Two runs for the same tag (a deleted-and-repushed tag, a UI re-run plus a new
+# push) would race: both pass the "already published?" check, then one gets a
+# 409 and the other an "already exists". Serialise them instead.
+concurrency:
+  group: release-${{ github.ref_name }}
+  cancel-in-progress: false
 
 jobs:
   release:
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
+        with:
+          # The token is not needed after checkout: `gh` reads GH_TOKEN and npm
+          # reads NODE_AUTH_TOKEN. Leaving it in .git/config widens the blast
+          # radius of every install script the gate runs.
+          persist-credentials: false
 
       - uses: actions/setup-node@v4
         with:
@@ -61,6 +95,7 @@ jobs:
           cache: npm
 
       - name: the tag names the version in package.json
+        if: github.event_name == 'push'
         run: |
           set -euo pipefail
           VERSION=$(node -p "require('./package.json').version")
@@ -71,50 +106,93 @@ jobs:
           }
           echo "releasing $VERSION"
 
+      - name: the tagged commit is on main
+        run: |
+          set -euo pipefail
+          # Branch protection makes every commit on main pass `release-gate`, so
+          # "the tagged tree is green" reduces to "the tagged commit is on main".
+          # This catches the other mistake: tagging a feature branch, which
+          # would publish code no review ever saw.
+          git fetch --no-tags --depth=200 origin main
+          git merge-base --is-ancestor "$GITHUB_SHA" origin/main || {
+            echo "::error::$GITHUB_SHA is not on main; tag a commit that is"
+            exit 1
+          }
+          echo "$GITHUB_SHA is on main"
+
       - name: the release notes for this version exist
         run: |
           set -euo pipefail
           VERSION=$(node -p "require('./package.json').version")
           NOTES="docs/releases/v$VERSION.md"
+          # Non-empty is this step's job; "Chinese then English" is pinned by
+          # test/release-workflow.test.ts inside `npm run ci` below.
           [ -s "$NOTES" ] || {
-            echo "::error file=$NOTES::missing — the release body is this file, in Chinese then English"
+            echo "::error file=$NOTES::missing or empty — this file is the release body"
             exit 1
           }
           echo "$NOTES: $(wc -l < "$NOTES") lines"
 
-      - name: the README install pins name the version being published
+      - name: the install pins name the version being published
         run: |
           set -euo pipefail
           VERSION=$(node -p "require('./package.json').version")
           for f in README.md README.en.md docs/RELEASE.md docs/operating.md; do
-            grep -q "dsh-boost@\^$VERSION" "$f" \
+            # Anchored on the next character, so 0.4.8 does not accept 0.4.80.
+            grep -Eq "dsh-boost@\^${VERSION//./\\.}([^0-9A-Za-z.-]|$)" "$f" \
               || { echo "::error file=$f::missing the @^$VERSION install pin"; exit 1; }
           done
 
       - run: npm ci --registry=https://registry.npmjs.org/
 
-      # The same two commands `prepublishOnly` runs, so a failure here names the
-      # gate rather than surfacing as a publish error. `--prebuilt` is
-      # load-bearing: it makes the pack step describe the tree this build
-      # produced instead of rebuilding it, so a ghost or missing dist entry is
-      # reported rather than repaired.
-      - run: npm run ci && npm run verify:package -- --prebuilt
+      # `prepublishOnly` runs `ci` + `verify:package` again inside `npm publish`,
+      # on a tree this build produced — that second run is the one that
+      # validates the published bytes, because `ci` starts by deleting `dist/`.
+      # This step exists only to fail early with a step name that says "gate"
+      # instead of "publish", and to give `verify:negatives` a `dist/` to pack.
+      # `verify:package` is left out here: the negatives baseline packs this
+      # same tree a few steps later.
+      - run: npm run ci
 
       # The gate must be able to fail: twelve corrupted tarballs, each asserting
       # its own check's failure text.
       - run: npm run verify:negatives
 
-      - name: publish, unless this version is already on the registry
+      - name: decide what this run has to do
+        id: state
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
           VERSION=$(node -p "require('./package.json').version")
-          if npm view "dsh-boost@$VERSION" version >/dev/null 2>&1; then
-            echo "dsh-boost@$VERSION is already published; skipping (re-run path)"
-          else
-            npm publish
+          # `npm view` reads the same packument as `npm pack`, so a version that
+          # was published seconds ago can still 404 here. Ask, wait, ask again —
+          # this is the check whose failure mode is a 409 five minutes later.
+          published=no
+          for attempt in $(seq 1 20); do
+            if npm view "dsh-boost@$VERSION" version >/dev/null 2>&1; then
+              published=yes
+              break
+            fi
+            echo "attempt $attempt: $VERSION not visible on the registry yet"
+            [ "$attempt" -lt 20 ] && sleep 30
+          done
+          released=no
+          if gh release view "v$VERSION" >/dev/null 2>&1; then released=yes; fi
+          echo "published=$published released=$released"
+          echo "published=$published" >> "$GITHUB_OUTPUT"
+          echo "released=$released" >> "$GITHUB_OUTPUT"
+          if [ "$published" = yes ] && [ "$released" = yes ] && [ "${{ inputs.dry_run }}" != "true" ]; then
+            echo "::error::v$VERSION is published and released — nothing to recover. A re-run here means the tag moved; publish a new version instead of re-pointing an existing one."
+            exit 1
           fi
+
+      - name: publish
+        if: steps.state.outputs.published == 'no' && inputs.dry_run != true
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: npm publish
 
       # Registry metadata can be visible minutes before the tarball is
       # downloadable, so `npm pack` is retried rather than trusted once. Taking
@@ -122,40 +200,63 @@ jobs:
       # makes the asset provably the artefact users install — a rebuild would
       # only be a hope that the tarball is reproducible.
       - name: take the published tarball, byte for byte
+        id: tarball
+        if: inputs.dry_run != true
         run: |
           set -euo pipefail
           VERSION=$(node -p "require('./package.json').version")
-          for attempt in $(seq 1 12); do
+          for attempt in $(seq 1 40); do
             if npm pack "dsh-boost@$VERSION" >/dev/null 2>&1; then
-              EXPECTED=$(npm view "dsh-boost@$VERSION" dist.shasum)
+              # The shasum lookup shares the packument lag, so it is retried
+              # too; a transient miss must not be reported as a mismatch.
+              EXPECTED=$(npm view "dsh-boost@$VERSION" dist.shasum 2>/dev/null || true)
               ACTUAL=$(sha1sum "dsh-boost-$VERSION.tgz" | cut -d' ' -f1)
-              if [ "$ACTUAL" = "$EXPECTED" ]; then
+              if [ -z "$EXPECTED" ]; then
+                echo "attempt $attempt: tarball packed but shasum not visible yet"
+              elif [ "$ACTUAL" = "$EXPECTED" ]; then
                 echo "sha1 $ACTUAL matches the registry"
                 cp "dsh-boost-$VERSION.tgz" dsh-boost.tgz
+                echo "sha1=$ACTUAL" >> "$GITHUB_OUTPUT"
                 exit 0
+              else
+                echo "::error::sha1 $ACTUAL != registry $EXPECTED"
+                exit 1
               fi
-              echo "::error::sha1 $ACTUAL != registry $EXPECTED"
-              exit 1
+            else
+              # The last attempt re-runs without swallowing stderr: "not
+              # downloadable yet" is indistinguishable from a bad token, a
+              # misconfigured registry, or a network failure.
+              [ "$attempt" -lt 40 ] || npm pack "dsh-boost@$VERSION" || true
+              echo "attempt $attempt: tarball not downloadable yet"
             fi
-            echo "attempt $attempt: tarball not downloadable yet"
-            sleep 30
+            [ "$attempt" -lt 40 ] && sleep 30
           done
           echo "::error::dsh-boost@$VERSION never became downloadable"
           exit 1
 
       - name: create the GitHub Release (idempotent)
+        if: inputs.dry_run != true
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
           VERSION=$(node -p "require('./package.json').version")
-          gh release view "v$VERSION" >/dev/null 2>&1 \
-            || gh release create "v$VERSION" \
-                 --title "v$VERSION" \
-                 --notes-file "docs/releases/v$VERSION.md" \
-                 --verify-tag --latest
+          # `view` failing is treated as "not there yet": the state step above
+          # already refused the one case where a missing release is suspicious.
+          # An existing release gets its body refreshed rather than skipped —
+          # `--notes-file` is only read by `create`, so without this branch an
+          # edit to docs/releases/vX.md would never reach the page it documents.
+          if gh release view "v$VERSION" >/dev/null 2>&1; then
+            gh release edit "v$VERSION" --notes-file "docs/releases/v$VERSION.md"
+          else
+            gh release create "v$VERSION" \
+              --title "v$VERSION" \
+              --notes-file "docs/releases/v$VERSION.md" \
+              --verify-tag --latest
+          fi
 
       - name: attach both tarball names
+        if: inputs.dry_run != true
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
@@ -165,21 +266,30 @@ jobs:
           # releases/latest/download/dsh-boost.tgz resolves to.
           gh release upload "v$VERSION" "dsh-boost-$VERSION.tgz" dsh-boost.tgz --clobber
 
-      # A freshly uploaded asset is not instantly downloadable (observed
-      # 504s for minutes on other repos), so this is retried — a single curl
-      # turns a propagation delay into a red run for a complete release.
-      - name: the version-independent asset answers 200
+      # A freshly uploaded asset is not instantly downloadable (observed 504s
+      # for minutes on other repos), so this is retried. It checks the BYTES and
+      # the latest marker, not just a 200: a release page that redirects to
+      # another version's asset also answers 200.
+      - name: latest points at this version, byte for byte
+        if: inputs.dry_run != true
         run: |
           set -euo pipefail
+          VERSION=$(node -p "require('./package.json').version")
+          WANT="${{ steps.tarball.outputs.sha1 }}"
+          LATEST_TAG=$(gh release view --repo "$GITHUB_REPOSITORY" --json tagName --jq .tagName)
+          [ "$LATEST_TAG" = "v$VERSION" ] || {
+            echo "::error::latest is $LATEST_TAG, not v$VERSION"
+            exit 1
+          }
           URL="https://github.com/${GITHUB_REPOSITORY}/releases/latest/download/dsh-boost.tgz"
-          for attempt in $(seq 1 6); do
-            CODE=$(curl -sL -o /dev/null -w '%{http_code}' "$URL" || echo 000)
-            if [ "$CODE" = "200" ]; then
-              echo "$URL → 200 (attempt $attempt)"
+          for attempt in $(seq 1 30); do
+            GOT=$(curl -sL "$URL" | sha1sum | cut -d' ' -f1)
+            if [ "$GOT" = "$WANT" ]; then
+              echo "$URL → sha1 $GOT (attempt $attempt)"
               exit 0
             fi
-            echo "attempt $attempt → $CODE"
-            sleep 20
+            echo "attempt $attempt: sha1 $GOT"
+            [ "$attempt" -lt 30 ] && sleep 20
           done
-          echo "::error::$URL never answered 200"
+          echo "::error::$URL never served sha1 $WANT"
           exit 1
