@@ -138,6 +138,39 @@ test('every step that calls gh carries a token', () => {
   }
 })
 
+test('the release body is a change list: one line per PR', () => {
+  // AGENTS.md: a release body opens with a summary, then lists changes one PR
+  // per line — ten changes inside one PR still get one line, and the mechanism,
+  // root cause and measurements stay in the PR and the issue. 0.4.7–0.4.9 were
+  // written as diagnosis reports instead; this pins the shape so it cannot
+  // drift back silently.
+  const path = `docs/releases/v${VERSION}.md`
+  const text = read(path)
+  const en = text.indexOf('**English**')
+  const halves: [string, string][] = [
+    ['中文', text.slice(text.indexOf('**中文**'), en)],
+    ['English', text.slice(en)],
+  ]
+  const counts = halves.map(([label, half]) => {
+    const bullets = half.split('\n').filter((line) => /^- /.test(line))
+    assert.ok(bullets.length > 0, `${path}: the ${label} half lists no changes`)
+    for (const bullet of bullets) {
+      assert.match(bullet, /#\d+/, `${path}: ${label} bullet names no PR — ${bullet.slice(0, 60)}`)
+    }
+    const seen = new Map<string, string>()
+    for (const bullet of bullets) {
+      for (const ref of bullet.match(/#\d+/g) ?? []) {
+        const previous = seen.get(ref)
+        assert.equal(previous, undefined,
+          `${path}: ${ref} appears in two ${label} bullets — one PR is one line`)
+        seen.set(ref, bullet)
+      }
+    }
+    return bullets.length
+  })
+  assert.equal(counts[0], counts[1], `${path}: the two halves list different numbers of changes`)
+})
+
 test('a moved tag is detected from the registry, not assumed away', () => {
   const state = byId('state')
   assert.match(runOf(state), /gitHead/,
